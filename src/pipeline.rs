@@ -6,8 +6,9 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::attribution::PendingAttributor;
 use crate::capture::{CaptureSource, Flow};
+use crate::attribution::{self, PendingAttributor};
+use crate::process_probe::ProcessProbe;
 #[cfg(test)]
 use crate::proc_table;
 use crate::proc_table::SharedProcTable;
@@ -99,17 +100,25 @@ fn capture_loop<N, E>(
     }
 }
 
-fn aggregate_loop(
+fn aggregate_loop_with_probe(
     flow_rx: Receiver<Flow>,
     snapshot_tx: SyncSender<Arc<TrafficSnapshot>>,
     proc_table: SharedProcTable,
     top_n: usize,
     snapshot_interval: Duration,
+    probe: Option<ProcessProbe>,
     stop: Arc<AtomicBool>,
     failure: Arc<OnceLock<PipelineError>>,
 ) {
     let mut stats = Stats::default();
-    let mut attributor = PendingAttributor::default();
+    let mut attributor = match probe {
+        Some(probe) => PendingAttributor::with_probe(
+            attribution::PENDING_ATTRIBUTION_WINDOW,
+            attribution::PENDING_ATTRIBUTION_CAPACITY,
+            probe,
+        ),
+        None => PendingAttributor::default(),
+    };
     let mut next_snapshot = Instant::now() + snapshot_interval;
     let mut last_published_pending_nonempty = false;
 
@@ -176,6 +185,28 @@ fn aggregate_loop(
             }
         }
     }
+}
+
+#[cfg(test)]
+fn aggregate_loop(
+    flow_rx: Receiver<Flow>,
+    snapshot_tx: SyncSender<Arc<TrafficSnapshot>>,
+    proc_table: SharedProcTable,
+    top_n: usize,
+    snapshot_interval: Duration,
+    stop: Arc<AtomicBool>,
+    failure: Arc<OnceLock<PipelineError>>,
+) {
+    aggregate_loop_with_probe(
+        flow_rx,
+        snapshot_tx,
+        proc_table,
+        top_n,
+        snapshot_interval,
+        None,
+        stop,
+        failure,
+    );
 }
 
 fn snapshot_for_publish(
@@ -276,13 +307,14 @@ impl TrafficPipeline {
         let aggregate_failure = failure.clone();
         let aggregate_thread = spawn_thread(
             "delray-aggregate",
-            Box::new(move || {
-                aggregate_loop(
+        Box::new(move || {
+                aggregate_loop_with_probe(
                     flow_rx,
                     snapshot_tx,
                     proc_table,
                     top_n,
                     SNAPSHOT_INTERVAL,
+                    Some(ProcessProbe::spawn()),
                     aggregate_stop,
                     aggregate_failure,
                 );

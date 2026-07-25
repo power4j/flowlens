@@ -7,10 +7,9 @@
 //! 选首字节路由而非链式（TLS 失败再试 HTTP）的理由：
 //! 1. 性能：HTTP 请求不会被 tls-parser 尝试（反之亦然），每次解析仅一个 parser
 //!    被调用；
-//! 2. 清晰：路由规则与 wire format 对应，不依赖 parser 实现的失败行为（例如
-//!    tls-parser 对部分 HTTP 字节可能 panic 或返回不确定错误）；
-//! 3. 调研文档 `docs/local/research/2026-07-21-outbound-domain-rust-crates.md`
-//!    整合路径示例已采用此模式（"判断首字节 0x16 ... 后调用 parse_tls_plaintext"）。
+//! 2. 清晰：路由规则与 wire format 对应；
+//! 3. 可预测：不依赖 parser 实现的失败行为（例如 tls-parser 对部分 HTTP
+//!    字节可能 panic 或返回不确定错误）。
 //!
 //! 非 TLS 非 HTTP 的字节（任意 0x16 之外的二进制）会落到 HTTP parser，由
 //! httparse 返回 None（与 spec Q12 "首包解析失败标记 NoDomain" 一致）。

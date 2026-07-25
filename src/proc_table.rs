@@ -51,6 +51,9 @@ struct ProcDiagnostics {
     lookup_no_candidate: AtomicU64,
     lookup_ambiguous: AtomicU64,
     lookup_stale: AtomicU64,
+    lookup_no_candidate_bytes: AtomicU64,
+    lookup_ambiguous_bytes: AtomicU64,
+    lookup_stale_bytes: AtomicU64,
     lookup_v4_mapped_hits: AtomicU64,
     no_local_socket: AtomicU64,
     refresh_requests: AtomicU64,
@@ -79,6 +82,9 @@ pub(crate) struct ProcDiagnosticsSnapshot {
     pub lookup_no_candidate: u64,
     pub lookup_ambiguous: u64,
     pub lookup_stale: u64,
+    pub lookup_no_candidate_bytes: u64,
+    pub lookup_ambiguous_bytes: u64,
+    pub lookup_stale_bytes: u64,
     pub lookup_v4_mapped_hits: u64,
     pub no_local_socket: u64,
     pub refresh_requests: u64,
@@ -207,23 +213,23 @@ impl ProcTable {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn record_lookup_miss(&self, reason: LookupMissReason) {
+    pub(crate) fn record_lookup_miss_bytes(&self, reason: LookupMissReason, bytes: u64) {
         self.diagnostics
             .lookup_misses
             .fetch_add(1, Ordering::Relaxed);
         match reason {
-            LookupMissReason::NoCandidate => self
-                .diagnostics
-                .lookup_no_candidate
-                .fetch_add(1, Ordering::Relaxed),
-            LookupMissReason::Ambiguous => self
-                .diagnostics
-                .lookup_ambiguous
-                .fetch_add(1, Ordering::Relaxed),
-            LookupMissReason::Stale => self
-                .diagnostics
-                .lookup_stale
-                .fetch_add(1, Ordering::Relaxed),
+            LookupMissReason::NoCandidate => {
+                self.diagnostics.lookup_no_candidate.fetch_add(1, Ordering::Relaxed);
+                self.diagnostics.lookup_no_candidate_bytes.fetch_add(bytes, Ordering::Relaxed);
+            }
+            LookupMissReason::Ambiguous => {
+                self.diagnostics.lookup_ambiguous.fetch_add(1, Ordering::Relaxed);
+                self.diagnostics.lookup_ambiguous_bytes.fetch_add(bytes, Ordering::Relaxed);
+            }
+            LookupMissReason::Stale => {
+                self.diagnostics.lookup_stale.fetch_add(1, Ordering::Relaxed);
+                self.diagnostics.lookup_stale_bytes.fetch_add(bytes, Ordering::Relaxed);
+            }
         };
     }
 
@@ -310,6 +316,18 @@ impl ProcTable {
             lookup_no_candidate: self.diagnostics.lookup_no_candidate.load(Ordering::Relaxed),
             lookup_ambiguous: self.diagnostics.lookup_ambiguous.load(Ordering::Relaxed),
             lookup_stale: self.diagnostics.lookup_stale.load(Ordering::Relaxed),
+            lookup_no_candidate_bytes: self
+                .diagnostics
+                .lookup_no_candidate_bytes
+                .load(Ordering::Relaxed),
+            lookup_ambiguous_bytes: self
+                .diagnostics
+                .lookup_ambiguous_bytes
+                .load(Ordering::Relaxed),
+            lookup_stale_bytes: self
+                .diagnostics
+                .lookup_stale_bytes
+                .load(Ordering::Relaxed),
             lookup_v4_mapped_hits: self
                 .diagnostics
                 .lookup_v4_mapped_hits
@@ -1095,7 +1113,7 @@ mod tests {
             .unwrap();
 
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
-            LookupOutcome::Miss(reason) => table.record_lookup_miss(reason),
+            LookupOutcome::Miss(reason) => table.record_lookup_miss_bytes(reason, 10),
             LookupOutcome::Hit { .. } => panic!("empty table should not match"),
         }
 
@@ -1110,13 +1128,13 @@ mod tests {
             )
             .unwrap();
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
-            LookupOutcome::Miss(reason) => table.record_lookup_miss(reason),
+            LookupOutcome::Miss(reason) => table.record_lookup_miss_bytes(reason, 20),
             LookupOutcome::Hit { .. } => panic!("ambiguous table should not match"),
         }
 
         table.expire_for_test();
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
-            LookupOutcome::Miss(reason) => table.record_lookup_miss(reason),
+            LookupOutcome::Miss(reason) => table.record_lookup_miss_bytes(reason, 30),
             LookupOutcome::Hit { .. } => panic!("stale table should not match"),
         }
 
@@ -1125,6 +1143,9 @@ mod tests {
         assert_eq!(diagnostics.lookup_no_candidate, 1);
         assert_eq!(diagnostics.lookup_ambiguous, 1);
         assert_eq!(diagnostics.lookup_stale, 1);
+        assert_eq!(diagnostics.lookup_no_candidate_bytes, 10);
+        assert_eq!(diagnostics.lookup_ambiguous_bytes, 20);
+        assert_eq!(diagnostics.lookup_stale_bytes, 30);
     }
 
     #[test]

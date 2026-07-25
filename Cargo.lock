@@ -400,6 +400,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tls-parser",
+ "windows",
 ]
 
 [[package]]

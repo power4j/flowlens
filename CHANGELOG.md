@@ -16,6 +16,8 @@ All notable changes to Delray are recorded in this file.
 
 ### Fixed
 
+- Improved Windows TCP process attribution by matching active connections with both local and remote endpoints, with a conservative fallback for short-lived connections.
+
 ### Removed
 
 ### Deprecated

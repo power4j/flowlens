@@ -8,10 +8,14 @@ mod flow_table;
 mod palette;
 mod pipeline;
 mod proc_table;
+mod process_probe;
 mod report;
 mod session;
 mod stats;
 mod tui;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod windows_connection_probe;
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -184,7 +188,11 @@ fn background_loop(
     diagnostics: bool,
 ) {
     let mut stats = stats::Stats::default();
-    let mut attributor = attribution::PendingAttributor::default();
+    let mut attributor = attribution::PendingAttributor::with_probe(
+        attribution::PENDING_ATTRIBUTION_WINDOW,
+        attribution::PENDING_ATTRIBUTION_CAPACITY,
+        process_probe::ProcessProbe::spawn(),
+    );
     let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
     loop {
         process_next(|| source.next(), proc_table, &mut stats, &mut attributor);
@@ -218,7 +226,11 @@ fn json_stdout_loop(
     diagnostics: bool,
 ) {
     let mut stats = stats::Stats::default();
-    let mut attributor = attribution::PendingAttributor::default();
+    let mut attributor = attribution::PendingAttributor::with_probe(
+        attribution::PENDING_ATTRIBUTION_WINDOW,
+        attribution::PENDING_ATTRIBUTION_CAPACITY,
+        process_probe::ProcessProbe::spawn(),
+    );
     let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
     loop {
         process_next(|| source.next(), proc_table, &mut stats, &mut attributor);
@@ -246,10 +258,18 @@ fn emit_diagnostics(
         concat!(
             "diagnostics: lookup_hits={} lookup_misses={} no_local_socket={} ",
             "lookup_no_candidate={} lookup_ambiguous={} lookup_stale={} ",
+            "lookup_no_candidate_bytes={} lookup_ambiguous_bytes={} lookup_stale_bytes={} ",
             "lookup_v4_mapped_hits={} ",
             "refresh_requests={} refresh_actual={} refresh_success={} refresh_failure={} ",
             "refresh_records={} refresh_v4_mapped_records={} ",
-            "last_refresh_ms={} pending_records={} pending_bytes={}"
+            "last_refresh_ms={} pending_records={} pending_bytes={} ",
+            "probe_request_queued={} probe_result_unique={} ",
+            "probe_result_not_found={} probe_result_ambiguous={} ",
+            "probe_result_unavailable={} probe_result_dropped={} probe_result_late={} ",
+            "probe_query_count={} probe_query_ms={} probe_last_query_ms={} ",
+            " pending_expired_bytes={} pending_capacity_bytes={} ",
+            "probe_unique_pending_bytes={} probe_not_found_pending_bytes={} ",
+            "probe_ambiguous_pending_bytes={} probe_unavailable_pending_bytes={}"
         ),
         proc.lookup_hits,
         proc.lookup_misses,
@@ -257,6 +277,9 @@ fn emit_diagnostics(
         proc.lookup_no_candidate,
         proc.lookup_ambiguous,
         proc.lookup_stale,
+        proc.lookup_no_candidate_bytes,
+        proc.lookup_ambiguous_bytes,
+        proc.lookup_stale_bytes,
         proc.lookup_v4_mapped_hits,
         proc.refresh_requests,
         proc.refresh_actual,
@@ -267,6 +290,22 @@ fn emit_diagnostics(
         proc.last_refresh_duration.as_millis(),
         pending.records,
         pending.bytes,
+        pending.probe_request_queued,
+        pending.probe_result_unique,
+        pending.probe_result_not_found,
+        pending.probe_result_ambiguous,
+        pending.probe_result_unavailable,
+        pending.probe_result_dropped,
+        pending.probe_result_late,
+        pending.probe_query_count,
+        pending.probe_query_ms,
+        pending.probe_last_query_ms,
+        pending.pending_expired_bytes,
+        pending.pending_capacity_bytes,
+        pending.probe_unique_pending_bytes,
+        pending.probe_not_found_pending_bytes,
+        pending.probe_ambiguous_pending_bytes,
+        pending.probe_unavailable_pending_bytes,
     );
     for sample in proc.lookup_miss_samples {
         eprintln!(

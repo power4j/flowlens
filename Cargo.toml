@@ -22,3 +22,10 @@ listeners = "0.6"
 tls-parser = { version = "0.12", default-features = false }
 httparse = "1.10"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+]
