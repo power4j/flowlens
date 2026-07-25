@@ -90,7 +90,7 @@ impl LayoutMode {
 
 const MIN_TERMINAL_WIDTH: u16 = 60;
 const MIN_TERMINAL_HEIGHT: u16 = 16;
-const PENDING_STATUS_SLOT_WIDTH: usize = 11;
+const PENDING_STATUS_SLOT_WIDTH: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrackingPause {
@@ -1511,11 +1511,28 @@ fn pending_status_title(bytes: u64, area_width: u16) -> Line<'static> {
     } else {
         PENDING_STATUS_SLOT_WIDTH
     };
-    let label = if bytes == 0 {
-        String::new()
+    let label = if slot_width == 1 {
+        if bytes == 0 {
+            String::new()
+        } else {
+            "?".to_string()
+        }
     } else {
-        let full = format!("? {}", human_bytes(bytes));
-        if full.chars().count() <= slot_width {
+        const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+        let mut value = bytes as f64;
+        let mut unit_index = 0;
+        while unit_index < UNITS.len() - 1 && (value * 100.0).round() / 100.0 >= 1024.0 {
+            value /= 1024.0;
+            unit_index += 1;
+        }
+        let unit = UNITS[unit_index];
+        let rounded_value = (value * 100.0).round() / 100.0;
+        let full = if unit_index == UNITS.len() - 1 && rounded_value >= 1024.0 {
+            "?".to_string()
+        } else {
+            format!("? {value:>7.2} {unit:>2}")
+        };
+        if full.chars().count() <= PENDING_STATUS_SLOT_WIDTH {
             full
         } else {
             "?".to_string()
@@ -1524,7 +1541,11 @@ fn pending_status_title(bytes: u64, area_width: u16) -> Line<'static> {
     let padding = slot_width.saturating_sub(label.chars().count());
     Line::from(Span::styled(
         format!("{}{}", " ".repeat(padding), label),
-        Style::default().fg(palette::warn()),
+        Style::default().fg(if bytes == 0 {
+            palette::muted()
+        } else {
+            palette::warn()
+        }),
     ))
     .alignment(Alignment::Right)
 }
@@ -2629,6 +2650,31 @@ mod tests {
             .collect()
     }
 
+    fn render_processes_with_pending(bytes: u64) -> Terminal<TestBackend> {
+        let snapshot = TrafficSnapshot {
+            pending_attribution_bytes: bytes,
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        terminal
+    }
+
+    fn assert_pending_indicator_color(terminal: &Terminal<TestBackend>, expected: Color) {
+        let indicator = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "?")
+            .expect("pending attribution indicator");
+        assert_eq!(indicator.fg, expected);
+    }
+
     fn assert_unattributed_style(terminal: &Terminal<TestBackend>) {
         let rendered = rendered_lines(terminal).join("\n");
         assert!(rendered.contains("<unattributed traffic>"));
@@ -3029,30 +3075,51 @@ mod tests {
 
     #[test]
     fn processes_page_shows_pending_attribution_in_the_border() {
-        let snapshot = TrafficSnapshot {
-            pending_attribution_bytes: 1536,
-            processes: vec![ProcessSnapshot::attributed(
-                7,
-                Some(Arc::from("curl")),
-                None,
-                chrono::Utc::now(),
-                40,
-                60,
-            )]
-            .into(),
-            ..TrafficSnapshot::default()
-        };
-        let mut state = AppState::new();
-        state.page = Page::Processes;
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-
-        terminal
-            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
-            .unwrap();
+        let terminal = render_processes_with_pending(1536);
 
         let rendered = rendered_lines(&terminal).join("\n");
-        assert!(rendered.contains("proc Processes 1"));
-        assert!(rendered.contains("? 1.50 KB"));
+        assert!(rendered.contains("proc Processes 0"));
+        assert!(rendered.contains("?    1.50 KB"));
+        assert_pending_indicator_color(&terminal, palette::warn());
+    }
+
+    #[test]
+    fn processes_page_shows_zero_pending_attribution_in_muted_fixed_width_text() {
+        let terminal = render_processes_with_pending(0);
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("?    0.00  B"));
+        assert_pending_indicator_color(&terminal, palette::muted());
+    }
+
+    #[test]
+    fn processes_page_promotes_pending_attribution_unit_after_rounding() {
+        let terminal = render_processes_with_pending(1024 * 1024 - 1);
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("?    1.00 MB"));
+        assert!(!rendered.contains("1024.00 KB"));
+    }
+
+    #[test]
+    fn processes_page_keeps_pending_attribution_value_in_seven_columns() {
+        let terminal = render_processes_with_pending(1023 * 1024);
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("? 1023.00 KB"));
+    }
+
+    #[test]
+    fn processes_page_degrades_pending_attribution_beyond_tb_capacity() {
+        let terminal = render_processes_with_pending(1024_u64.pow(5));
+
+        let lines = rendered_lines(&terminal);
+        let process_border = lines
+            .iter()
+            .find(|line| line.contains("proc Processes"))
+            .expect("process panel border");
+        assert!(process_border.contains("           ?"));
+        assert!(!process_border.contains("TB"));
     }
 
     #[test]
@@ -3069,7 +3136,7 @@ mod tests {
             .unwrap();
 
         let rendered = rendered_lines(&terminal).join("\n");
-        assert!(!rendered.contains("? 1.50 KB"));
+        assert!(!rendered.contains("?    1.50 KB"));
     }
 
     #[test]
