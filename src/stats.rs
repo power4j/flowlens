@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use crate::capture::Flow;
 
-// Keep recent per-direction peer history bounded under high-cardinality traffic.
+// Keep per-direction peer history bounded while retaining high-volume behavior.
 const MAX_IP_DIMENSION_ENTRIES: usize = 16_384;
 // Evict in batches so a burst of new peers does not scan the map per packet.
 const IP_DIMENSION_PRUNE_BATCH: usize = 256;
@@ -519,13 +519,16 @@ fn prune_ip_dimension(
         return;
     }
 
-    let mut oldest = last_seen_by_ip
+    let mut least_traffic = bytes_by_ip
         .iter()
-        .map(|(ip, last_seen)| (*ip, *last_seen))
+        .map(|(ip, bytes)| (*ip, *bytes))
         .collect::<Vec<_>>();
-    oldest.sort_unstable_by_key(|(_, last_seen)| *last_seen);
+    least_traffic.select_nth_unstable_by_key(IP_DIMENSION_PRUNE_BATCH - 1, |(_, bytes)| *bytes);
 
-    for (ip, _) in oldest.into_iter().take(IP_DIMENSION_PRUNE_BATCH) {
+    for (ip, _) in least_traffic
+        .into_iter()
+        .take(IP_DIMENSION_PRUNE_BATCH)
+    {
         bytes_by_ip.remove(&ip);
         last_seen_by_ip.remove(&ip);
     }
@@ -540,7 +543,6 @@ fn top_n_ip(map: &HashMap<IpAddr, u64>, n: usize) -> Vec<(IpAddr, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Duration;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
@@ -650,15 +652,15 @@ mod tests {
     }
 
     #[test]
-    fn ip_dimension_prunes_oldest_without_changing_totals() {
+    fn ip_dimension_prunes_lowest_traffic_without_changing_totals() {
         let mut stats = Stats::default();
-        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
 
         for index in 0..MAX_IP_DIMENSION_ENTRIES {
             stats.record_flow_at(
-                flow_ip(Direction::Inbound, unique_ip(index), 1),
+                flow_ip(Direction::Inbound, unique_ip(index), (index + 1) as u64),
                 None,
-                first + Duration::seconds(index as i64),
+                observed_at,
             );
         }
         for offset in 0..IP_DIMENSION_PRUNE_BATCH {
@@ -666,17 +668,18 @@ mod tests {
                 flow_ip(
                     Direction::Inbound,
                     unique_ip(MAX_IP_DIMENSION_ENTRIES + offset),
-                    1,
+                    1_000_000,
                 ),
                 None,
-                first + Duration::seconds((MAX_IP_DIMENSION_ENTRIES + offset) as i64),
+                observed_at,
             );
         }
 
         let snapshot = stats.snapshot(MAX_IP_DIMENSION_ENTRIES);
         assert_eq!(
             snapshot.in_bytes,
-            (MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH) as u64
+            (MAX_IP_DIMENSION_ENTRIES * (MAX_IP_DIMENSION_ENTRIES + 1) / 2) as u64
+                + (IP_DIMENSION_PRUNE_BATCH * 1_000_000) as u64
         );
         assert_eq!(snapshot.out_bytes, 0);
         assert_eq!(snapshot.inbound_ips.len(), MAX_IP_DIMENSION_ENTRIES);
@@ -687,7 +690,7 @@ mod tests {
         assert!(snapshot
             .inbound_ips
             .iter()
-            .any(|entry| entry.ip == unique_ip(MAX_IP_DIMENSION_ENTRIES - 1)));
+            .any(|entry| entry.ip == unique_ip(IP_DIMENSION_PRUNE_BATCH)));
         assert!(snapshot.inbound_ips.iter().any(|entry| {
             entry.ip == unique_ip(MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH - 1)
         }));
