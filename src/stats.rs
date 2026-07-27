@@ -543,6 +543,7 @@ fn top_n_ip(map: &HashMap<IpAddr, u64>, n: usize) -> Vec<(IpAddr, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
@@ -654,13 +655,13 @@ mod tests {
     #[test]
     fn ip_dimension_prunes_lowest_traffic_without_changing_totals() {
         let mut stats = Stats::default();
-        let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
 
         for index in 0..MAX_IP_DIMENSION_ENTRIES {
             stats.record_flow_at(
                 flow_ip(Direction::Inbound, unique_ip(index), (index + 1) as u64),
                 None,
-                observed_at,
+                first + Duration::seconds((MAX_IP_DIMENSION_ENTRIES - index) as i64),
             );
         }
         for offset in 0..IP_DIMENSION_PRUNE_BATCH {
@@ -671,7 +672,7 @@ mod tests {
                     1_000_000,
                 ),
                 None,
-                observed_at,
+                first,
             );
         }
 
