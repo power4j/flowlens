@@ -207,7 +207,12 @@ fn background_loop(
                 eprintln!("Failed to write output file: {e}");
             }
             if diagnostics {
-                emit_diagnostics(proc_table, &attributor);
+                emit_diagnostics(
+                    proc_table,
+                    &attributor,
+                    &stats,
+                    source.flow_table_entry_count(),
+                );
             }
             next_refresh = Instant::now() + REFRESH_INTERVAL;
         }
@@ -238,7 +243,12 @@ fn json_stdout_loop(
             attributor.advance(&mut stats, proc_table, Instant::now());
             report::render_jsonl(interface, started_wall, started_at, &stats, top_n);
             if diagnostics {
-                emit_diagnostics(proc_table, &attributor);
+                emit_diagnostics(
+                    proc_table,
+                    &attributor,
+                    &stats,
+                    source.flow_table_entry_count(),
+                );
             }
             next_refresh = Instant::now() + REFRESH_INTERVAL;
         }
@@ -248,12 +258,15 @@ fn json_stdout_loop(
 fn emit_diagnostics(
     proc_table: &proc_table::SharedProcTable,
     attributor: &attribution::PendingAttributor,
+    stats: &stats::Stats,
+    flow_table_entries: u64,
 ) {
     let Some(proc) = proc_table::diagnostics_snapshot(proc_table) else {
         eprintln!("diagnostics: process table unavailable");
         return;
     };
     let pending = attributor.snapshot();
+    let stats = stats.diagnostics_snapshot();
     eprintln!(
         concat!(
             "diagnostics: lookup_hits={} lookup_misses={} no_local_socket={} ",
@@ -262,6 +275,8 @@ fn emit_diagnostics(
             "lookup_v4_mapped_hits={} ",
             "refresh_requests={} refresh_actual={} refresh_success={} refresh_failure={} ",
             "refresh_records={} refresh_v4_mapped_records={} ",
+            "flow_table_entries={} inbound_ip_entries={} outbound_ip_entries={} ",
+            "process_entries={} domain_entries={} ",
             "last_refresh_ms={} pending_records={} pending_bytes={} ",
             "probe_request_queued={} probe_result_unique={} ",
             "probe_result_not_found={} probe_result_ambiguous={} ",
@@ -287,6 +302,11 @@ fn emit_diagnostics(
         proc.refresh_failure,
         proc.refresh_records,
         proc.refresh_v4_mapped_records,
+        flow_table_entries,
+        stats.inbound_ip_entries,
+        stats.outbound_ip_entries,
+        stats.process_entries,
+        stats.domain_entries,
         proc.last_refresh_duration.as_millis(),
         pending.records,
         pending.bytes,

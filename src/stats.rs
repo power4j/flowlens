@@ -6,6 +6,11 @@ use chrono::{DateTime, Utc};
 
 use crate::capture::Flow;
 
+// Keep recent per-direction peer history bounded under high-cardinality traffic.
+const MAX_IP_DIMENSION_ENTRIES: usize = 16_384;
+// Evict in batches so a burst of new peers does not scan the map per packet.
+const IP_DIMENSION_PRUNE_BATCH: usize = 256;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Direction {
     Inbound,
@@ -236,6 +241,14 @@ pub struct Stats {
     domain_last_seen: HashMap<Arc<str>, DateTime<Utc>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatsDiagnostics {
+    pub inbound_ip_entries: usize,
+    pub outbound_ip_entries: usize,
+    pub process_entries: usize,
+    pub domain_entries: usize,
+}
+
 /// 按域名累计的双向字节计数，对齐 ProcTraffic 的 recv/sent 拆分。
 #[derive(Default, Clone, Copy)]
 struct DomainTraffic {
@@ -246,14 +259,29 @@ struct DomainTraffic {
 }
 
 impl Stats {
+    pub(crate) fn diagnostics_snapshot(&self) -> StatsDiagnostics {
+        StatsDiagnostics {
+            inbound_ip_entries: self.in_by_ip.len(),
+            outbound_ip_entries: self.out_by_ip.len(),
+            process_entries: self.by_proc.len(),
+            domain_entries: self.by_domain.len(),
+        }
+    }
+
     fn add_in(&mut self, source: IpAddr, bytes: u64, observed_at: DateTime<Utc>) {
         self.in_bytes += bytes;
+        if !self.in_by_ip.contains_key(&source) {
+            prune_ip_dimension(&mut self.in_by_ip, &mut self.in_ip_last_seen);
+        }
         *self.in_by_ip.entry(source).or_default() += bytes;
         self.in_ip_last_seen.insert(source, observed_at);
     }
 
     fn add_out(&mut self, destination: IpAddr, bytes: u64, observed_at: DateTime<Utc>) {
         self.out_bytes += bytes;
+        if !self.out_by_ip.contains_key(&destination) {
+            prune_ip_dimension(&mut self.out_by_ip, &mut self.out_ip_last_seen);
+        }
         *self.out_by_ip.entry(destination).or_default() += bytes;
         self.out_ip_last_seen.insert(destination, observed_at);
     }
@@ -483,6 +511,26 @@ impl Stats {
     }
 }
 
+fn prune_ip_dimension(
+    bytes_by_ip: &mut HashMap<IpAddr, u64>,
+    last_seen_by_ip: &mut HashMap<IpAddr, DateTime<Utc>>,
+) {
+    if bytes_by_ip.len() < MAX_IP_DIMENSION_ENTRIES {
+        return;
+    }
+
+    let mut oldest = last_seen_by_ip
+        .iter()
+        .map(|(ip, last_seen)| (*ip, *last_seen))
+        .collect::<Vec<_>>();
+    oldest.sort_unstable_by_key(|(_, last_seen)| *last_seen);
+
+    for (ip, _) in oldest.into_iter().take(IP_DIMENSION_PRUNE_BATCH) {
+        bytes_by_ip.remove(&ip);
+        last_seen_by_ip.remove(&ip);
+    }
+}
+
 fn top_n_ip(map: &HashMap<IpAddr, u64>, n: usize) -> Vec<(IpAddr, u64)> {
     let mut entries: Vec<(IpAddr, u64)> = map.iter().map(|(ip, bytes)| (*ip, *bytes)).collect();
     entries.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
@@ -492,6 +540,7 @@ fn top_n_ip(map: &HashMap<IpAddr, u64>, n: usize) -> Vec<(IpAddr, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
@@ -544,6 +593,104 @@ mod tests {
         let snapshot = Stats::default().snapshot(10);
 
         assert!(snapshot.processes.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_snapshot_reports_current_dimension_cardinality() {
+        let mut stats = Stats::default();
+        let process = ObservedProcess {
+            pid: 7,
+            name: Some(Arc::from("curl")),
+            path: Some(Arc::from("/usr/bin/curl")),
+        };
+        let domain: Arc<str> = Arc::from("example.com");
+
+        stats.record_flow(
+            flow_with_domain(
+                Direction::Outbound,
+                [203, 0, 113, 1],
+                40,
+                Some(domain.clone()),
+            ),
+            Some(process.clone()),
+        );
+        stats.record_flow(
+            flow_with_domain(Direction::Inbound, [203, 0, 113, 2], 20, Some(domain)),
+            Some(process),
+        );
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_ip_entries, 1);
+        assert_eq!(diagnostics.outbound_ip_entries, 1);
+        assert_eq!(diagnostics.process_entries, 1);
+        assert_eq!(diagnostics.domain_entries, 1);
+    }
+
+    #[test]
+    fn ip_dimensions_are_bounded_per_direction() {
+        let mut stats = Stats::default();
+        let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+
+        for index in 0..(MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH * 2) {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), 1),
+                None,
+                observed_at,
+            );
+            stats.record_flow_at(
+                flow_ip(Direction::Outbound, unique_ip(index + 1_000_000), 1),
+                None,
+                observed_at,
+            );
+        }
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_ip_entries, MAX_IP_DIMENSION_ENTRIES);
+        assert_eq!(diagnostics.outbound_ip_entries, MAX_IP_DIMENSION_ENTRIES);
+    }
+
+    #[test]
+    fn ip_dimension_prunes_oldest_without_changing_totals() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+
+        for index in 0..MAX_IP_DIMENSION_ENTRIES {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), 1),
+                None,
+                first + Duration::seconds(index as i64),
+            );
+        }
+        for offset in 0..IP_DIMENSION_PRUNE_BATCH {
+            stats.record_flow_at(
+                flow_ip(
+                    Direction::Inbound,
+                    unique_ip(MAX_IP_DIMENSION_ENTRIES + offset),
+                    1,
+                ),
+                None,
+                first + Duration::seconds((MAX_IP_DIMENSION_ENTRIES + offset) as i64),
+            );
+        }
+
+        let snapshot = stats.snapshot(MAX_IP_DIMENSION_ENTRIES);
+        assert_eq!(
+            snapshot.in_bytes,
+            (MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH) as u64
+        );
+        assert_eq!(snapshot.out_bytes, 0);
+        assert_eq!(snapshot.inbound_ips.len(), MAX_IP_DIMENSION_ENTRIES);
+        assert!(!snapshot
+            .inbound_ips
+            .iter()
+            .any(|entry| entry.ip == unique_ip(0)));
+        assert!(snapshot
+            .inbound_ips
+            .iter()
+            .any(|entry| entry.ip == unique_ip(MAX_IP_DIMENSION_ENTRIES - 1)));
+        assert!(snapshot.inbound_ips.iter().any(|entry| {
+            entry.ip == unique_ip(MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH - 1)
+        }));
     }
 
     #[test]
@@ -956,9 +1103,13 @@ mod tests {
     }
 
     fn flow(direction: Direction, peer: [u8; 4], bytes: u64) -> Flow {
+        flow_ip(direction, ip(peer), bytes)
+    }
+
+    fn flow_ip(direction: Direction, peer: IpAddr, bytes: u64) -> Flow {
         Flow {
             direction,
-            peer: ip(peer),
+            peer,
             peer_port: None,
             bytes,
             local_socket: None,
@@ -986,5 +1137,15 @@ mod tests {
 
     fn ip(octets: [u8; 4]) -> IpAddr {
         IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
+    fn unique_ip(index: usize) -> IpAddr {
+        let index = index as u32;
+        IpAddr::V4(Ipv4Addr::new(
+            10,
+            ((index >> 16) & 0xff) as u8,
+            ((index >> 8) & 0xff) as u8,
+            (index & 0xff) as u8,
+        ))
     }
 }
