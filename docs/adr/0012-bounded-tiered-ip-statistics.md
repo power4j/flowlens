@@ -6,8 +6,8 @@ IP traffic dimensions use one bounded state per direction, with a five-minute ro
 
 Tier selection and eviction use separate signals rather than one weighted score:
 
-- Heavy tier: highest lifetime bytes, with a 70% minimum reservation.
-- Rising tier: the union of relative rankings by recent-window bytes and surge bytes, with a 20% minimum reservation.
+- Rising tier: the union of relative rankings by recent-window bytes and surge bytes, selected before Heavy so eligible rising candidates retain a minimum relative share up to the 20% reservation.
+- Heavy tier: highest lifetime bytes among the remaining eligible candidates, with a 70% minimum reservation; unused Rising capacity may be borrowed only when there are not enough eligible rising candidates.
 - Observation tier: new IPs for at least two buckets, with a 10% minimum reservation; eviction uses current-bucket bytes, then recent-window bytes, then `last_seen` only as a final tie-breaker.
 - Tier changes require a two-bucket hold-down. Three idle windows remove heavy-tier protection, while retained lifetime bytes may remain until capacity pressure evicts the state.
 

@@ -14,8 +14,10 @@ const IP_WINDOW_BUCKETS: usize = 5;
 const IP_BUCKET_SECONDS: i64 = 60;
 const IP_IDLE_WINDOWS: i64 = 3;
 const IP_OBSERVATION_BUCKETS: u8 = 2;
-const IP_HEAVY_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * 70 / 100;
-const IP_RISING_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * 20 / 100;
+const IP_HEAVY_SHARE_PERCENT: usize = 70;
+const IP_RISING_SHARE_PERCENT: usize = 20;
+const IP_HEAVY_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * IP_HEAVY_SHARE_PERCENT / 100;
+const IP_RISING_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * IP_RISING_SHARE_PERCENT / 100;
 const IP_OBSERVATION_RESERVATION: usize =
     IP_DIMENSION_TARGET_ENTRIES - IP_HEAVY_RESERVATION - IP_RISING_RESERVATION;
 
@@ -747,7 +749,15 @@ fn desired_ip_tiers(candidates: &[IpCandidate]) -> HashMap<IpAddr, IpTier> {
         .copied()
         .collect::<Vec<_>>();
 
-    let mut heavy = eligible.clone();
+    let rising_target = eligible.len() * IP_RISING_SHARE_PERCENT / 100;
+    let rising_target = rising_target.min(IP_RISING_RESERVATION);
+    let rising_ips = select_rising_ips(&eligible, rising_target);
+
+    let mut heavy = eligible
+        .iter()
+        .filter(|candidate| !rising_ips.contains(&candidate.ip))
+        .copied()
+        .collect::<Vec<_>>();
     heavy.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.lifetime_bytes));
     let heavy_target = heavy.len().min(IP_HEAVY_RESERVATION);
     let heavy_ips = heavy
@@ -755,15 +765,6 @@ fn desired_ip_tiers(candidates: &[IpCandidate]) -> HashMap<IpAddr, IpTier> {
         .take(heavy_target)
         .map(|candidate| candidate.ip)
         .collect::<HashSet<_>>();
-
-    let rising = eligible
-        .into_iter()
-        .filter(|candidate| !heavy_ips.contains(&candidate.ip))
-        .collect::<Vec<_>>();
-    let rising_target = rising
-        .len()
-        .min(IP_RISING_RESERVATION + IP_HEAVY_RESERVATION.saturating_sub(heavy_target));
-    let rising_ips = select_rising_ips(&rising, rising_target);
 
     candidates
         .iter()
@@ -1167,6 +1168,36 @@ mod tests {
         assert_eq!(diagnostics.inbound_heavy_ip_entries, 1);
         assert_eq!(diagnostics.inbound_observation_ip_entries, 0);
         assert_eq!(diagnostics.ip_promotions, 1);
+    }
+
+    #[test]
+    fn rising_tier_keeps_recent_candidates_when_heavy_capacity_is_unused() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+
+        for index in 0..100 {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), 10),
+                None,
+                first,
+            );
+        }
+        for index in 0..100 {
+            let bytes = if index == 0 { 10_000 } else { 10 };
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), bytes),
+                None,
+                second,
+            );
+        }
+        stats.record_flow_at(flow_ip(Direction::Inbound, unique_ip(0), 1), None, third);
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_rising_ip_entries, 20);
+        assert_eq!(diagnostics.inbound_heavy_ip_entries, 80);
+        assert_eq!(stats.in_ip_windows[&unique_ip(0)].tier, IpTier::Rising);
     }
 
     #[test]
