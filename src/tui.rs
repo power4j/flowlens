@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::capture::InterfaceInfo;
+use crate::diagnostics::DiagnosticsWriter;
 use crate::palette;
 use crate::report::{fmt_elapsed, hostname, human_bytes, truncate};
 use crate::session::{Activation, TrafficSession};
@@ -150,6 +151,7 @@ struct AppState {
     palette_choice: palette::PaletteChoice,
     /// Terminal color tier detected at startup; `Auto` follows this.
     detected_tier: palette::ColorTier,
+    diagnostics_error: Option<String>,
 }
 
 impl AppState {
@@ -170,6 +172,7 @@ impl AppState {
             settings_open: false,
             palette_choice: palette::PaletteChoice::Auto,
             detected_tier: palette::detect_tier(),
+            diagnostics_error: None,
         }
     }
 
@@ -358,7 +361,10 @@ fn finish_tui_activation(
 }
 
 /// Run the TUI until the user quits.
-pub fn run(session: &mut TrafficSession) -> io::Result<()> {
+pub fn run(
+    session: &mut TrafficSession,
+    diagnostics_writer: Option<DiagnosticsWriter>,
+) -> io::Result<()> {
     palette::set_active_tier(palette::detect_tier());
     let started_at = Instant::now();
     let host = hostname();
@@ -385,6 +391,7 @@ pub fn run(session: &mut TrafficSession) -> io::Result<()> {
         &host,
         started_at,
         session,
+        diagnostics_writer,
     );
 
     // Restore terminal regardless of how the event loop exited.
@@ -402,6 +409,7 @@ fn tui_loop(
     host: &str,
     started_at: Instant,
     session: &mut TrafficSession,
+    mut diagnostics_writer: Option<DiagnosticsWriter>,
 ) -> io::Result<()> {
     terminal.draw(|f| {
         draw_with_interfaces(
@@ -458,6 +466,15 @@ fn tui_loop(
         }
 
         if let Some(latest) = session.try_latest().map_err(io::Error::other)? {
+            if let Some(writer) = diagnostics_writer.as_mut()
+                && let Some(diagnostics) = latest.diagnostics.as_ref()
+            {
+                let interface = session.active_interface().unwrap_or("<none>");
+                if let Err(error) = writer.write(interface, diagnostics) {
+                    diagnostics_writer = None;
+                    state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
+                }
+            }
             *snapshot = latest;
             state.update_process_detail(snapshot);
             changed = true;
@@ -2051,6 +2068,13 @@ fn centered_rect(area: Rect, width_pct: u16, height: u16) -> Rect {
 }
 
 fn draw_status_bar(f: &mut ratatui::Frame, area: Rect, state: &mut AppState, mode: LayoutMode) {
+    if let Some(error) = state.diagnostics_error.as_deref() {
+        f.render_widget(
+            Paragraph::new(format!(" {error} ")).style(Style::default().fg(palette::coral())),
+            area,
+        );
+        return;
+    }
     if let Some(detail) = state.process_detail.as_ref() {
         let hint = match (detail.pause_notice, detail.paused) {
             (Some(reason), _) => format!("{}  Esc:back  q:quit", reason.message()),
@@ -3268,6 +3292,7 @@ mod tests {
             )]
             .into(),
             process_data_fresh: false,
+            diagnostics: None,
         };
         let mut state = AppState::new();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

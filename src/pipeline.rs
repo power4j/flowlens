@@ -1,17 +1,18 @@
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::capture::{CaptureSource, Flow};
 use crate::attribution::{self, PendingAttributor};
-use crate::process_probe::ProcessProbe;
+use crate::capture::{CaptureSource, Flow};
+use crate::diagnostics;
 #[cfg(test)]
 use crate::proc_table;
 use crate::proc_table::SharedProcTable;
+use crate::process_probe::ProcessProbe;
 use crate::stats::{Stats, TrafficSnapshot};
 
 const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
@@ -107,6 +108,8 @@ fn aggregate_loop_with_probe(
     top_n: usize,
     snapshot_interval: Duration,
     probe: Option<ProcessProbe>,
+    flow_table_entries: Option<Arc<AtomicU64>>,
+    diagnostics_enabled: bool,
     stop: Arc<AtomicBool>,
     failure: Arc<OnceLock<PipelineError>>,
 ) {
@@ -132,7 +135,15 @@ fn aggregate_loop_with_probe(
         let pending_bytes = attributor.snapshot().bytes;
         let has_pending = pending_bytes > 0;
         if has_pending != last_published_pending_nonempty {
-            let snapshot = snapshot_for_publish(&stats, &proc_table, top_n, pending_bytes);
+            let snapshot = snapshot_for_publish(
+                &stats,
+                &proc_table,
+                &attributor,
+                top_n,
+                pending_bytes,
+                flow_table_entries.as_ref(),
+                false,
+            );
             let published = match snapshot_tx.try_send(Arc::new(snapshot)) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => false,
@@ -148,7 +159,15 @@ fn aggregate_loop_with_probe(
             }
         }
         if now >= next_snapshot {
-            let snapshot = snapshot_for_publish(&stats, &proc_table, top_n, pending_bytes);
+            let snapshot = snapshot_for_publish(
+                &stats,
+                &proc_table,
+                &attributor,
+                top_n,
+                pending_bytes,
+                flow_table_entries.as_ref(),
+                diagnostics_enabled,
+            );
             let snapshot = Arc::new(snapshot);
             match snapshot_tx.try_send(snapshot) {
                 Ok(()) | Err(TrySendError::Full(_)) => {}
@@ -204,6 +223,8 @@ fn aggregate_loop(
         top_n,
         snapshot_interval,
         None,
+        None,
+        false,
         stop,
         failure,
     );
@@ -212,12 +233,26 @@ fn aggregate_loop(
 fn snapshot_for_publish(
     stats: &Stats,
     proc_table: &SharedProcTable,
+    attributor: &PendingAttributor,
     top_n: usize,
     pending_attribution_bytes: u64,
+    flow_table_entries: Option<&Arc<AtomicU64>>,
+    diagnostics_enabled: bool,
 ) -> TrafficSnapshot {
     let mut snapshot = stats.snapshot(top_n);
     snapshot.pending_attribution_bytes = pending_attribution_bytes;
     snapshot.process_data_fresh = proc_table.read().is_ok_and(|table| table.is_fresh());
+    snapshot.diagnostics = if diagnostics_enabled {
+        diagnostics::collect(
+            proc_table,
+            attributor.snapshot(),
+            stats.diagnostics_snapshot(),
+            flow_table_entries.map_or(0, |entries| entries.load(Ordering::Relaxed)),
+        )
+        .map(Arc::new)
+    } else {
+        None
+    };
     snapshot
 }
 
@@ -237,12 +272,22 @@ impl TrafficPipeline {
         mut source: CaptureSource,
         proc_table: SharedProcTable,
         top_n: usize,
+        diagnostics_enabled: bool,
     ) -> io::Result<Self> {
         let breakloop = source.breakloop_handle();
+        let flow_table_entries = Arc::new(AtomicU64::new(0));
+        let capture_flow_table_entries = flow_table_entries.clone();
         Self::spawn_with_next_using(
-            move || source.next(),
+            move || {
+                let result = source.next();
+                capture_flow_table_entries
+                    .store(source.flow_table_entry_count(), Ordering::Relaxed);
+                result
+            },
             proc_table,
             top_n,
+            Some(flow_table_entries),
+            diagnostics_enabled,
             Some(Box::new(move || breakloop.breakloop())),
             spawn_named_thread,
         )
@@ -258,7 +303,15 @@ impl TrafficPipeline {
         N: FnMut() -> Result<Option<Flow>, E> + Send + 'static,
         E: fmt::Display + Send + 'static,
     {
-        Self::spawn_with_next_using(next_flow, proc_table, top_n, None, spawn_named_thread)
+        Self::spawn_with_next_using(
+            next_flow,
+            proc_table,
+            top_n,
+            None,
+            false,
+            None,
+            spawn_named_thread,
+        )
     }
 
     #[cfg(test)]
@@ -277,6 +330,8 @@ impl TrafficPipeline {
             next_flow,
             proc_table,
             top_n,
+            None,
+            false,
             Some(Box::new(wake_capture)),
             spawn_named_thread,
         )
@@ -286,6 +341,8 @@ impl TrafficPipeline {
         next_flow: N,
         proc_table: SharedProcTable,
         top_n: usize,
+        flow_table_entries: Option<Arc<AtomicU64>>,
+        diagnostics_enabled: bool,
         capture_wakeup: Option<CaptureWakeup>,
         mut spawn_thread: S,
     ) -> io::Result<Self>
@@ -307,7 +364,7 @@ impl TrafficPipeline {
         let aggregate_failure = failure.clone();
         let aggregate_thread = spawn_thread(
             "delray-aggregate",
-        Box::new(move || {
+            Box::new(move || {
                 aggregate_loop_with_probe(
                     flow_rx,
                     snapshot_tx,
@@ -315,6 +372,8 @@ impl TrafficPipeline {
                     top_n,
                     SNAPSHOT_INTERVAL,
                     Some(ProcessProbe::spawn()),
+                    flow_table_entries,
+                    diagnostics_enabled,
                     aggregate_stop,
                     aggregate_failure,
                 );
@@ -1054,6 +1113,8 @@ mod tests {
             || Ok::<_, io::Error>(None),
             proc_table,
             10,
+            None,
+            false,
             None,
             move |name, task| {
                 if name == "delray-capture" {

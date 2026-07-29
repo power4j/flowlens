@@ -84,11 +84,19 @@ Limit each top-N list:
 ./delray eth0 --top-n 3
 ```
 
-Show process-attribution diagnostics on standard error:
+Write process-attribution diagnostics as JSONL to the default `.log` file:
 
 ```bash
 ./delray eth0 --format json --diagnostics
 ```
+
+Specify the diagnostics output file:
+
+```bash
+./delray eth0 --diagnostics --diagnostics-output /tmp/delray-diagnostics.jsonl
+```
+
+In TUI mode, diagnostics are written to this file and never to the terminal.
 
 Use `delray --help` for the complete option list.
 

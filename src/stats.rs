@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use crate::capture::Flow;
 
@@ -156,6 +157,87 @@ pub struct TrafficSnapshot {
     pub outbound_ips: Arc<[IpSnapshot]>,
     /// 出站域名维度（05 票）；消费方：TUI 概览/详情页（06-07）、report plain/JSON 输出（08）。
     pub outbound_domains: Arc<[OutboundDomainSnapshot]>,
+    pub diagnostics: Option<Arc<DiagnosticsSnapshot>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsSnapshot {
+    pub counters: DiagnosticsCounters,
+    pub gauges: DiagnosticsGauges,
+    pub ip: DiagnosticsIp,
+    #[serde(skip)]
+    pub miss_samples: Vec<DiagnosticsMissSample>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsCounters {
+    pub lookup_hits: u64,
+    pub lookup_misses: u64,
+    pub lookup_no_candidate: u64,
+    pub lookup_ambiguous: u64,
+    pub lookup_stale: u64,
+    pub lookup_no_candidate_bytes: u64,
+    pub lookup_ambiguous_bytes: u64,
+    pub lookup_stale_bytes: u64,
+    pub lookup_v4_mapped_hits: u64,
+    pub no_local_socket: u64,
+    pub refresh_requests: u64,
+    pub refresh_actual: u64,
+    pub refresh_success: u64,
+    pub refresh_failure: u64,
+    pub refresh_records: u64,
+    pub refresh_v4_mapped_records: u64,
+    pub probe_request_queued: u64,
+    pub probe_result_unique: u64,
+    pub probe_result_not_found: u64,
+    pub probe_result_ambiguous: u64,
+    pub probe_result_unavailable: u64,
+    pub probe_result_dropped: u64,
+    pub probe_result_late: u64,
+    pub probe_query_count: u64,
+    pub probe_query_ms: u128,
+    pub pending_expired_bytes: u64,
+    pub pending_capacity_bytes: u64,
+    pub probe_unique_pending_bytes: u64,
+    pub probe_not_found_pending_bytes: u64,
+    pub probe_ambiguous_pending_bytes: u64,
+    pub probe_unavailable_pending_bytes: u64,
+    pub ip_promotions: u64,
+    pub ip_demotions: u64,
+    pub ip_evictions_heavy: u64,
+    pub ip_evictions_rising: u64,
+    pub ip_evictions_observation: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsGauges {
+    pub flow_table_entries: u64,
+    pub process_entries: usize,
+    pub domain_entries: usize,
+    pub last_refresh_ms: u128,
+    pub pending_records: usize,
+    pub pending_bytes: u64,
+    pub probe_last_query_ms: u128,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsIp {
+    pub inbound_entries: usize,
+    pub outbound_entries: usize,
+    pub inbound_heavy_entries: usize,
+    pub inbound_rising_entries: usize,
+    pub inbound_observation_entries: usize,
+    pub outbound_heavy_entries: usize,
+    pub outbound_rising_entries: usize,
+    pub outbound_observation_entries: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiagnosticsMissSample {
+    pub reason: String,
+    pub protocol: String,
+    pub local: String,
+    pub peer: String,
 }
 
 #[derive(Clone)]
@@ -660,6 +742,7 @@ impl Stats {
             inbound_ips,
             outbound_ips,
             outbound_domains,
+            diagnostics: None,
         }
     }
 

@@ -1,5 +1,6 @@
 mod attribution;
 mod capture;
+mod diagnostics;
 mod domain_parse;
 mod domain_parse_composite;
 mod domain_parse_http;
@@ -22,8 +23,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use capture::{CaptureSource, TransportProtocol};
-use proc_table::LookupMissReason;
+use capture::CaptureSource;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_TOP_N: u64 = 10;
 const DEFAULT_PROC_REFRESH: u64 = 2;
@@ -73,13 +73,24 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
         return ExitCode::FAILURE;
     }
 
+    let diagnostics_writer = match open_diagnostics_writer(&cli) {
+        Ok(writer) => writer,
+        Err(error) => {
+            eprintln!("Failed to open diagnostics output: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let proc_table = proc_table::spawn(Duration::from_secs(cli.proc_refresh));
     let top_n = cli.top_n as usize;
     let is_json = cli.format == "json";
 
     if cli.output.is_none() && !is_json {
-        let mut session = match session::TrafficSession::discover(proc_table, top_n, cli.flow_table)
-        {
+        let mut session = match session::TrafficSession::discover(
+            proc_table,
+            top_n,
+            cli.flow_table,
+            cli.diagnostics,
+        ) {
             Ok(session) => session,
             Err(error) => {
                 eprintln!("Failed to enumerate interfaces: {error}");
@@ -92,7 +103,7 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
             eprintln!("Failed to open interface: {error}");
             return ExitCode::FAILURE;
         }
-        if let Err(error) = tui::run(&mut session) {
+        if let Err(error) = tui::run(&mut session, diagnostics_writer) {
             eprintln!("TUI error: {error}");
             return ExitCode::FAILURE;
         }
@@ -114,7 +125,6 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
         }
     };
     let interface = source.interface_name().to_string();
-
     match &cli.output {
         Some(path) => {
             // Background file mode: write snapshot each refresh tick.
@@ -131,7 +141,7 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
                 started_at,
                 top_n,
                 is_json,
-                cli.diagnostics,
+                diagnostics_writer,
             );
         }
         None => {
@@ -145,7 +155,7 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
                     &started_wall,
                     started_at,
                     top_n,
-                    cli.diagnostics,
+                    diagnostics_writer,
                 );
             }
         }
@@ -174,6 +184,24 @@ fn require_npcap() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn open_diagnostics_writer(cli: &Cli) -> std::io::Result<Option<diagnostics::DiagnosticsWriter>> {
+    if !cli.diagnostics {
+        if cli.diagnostics_output.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--diagnostics-output requires --diagnostics",
+            ));
+        }
+        return Ok(None);
+    }
+    let path = cli
+        .diagnostics_output
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(diagnostics::default_output_path);
+    diagnostics::DiagnosticsWriter::create(path).map(Some)
+}
+
 /// Background file loop: capture continuously, write snapshot every refresh interval.
 #[allow(clippy::too_many_arguments)]
 fn background_loop(
@@ -185,7 +213,7 @@ fn background_loop(
     started_at: Instant,
     top_n: usize,
     is_json: bool,
-    diagnostics: bool,
+    mut diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
 ) {
     let mut stats = stats::Stats::default();
     let mut attributor = attribution::PendingAttributor::with_probe(
@@ -206,13 +234,17 @@ fn background_loop(
             if let Err(e) = res {
                 eprintln!("Failed to write output file: {e}");
             }
-            if diagnostics {
-                emit_diagnostics(
+            if let Some(writer) = diagnostics_writer.as_mut()
+                && let Some(snapshot) = diagnostics::collect(
                     proc_table,
-                    &attributor,
-                    &stats,
+                    attributor.snapshot(),
+                    stats.diagnostics_snapshot(),
                     source.flow_table_entry_count(),
-                );
+                )
+                && let Err(error) = writer.write(interface, &snapshot)
+            {
+                eprintln!("Failed to write diagnostics output: {error}");
+                diagnostics_writer = None;
             }
             next_refresh = Instant::now() + REFRESH_INTERVAL;
         }
@@ -228,7 +260,7 @@ fn json_stdout_loop(
     started_wall: &chrono::DateTime<chrono::Local>,
     started_at: Instant,
     top_n: usize,
-    diagnostics: bool,
+    mut diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
 ) {
     let mut stats = stats::Stats::default();
     let mut attributor = attribution::PendingAttributor::with_probe(
@@ -242,131 +274,20 @@ fn json_stdout_loop(
         if Instant::now() >= next_refresh {
             attributor.advance(&mut stats, proc_table, Instant::now());
             report::render_jsonl(interface, started_wall, started_at, &stats, top_n);
-            if diagnostics {
-                emit_diagnostics(
+            if let Some(writer) = diagnostics_writer.as_mut()
+                && let Some(snapshot) = diagnostics::collect(
                     proc_table,
-                    &attributor,
-                    &stats,
+                    attributor.snapshot(),
+                    stats.diagnostics_snapshot(),
                     source.flow_table_entry_count(),
-                );
+                )
+                && let Err(error) = writer.write(interface, &snapshot)
+            {
+                eprintln!("Failed to write diagnostics output: {error}");
+                diagnostics_writer = None;
             }
             next_refresh = Instant::now() + REFRESH_INTERVAL;
         }
-    }
-}
-
-fn emit_diagnostics(
-    proc_table: &proc_table::SharedProcTable,
-    attributor: &attribution::PendingAttributor,
-    stats: &stats::Stats,
-    flow_table_entries: u64,
-) {
-    let Some(proc) = proc_table::diagnostics_snapshot(proc_table) else {
-        eprintln!("diagnostics: process table unavailable");
-        return;
-    };
-    let pending = attributor.snapshot();
-    let stats = stats.diagnostics_snapshot();
-    eprintln!(
-        concat!(
-            "diagnostics: lookup_hits={} lookup_misses={} no_local_socket={} ",
-            "lookup_no_candidate={} lookup_ambiguous={} lookup_stale={} ",
-            "lookup_no_candidate_bytes={} lookup_ambiguous_bytes={} lookup_stale_bytes={} ",
-            "lookup_v4_mapped_hits={} ",
-            "refresh_requests={} refresh_actual={} refresh_success={} refresh_failure={} ",
-            "refresh_records={} refresh_v4_mapped_records={} ",
-            "flow_table_entries={} inbound_ip_entries={} outbound_ip_entries={} ",
-            "process_entries={} domain_entries={} ",
-            "inbound_heavy_ip_entries={} inbound_rising_ip_entries={} inbound_observation_ip_entries={} ",
-            "outbound_heavy_ip_entries={} outbound_rising_ip_entries={} outbound_observation_ip_entries={} ",
-            "ip_promotions={} ip_demotions={} ",
-            "ip_evictions_heavy={} ip_evictions_rising={} ip_evictions_observation={} ",
-            "last_refresh_ms={} pending_records={} pending_bytes={} ",
-            "probe_request_queued={} probe_result_unique={} ",
-            "probe_result_not_found={} probe_result_ambiguous={} ",
-            "probe_result_unavailable={} probe_result_dropped={} probe_result_late={} ",
-            "probe_query_count={} probe_query_ms={} probe_last_query_ms={} ",
-            " pending_expired_bytes={} pending_capacity_bytes={} ",
-            "probe_unique_pending_bytes={} probe_not_found_pending_bytes={} ",
-            "probe_ambiguous_pending_bytes={} probe_unavailable_pending_bytes={}"
-        ),
-        proc.lookup_hits,
-        proc.lookup_misses,
-        proc.no_local_socket,
-        proc.lookup_no_candidate,
-        proc.lookup_ambiguous,
-        proc.lookup_stale,
-        proc.lookup_no_candidate_bytes,
-        proc.lookup_ambiguous_bytes,
-        proc.lookup_stale_bytes,
-        proc.lookup_v4_mapped_hits,
-        proc.refresh_requests,
-        proc.refresh_actual,
-        proc.refresh_success,
-        proc.refresh_failure,
-        proc.refresh_records,
-        proc.refresh_v4_mapped_records,
-        flow_table_entries,
-        stats.inbound_ip_entries,
-        stats.outbound_ip_entries,
-        stats.process_entries,
-        stats.domain_entries,
-        stats.inbound_heavy_ip_entries,
-        stats.inbound_rising_ip_entries,
-        stats.inbound_observation_ip_entries,
-        stats.outbound_heavy_ip_entries,
-        stats.outbound_rising_ip_entries,
-        stats.outbound_observation_ip_entries,
-        stats.ip_promotions,
-        stats.ip_demotions,
-        stats.ip_evictions_heavy,
-        stats.ip_evictions_rising,
-        stats.ip_evictions_observation,
-        proc.last_refresh_duration.as_millis(),
-        pending.records,
-        pending.bytes,
-        pending.probe_request_queued,
-        pending.probe_result_unique,
-        pending.probe_result_not_found,
-        pending.probe_result_ambiguous,
-        pending.probe_result_unavailable,
-        pending.probe_result_dropped,
-        pending.probe_result_late,
-        pending.probe_query_count,
-        pending.probe_query_ms,
-        pending.probe_last_query_ms,
-        pending.pending_expired_bytes,
-        pending.pending_capacity_bytes,
-        pending.probe_unique_pending_bytes,
-        pending.probe_not_found_pending_bytes,
-        pending.probe_ambiguous_pending_bytes,
-        pending.probe_unavailable_pending_bytes,
-    );
-    for sample in proc.lookup_miss_samples {
-        eprintln!(
-            "diagnostics_miss_sample: reason={} protocol={} local={}:{} peer={}:{}",
-            lookup_miss_reason_label(sample.reason),
-            transport_protocol_label(sample.local_socket.protocol),
-            sample.local_socket.ip,
-            sample.local_socket.port,
-            sample.peer_ip,
-            sample.peer_port,
-        );
-    }
-}
-
-fn lookup_miss_reason_label(reason: LookupMissReason) -> &'static str {
-    match reason {
-        LookupMissReason::NoCandidate => "no_candidate",
-        LookupMissReason::Ambiguous => "ambiguous",
-        LookupMissReason::Stale => "stale",
-    }
-}
-
-fn transport_protocol_label(protocol: TransportProtocol) -> &'static str {
-    match protocol {
-        TransportProtocol::Tcp => "tcp",
-        TransportProtocol::Udp => "udp",
     }
 }
 
@@ -415,9 +336,12 @@ struct Cli {
     /// Connection flow table capacity in 5-tuples (default: 65536, min: 1)
     #[arg(long = "flow-table", default_value_t = DEFAULT_FLOW_TABLE, value_parser = clap::value_parser!(u64).range(1..))]
     flow_table: u64,
-    /// Emit process attribution diagnostics to stderr on each output refresh
+    /// Write process attribution diagnostics to a JSONL file on each output refresh
     #[arg(long)]
     diagnostics: bool,
+    /// Write diagnostics JSONL records to this file (default: delray-<timestamp>-<pid>.log)
+    #[arg(long = "diagnostics-output")]
+    diagnostics_output: Option<String>,
 }
 
 fn positive_u64(s: &str) -> Result<u64, String> {
@@ -501,6 +425,30 @@ mod cli_tests {
             Cli::try_parse_from(["delray", "eth0", "--format", "json", "--diagnostics"]).unwrap();
 
         assert!(cli.diagnostics);
+    }
+
+    #[test]
+    fn diagnostics_output_requires_diagnostics_flag() {
+        let cli =
+            Cli::try_parse_from(["delray", "eth0", "--diagnostics-output", "diag.jsonl"]).unwrap();
+        let error = match open_diagnostics_writer(&cli) {
+            Ok(_) => panic!("diagnostics output should require the flag"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("requires --diagnostics"));
+    }
+
+    #[test]
+    fn diagnostics_output_path_is_preserved() {
+        let cli = Cli::try_parse_from([
+            "delray",
+            "eth0",
+            "--diagnostics",
+            "--diagnostics-output",
+            "diag.jsonl",
+        ])
+        .unwrap();
+        assert_eq!(cli.diagnostics_output.as_deref(), Some("diag.jsonl"));
     }
 
     #[test]

@@ -84,11 +84,19 @@ Delray 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会�
 ./delray eth0 --top-n 3
 ```
 
-将进程归属诊断信息写入标准错误：
+将进程归属诊断信息以 JSONL 格式写入默认 `.log` 文件：
 
 ```bash
 ./delray eth0 --format json --diagnostics
 ```
+
+指定诊断输出文件：
+
+```bash
+./delray eth0 --diagnostics --diagnostics-output /tmp/delray-diagnostics.jsonl
+```
+
+TUI 模式下诊断信息同样只写入该文件，不写入终端屏幕。
 
 完整参数列表请运行 `delray --help` 查看。
 
