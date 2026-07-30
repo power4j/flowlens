@@ -36,6 +36,7 @@ pub struct TrafficSession {
     proc_table: SharedProcTable,
     top_n: usize,
     flow_table_capacity: u64,
+    diagnostics_enabled: bool,
     active: Option<ActiveCapture>,
     fallback: Option<ActiveCapture>,
     pending: Option<PendingActivation>,
@@ -46,12 +47,14 @@ impl TrafficSession {
         proc_table: SharedProcTable,
         top_n: usize,
         flow_table_capacity: u64,
+        diagnostics_enabled: bool,
     ) -> Result<Self> {
         Ok(Self {
             interfaces: crate::capture::interface_catalog()?,
             proc_table,
             top_n,
             flow_table_capacity,
+            diagnostics_enabled,
             active: None,
             fallback: None,
             pending: None,
@@ -70,9 +73,11 @@ impl TrafficSession {
         let proc_table = self.proc_table.clone();
         let top_n = self.top_n;
         let capacity = self.flow_table_capacity;
+        let diagnostics_enabled = self.diagnostics_enabled;
         self.activate_with(selector, move |name| {
             let source = CaptureSource::open(name, capacity)?;
-            TrafficPipeline::spawn(source, proc_table, top_n).map_err(anyhow::Error::from)
+            TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled)
+                .map_err(anyhow::Error::from)
         })
     }
 
@@ -80,9 +85,11 @@ impl TrafficSession {
         let proc_table = self.proc_table.clone();
         let top_n = self.top_n;
         let capacity = self.flow_table_capacity;
+        let diagnostics_enabled = self.diagnostics_enabled;
         self.begin_activate_with(selector, move |name| {
             let source = CaptureSource::open(name, capacity)?;
-            TrafficPipeline::spawn(source, proc_table, top_n).map_err(anyhow::Error::from)
+            TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled)
+                .map_err(anyhow::Error::from)
         })
     }
 
@@ -229,6 +236,7 @@ impl TrafficSession {
             proc_table,
             top_n,
             flow_table_capacity: crate::flow_table::DEFAULT_FLOW_TABLE_CAPACITY,
+            diagnostics_enabled: false,
             active: Some(ActiveCapture {
                 interface: interface.to_string(),
                 pipeline,

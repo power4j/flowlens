@@ -285,6 +285,10 @@ impl CaptureSource {
         &self.interface_name
     }
 
+    pub(crate) fn flow_table_entry_count(&self) -> u64 {
+        self.flow_table.entry_count()
+    }
+
     pub(crate) fn breakloop_handle(&mut self) -> pcap::BreakLoop {
         self.cap.breakloop_handle()
     }

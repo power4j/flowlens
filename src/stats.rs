@@ -1,15 +1,127 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use crate::capture::Flow;
+
+// Keep per-direction peer history bounded while retaining high-volume behavior.
+const MAX_IP_DIMENSION_ENTRIES: usize = 16_384;
+const IP_DIMENSION_PRUNE_BATCH: usize = 256;
+const IP_DIMENSION_TARGET_ENTRIES: usize = MAX_IP_DIMENSION_ENTRIES - IP_DIMENSION_PRUNE_BATCH;
+const IP_WINDOW_BUCKETS: usize = 5;
+const IP_BUCKET_SECONDS: i64 = 60;
+const IP_IDLE_WINDOWS: i64 = 3;
+const IP_OBSERVATION_BUCKETS: u8 = 2;
+const IP_HEAVY_SHARE_PERCENT: usize = 70;
+const IP_RISING_SHARE_PERCENT: usize = 20;
+const IP_HEAVY_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * IP_HEAVY_SHARE_PERCENT / 100;
+const IP_RISING_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * IP_RISING_SHARE_PERCENT / 100;
+const IP_OBSERVATION_RESERVATION: usize =
+    IP_DIMENSION_TARGET_ENTRIES - IP_HEAVY_RESERVATION - IP_RISING_RESERVATION;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Direction {
     Inbound,
     Outbound,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum IpTier {
+    Heavy,
+    Rising,
+    #[default]
+    Observation,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct IpBucket {
+    epoch: i64,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IpWindowState {
+    buckets: [IpBucket; IP_WINDOW_BUCKETS],
+    last_bucket_epoch: i64,
+    observed_buckets: u8,
+    tier: IpTier,
+    tier_changed_epoch: i64,
+}
+
+impl IpWindowState {
+    fn new(epoch: i64, bytes: u64) -> Self {
+        let mut state = Self {
+            buckets: [IpBucket::default(); IP_WINDOW_BUCKETS],
+            last_bucket_epoch: epoch,
+            observed_buckets: 1,
+            tier: IpTier::Observation,
+            tier_changed_epoch: epoch,
+        };
+        state.record(epoch, bytes);
+        state
+    }
+
+    fn record(&mut self, epoch: i64, bytes: u64) {
+        if epoch != self.last_bucket_epoch {
+            self.last_bucket_epoch = epoch;
+            self.observed_buckets = self
+                .observed_buckets
+                .saturating_add(1)
+                .min(IP_WINDOW_BUCKETS as u8);
+        }
+        let slot = epoch.rem_euclid(IP_WINDOW_BUCKETS as i64) as usize;
+        if self.buckets[slot].epoch != epoch {
+            self.buckets[slot] = IpBucket { epoch, bytes: 0 };
+        }
+        self.buckets[slot].bytes = self.buckets[slot].bytes.saturating_add(bytes);
+    }
+
+    fn current_bucket_bytes(&self, epoch: i64) -> u64 {
+        self.buckets
+            .iter()
+            .find(|bucket| bucket.epoch == epoch)
+            .map_or(0, |bucket| bucket.bytes)
+    }
+
+    fn window_bytes(&self, epoch: i64) -> u64 {
+        let oldest = epoch - (IP_WINDOW_BUCKETS as i64 - 1);
+        self.buckets
+            .iter()
+            .filter(|bucket| bucket.epoch >= oldest && bucket.epoch <= epoch)
+            .map(|bucket| bucket.bytes)
+            .sum()
+    }
+
+    fn previous_window_bytes(&self, epoch: i64) -> u64 {
+        let oldest = epoch - (IP_WINDOW_BUCKETS as i64 - 1);
+        self.buckets
+            .iter()
+            .filter(|bucket| bucket.epoch >= oldest && bucket.epoch < epoch)
+            .map(|bucket| bucket.bytes)
+            .sum()
+    }
+
+    fn surge_bytes(&self, epoch: i64) -> u64 {
+        self.current_bucket_bytes(epoch)
+            .saturating_mul((IP_WINDOW_BUCKETS - 1) as u64)
+            .saturating_sub(self.previous_window_bytes(epoch))
+    }
+
+    fn idle_windows(&self, epoch: i64) -> i64 {
+        (epoch - self.last_bucket_epoch).max(0) / IP_WINDOW_BUCKETS as i64
+    }
+}
+
+#[derive(Default)]
+struct IpDiagnosticsCounters {
+    promotions: u64,
+    demotions: u64,
+    evictions_heavy: u64,
+    evictions_rising: u64,
+    evictions_observation: u64,
 }
 
 /// Proc traffic with recv/sent breakdown.
@@ -45,6 +157,87 @@ pub struct TrafficSnapshot {
     pub outbound_ips: Arc<[IpSnapshot]>,
     /// 出站域名维度（05 票）；消费方：TUI 概览/详情页（06-07）、report plain/JSON 输出（08）。
     pub outbound_domains: Arc<[OutboundDomainSnapshot]>,
+    pub diagnostics: Option<Arc<DiagnosticsSnapshot>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsSnapshot {
+    pub counters: DiagnosticsCounters,
+    pub gauges: DiagnosticsGauges,
+    pub ip: DiagnosticsIp,
+    #[serde(skip)]
+    pub miss_samples: Vec<DiagnosticsMissSample>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsCounters {
+    pub lookup_hits: u64,
+    pub lookup_misses: u64,
+    pub lookup_no_candidate: u64,
+    pub lookup_ambiguous: u64,
+    pub lookup_stale: u64,
+    pub lookup_no_candidate_bytes: u64,
+    pub lookup_ambiguous_bytes: u64,
+    pub lookup_stale_bytes: u64,
+    pub lookup_v4_mapped_hits: u64,
+    pub no_local_socket: u64,
+    pub refresh_requests: u64,
+    pub refresh_actual: u64,
+    pub refresh_success: u64,
+    pub refresh_failure: u64,
+    pub refresh_records: u64,
+    pub refresh_v4_mapped_records: u64,
+    pub probe_request_queued: u64,
+    pub probe_result_unique: u64,
+    pub probe_result_not_found: u64,
+    pub probe_result_ambiguous: u64,
+    pub probe_result_unavailable: u64,
+    pub probe_result_dropped: u64,
+    pub probe_result_late: u64,
+    pub probe_query_count: u64,
+    pub probe_query_ms: u128,
+    pub pending_expired_bytes: u64,
+    pub pending_capacity_bytes: u64,
+    pub probe_unique_pending_bytes: u64,
+    pub probe_not_found_pending_bytes: u64,
+    pub probe_ambiguous_pending_bytes: u64,
+    pub probe_unavailable_pending_bytes: u64,
+    pub ip_promotions: u64,
+    pub ip_demotions: u64,
+    pub ip_evictions_heavy: u64,
+    pub ip_evictions_rising: u64,
+    pub ip_evictions_observation: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsGauges {
+    pub flow_table_entries: u64,
+    pub process_entries: usize,
+    pub domain_entries: usize,
+    pub last_refresh_ms: u128,
+    pub pending_records: usize,
+    pub pending_bytes: u64,
+    pub probe_last_query_ms: u128,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsIp {
+    pub inbound_entries: usize,
+    pub outbound_entries: usize,
+    pub inbound_heavy_entries: usize,
+    pub inbound_rising_entries: usize,
+    pub inbound_observation_entries: usize,
+    pub outbound_heavy_entries: usize,
+    pub outbound_rising_entries: usize,
+    pub outbound_observation_entries: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiagnosticsMissSample {
+    pub reason: String,
+    pub protocol: String,
+    pub local: String,
+    pub peer: String,
 }
 
 #[derive(Clone)]
@@ -227,6 +420,10 @@ pub struct Stats {
     out_by_ip: HashMap<IpAddr, u64>,
     in_ip_last_seen: HashMap<IpAddr, DateTime<Utc>>,
     out_ip_last_seen: HashMap<IpAddr, DateTime<Utc>>,
+    in_ip_windows: HashMap<IpAddr, IpWindowState>,
+    out_ip_windows: HashMap<IpAddr, IpWindowState>,
+    ip_window_epoch: Option<i64>,
+    ip_diagnostics: IpDiagnosticsCounters,
     by_proc: HashMap<ProcessKey, ProcTraffic>,
     proc_last_seen: HashMap<ProcessKey, DateTime<Utc>>,
     unattributed: ProcTraffic,
@@ -234,6 +431,25 @@ pub struct Stats {
     proc_names: HashMap<ProcessKey, Arc<str>>,
     by_domain: HashMap<Arc<str>, DomainTraffic>,
     domain_last_seen: HashMap<Arc<str>, DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatsDiagnostics {
+    pub inbound_ip_entries: usize,
+    pub outbound_ip_entries: usize,
+    pub process_entries: usize,
+    pub domain_entries: usize,
+    pub inbound_heavy_ip_entries: usize,
+    pub inbound_rising_ip_entries: usize,
+    pub inbound_observation_ip_entries: usize,
+    pub outbound_heavy_ip_entries: usize,
+    pub outbound_rising_ip_entries: usize,
+    pub outbound_observation_ip_entries: usize,
+    pub ip_promotions: u64,
+    pub ip_demotions: u64,
+    pub ip_evictions_heavy: u64,
+    pub ip_evictions_rising: u64,
+    pub ip_evictions_observation: u64,
 }
 
 /// 按域名累计的双向字节计数，对齐 ProcTraffic 的 recv/sent 拆分。
@@ -246,16 +462,93 @@ struct DomainTraffic {
 }
 
 impl Stats {
+    pub(crate) fn diagnostics_snapshot(&self) -> StatsDiagnostics {
+        let inbound_tiers = ip_tier_counts(&self.in_ip_windows);
+        let outbound_tiers = ip_tier_counts(&self.out_ip_windows);
+        StatsDiagnostics {
+            inbound_ip_entries: self.in_by_ip.len(),
+            outbound_ip_entries: self.out_by_ip.len(),
+            process_entries: self.by_proc.len(),
+            domain_entries: self.by_domain.len(),
+            inbound_heavy_ip_entries: inbound_tiers.0,
+            inbound_rising_ip_entries: inbound_tiers.1,
+            inbound_observation_ip_entries: inbound_tiers.2,
+            outbound_heavy_ip_entries: outbound_tiers.0,
+            outbound_rising_ip_entries: outbound_tiers.1,
+            outbound_observation_ip_entries: outbound_tiers.2,
+            ip_promotions: self.ip_diagnostics.promotions,
+            ip_demotions: self.ip_diagnostics.demotions,
+            ip_evictions_heavy: self.ip_diagnostics.evictions_heavy,
+            ip_evictions_rising: self.ip_diagnostics.evictions_rising,
+            ip_evictions_observation: self.ip_diagnostics.evictions_observation,
+        }
+    }
+
+    fn advance_ip_window(&mut self, epoch: i64) {
+        if self.ip_window_epoch == Some(epoch) {
+            return;
+        }
+        self.ip_window_epoch = Some(epoch);
+        rebalance_ip_dimension(
+            &mut self.in_by_ip,
+            &mut self.in_ip_last_seen,
+            &mut self.in_ip_windows,
+            epoch,
+            &mut self.ip_diagnostics,
+            true,
+        );
+        rebalance_ip_dimension(
+            &mut self.out_by_ip,
+            &mut self.out_ip_last_seen,
+            &mut self.out_ip_windows,
+            epoch,
+            &mut self.ip_diagnostics,
+            true,
+        );
+    }
+
     fn add_in(&mut self, source: IpAddr, bytes: u64, observed_at: DateTime<Utc>) {
         self.in_bytes += bytes;
+        let epoch = bucket_epoch(observed_at);
+        self.advance_ip_window(epoch);
         *self.in_by_ip.entry(source).or_default() += bytes;
         self.in_ip_last_seen.insert(source, observed_at);
+        self.in_ip_windows
+            .entry(source)
+            .and_modify(|state| state.record(epoch, bytes))
+            .or_insert_with(|| IpWindowState::new(epoch, bytes));
+        if self.in_by_ip.len() > MAX_IP_DIMENSION_ENTRIES {
+            rebalance_ip_dimension(
+                &mut self.in_by_ip,
+                &mut self.in_ip_last_seen,
+                &mut self.in_ip_windows,
+                epoch,
+                &mut self.ip_diagnostics,
+                false,
+            );
+        }
     }
 
     fn add_out(&mut self, destination: IpAddr, bytes: u64, observed_at: DateTime<Utc>) {
         self.out_bytes += bytes;
+        let epoch = bucket_epoch(observed_at);
+        self.advance_ip_window(epoch);
         *self.out_by_ip.entry(destination).or_default() += bytes;
         self.out_ip_last_seen.insert(destination, observed_at);
+        self.out_ip_windows
+            .entry(destination)
+            .and_modify(|state| state.record(epoch, bytes))
+            .or_insert_with(|| IpWindowState::new(epoch, bytes));
+        if self.out_by_ip.len() > MAX_IP_DIMENSION_ENTRIES {
+            rebalance_ip_dimension(
+                &mut self.out_by_ip,
+                &mut self.out_ip_last_seen,
+                &mut self.out_ip_windows,
+                epoch,
+                &mut self.ip_diagnostics,
+                false,
+            );
+        }
     }
 
     fn add_proc(
@@ -449,6 +742,7 @@ impl Stats {
             inbound_ips,
             outbound_ips,
             outbound_domains,
+            diagnostics: None,
         }
     }
 
@@ -483,6 +777,268 @@ impl Stats {
     }
 }
 
+#[derive(Clone, Copy)]
+struct IpCandidate {
+    ip: IpAddr,
+    last_seen: DateTime<Utc>,
+    lifetime_bytes: u64,
+    current_bucket_bytes: u64,
+    window_bytes: u64,
+    surge_bytes: u64,
+    idle_windows: i64,
+    observed_buckets: u8,
+    tier: IpTier,
+    tier_changed_epoch: i64,
+}
+
+fn bucket_epoch(observed_at: DateTime<Utc>) -> i64 {
+    observed_at.timestamp().div_euclid(IP_BUCKET_SECONDS)
+}
+
+fn collect_ip_candidates(
+    bytes_by_ip: &HashMap<IpAddr, u64>,
+    last_seen_by_ip: &HashMap<IpAddr, DateTime<Utc>>,
+    windows_by_ip: &HashMap<IpAddr, IpWindowState>,
+    epoch: i64,
+) -> Vec<IpCandidate> {
+    bytes_by_ip
+        .iter()
+        .filter_map(|(ip, lifetime_bytes)| {
+            let state = windows_by_ip.get(ip)?;
+            let last_seen = last_seen_by_ip.get(ip)?;
+            Some(IpCandidate {
+                ip: *ip,
+                last_seen: *last_seen,
+                lifetime_bytes: *lifetime_bytes,
+                current_bucket_bytes: state.current_bucket_bytes(epoch),
+                window_bytes: state.window_bytes(epoch),
+                surge_bytes: state.surge_bytes(epoch),
+                idle_windows: state.idle_windows(epoch),
+                observed_buckets: state.observed_buckets,
+                tier: state.tier,
+                tier_changed_epoch: state.tier_changed_epoch,
+            })
+        })
+        .collect()
+}
+
+fn desired_ip_tiers(candidates: &[IpCandidate]) -> HashMap<IpAddr, IpTier> {
+    let eligible = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.observed_buckets >= IP_OBSERVATION_BUCKETS
+                && candidate.idle_windows < IP_IDLE_WINDOWS
+        })
+        .copied()
+        .collect::<Vec<_>>();
+
+    let rising_target = eligible.len() * IP_RISING_SHARE_PERCENT / 100;
+    let rising_target = rising_target.min(IP_RISING_RESERVATION);
+    let rising_ips = select_rising_ips(&eligible, rising_target);
+
+    let mut heavy = eligible
+        .iter()
+        .filter(|candidate| !rising_ips.contains(&candidate.ip))
+        .copied()
+        .collect::<Vec<_>>();
+    heavy.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.lifetime_bytes));
+    let heavy_target = heavy.len().min(IP_HEAVY_RESERVATION);
+    let heavy_ips = heavy
+        .iter()
+        .take(heavy_target)
+        .map(|candidate| candidate.ip)
+        .collect::<HashSet<_>>();
+
+    candidates
+        .iter()
+        .map(|candidate| {
+            let tier = if candidate.observed_buckets < IP_OBSERVATION_BUCKETS {
+                IpTier::Observation
+            } else if heavy_ips.contains(&candidate.ip) {
+                IpTier::Heavy
+            } else if rising_ips.contains(&candidate.ip) {
+                IpTier::Rising
+            } else {
+                IpTier::Observation
+            };
+            (candidate.ip, tier)
+        })
+        .collect()
+}
+
+fn select_rising_ips(candidates: &[IpCandidate], target: usize) -> HashSet<IpAddr> {
+    if target == 0 || candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut by_window = candidates.to_vec();
+    by_window.sort_unstable_by_key(|candidate| {
+        (
+            std::cmp::Reverse(candidate.window_bytes),
+            std::cmp::Reverse(candidate.surge_bytes),
+        )
+    });
+    let mut by_surge = candidates.to_vec();
+    by_surge.sort_unstable_by_key(|candidate| {
+        (
+            std::cmp::Reverse(candidate.surge_bytes),
+            std::cmp::Reverse(candidate.window_bytes),
+        )
+    });
+
+    let mut selected = HashSet::new();
+    for candidate in by_window.iter().take(target) {
+        selected.insert(candidate.ip);
+    }
+    for candidate in by_surge.iter().take(target) {
+        selected.insert(candidate.ip);
+    }
+    if selected.len() <= target {
+        return selected;
+    }
+
+    let window_rank = by_window
+        .iter()
+        .enumerate()
+        .map(|(rank, candidate)| (candidate.ip, rank))
+        .collect::<HashMap<_, _>>();
+    let surge_rank = by_surge
+        .iter()
+        .enumerate()
+        .map(|(rank, candidate)| (candidate.ip, rank))
+        .collect::<HashMap<_, _>>();
+    let mut ranked = selected.into_iter().collect::<Vec<_>>();
+    ranked.sort_unstable_by_key(|ip| {
+        let window = window_rank[ip];
+        let surge = surge_rank[ip];
+        (window.min(surge), window.max(surge), window, surge)
+    });
+    ranked.truncate(target);
+    ranked.into_iter().collect()
+}
+
+fn ip_tier_counts(windows_by_ip: &HashMap<IpAddr, IpWindowState>) -> (usize, usize, usize) {
+    windows_by_ip.values().fold((0, 0, 0), |mut counts, state| {
+        match state.tier {
+            IpTier::Heavy => counts.0 += 1,
+            IpTier::Rising => counts.1 += 1,
+            IpTier::Observation => counts.2 += 1,
+        }
+        counts
+    })
+}
+
+fn rebalance_ip_dimension(
+    bytes_by_ip: &mut HashMap<IpAddr, u64>,
+    last_seen_by_ip: &mut HashMap<IpAddr, DateTime<Utc>>,
+    windows_by_ip: &mut HashMap<IpAddr, IpWindowState>,
+    epoch: i64,
+    diagnostics: &mut IpDiagnosticsCounters,
+    refresh_tiers: bool,
+) {
+    if bytes_by_ip.is_empty() {
+        return;
+    }
+
+    let candidates = collect_ip_candidates(bytes_by_ip, last_seen_by_ip, windows_by_ip, epoch);
+    if refresh_tiers {
+        let desired = desired_ip_tiers(&candidates);
+        for candidate in &candidates {
+            let Some(state) = windows_by_ip.get_mut(&candidate.ip) else {
+                continue;
+            };
+            let desired_tier = desired[&candidate.ip];
+            let idle = candidate.idle_windows >= IP_IDLE_WINDOWS;
+            let held = epoch.saturating_sub(candidate.tier_changed_epoch) < 2;
+            let next_tier = if candidate.observed_buckets < IP_OBSERVATION_BUCKETS || idle {
+                IpTier::Observation
+            } else if candidate.tier != desired_tier && held {
+                candidate.tier
+            } else {
+                desired_tier
+            };
+            if state.tier != next_tier {
+                if tier_rank(next_tier) > tier_rank(state.tier) {
+                    diagnostics.promotions += 1;
+                } else {
+                    diagnostics.demotions += 1;
+                }
+                state.tier = next_tier;
+                state.tier_changed_epoch = epoch;
+            }
+        }
+    }
+
+    if bytes_by_ip.len() <= MAX_IP_DIMENSION_ENTRIES {
+        return;
+    }
+
+    let counts = ip_tier_counts(windows_by_ip);
+    let current = if refresh_tiers {
+        collect_ip_candidates(bytes_by_ip, last_seen_by_ip, windows_by_ip, epoch)
+    } else {
+        candidates
+    };
+    let mut victims = current
+        .into_iter()
+        .filter(|candidate| {
+            let minimum = match candidate.tier {
+                IpTier::Heavy => IP_HEAVY_RESERVATION,
+                IpTier::Rising => IP_RISING_RESERVATION,
+                IpTier::Observation => IP_OBSERVATION_RESERVATION,
+            };
+            let count = match candidate.tier {
+                IpTier::Heavy => counts.0,
+                IpTier::Rising => counts.1,
+                IpTier::Observation => counts.2,
+            };
+            count > minimum
+                || (candidate.tier == IpTier::Heavy && candidate.idle_windows >= IP_IDLE_WINDOWS)
+        })
+        .collect::<Vec<_>>();
+    victims.sort_unstable_by_key(|candidate| {
+        let tier = candidate.tier;
+        let (primary, secondary) = match tier {
+            IpTier::Heavy => (candidate.lifetime_bytes, candidate.window_bytes),
+            IpTier::Rising => (candidate.window_bytes, candidate.surge_bytes),
+            IpTier::Observation => (candidate.current_bucket_bytes, candidate.window_bytes),
+        };
+        (
+            tier_rank(tier),
+            if tier == IpTier::Heavy && candidate.idle_windows >= IP_IDLE_WINDOWS {
+                0
+            } else {
+                1
+            },
+            primary,
+            secondary,
+            candidate.last_seen,
+        )
+    });
+
+    let remove_count = bytes_by_ip
+        .len()
+        .saturating_sub(IP_DIMENSION_TARGET_ENTRIES);
+    for candidate in victims.into_iter().take(remove_count) {
+        bytes_by_ip.remove(&candidate.ip);
+        last_seen_by_ip.remove(&candidate.ip);
+        windows_by_ip.remove(&candidate.ip);
+        match candidate.tier {
+            IpTier::Heavy => diagnostics.evictions_heavy += 1,
+            IpTier::Rising => diagnostics.evictions_rising += 1,
+            IpTier::Observation => diagnostics.evictions_observation += 1,
+        }
+    }
+}
+
+fn tier_rank(tier: IpTier) -> u8 {
+    match tier {
+        IpTier::Observation => 0,
+        IpTier::Rising => 1,
+        IpTier::Heavy => 2,
+    }
+}
+
 fn top_n_ip(map: &HashMap<IpAddr, u64>, n: usize) -> Vec<(IpAddr, u64)> {
     let mut entries: Vec<(IpAddr, u64)> = map.iter().map(|(ip, bytes)| (*ip, *bytes)).collect();
     entries.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
@@ -492,6 +1048,7 @@ fn top_n_ip(map: &HashMap<IpAddr, u64>, n: usize) -> Vec<(IpAddr, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Duration;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
@@ -544,6 +1101,211 @@ mod tests {
         let snapshot = Stats::default().snapshot(10);
 
         assert!(snapshot.processes.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_snapshot_reports_current_dimension_cardinality() {
+        let mut stats = Stats::default();
+        let process = ObservedProcess {
+            pid: 7,
+            name: Some(Arc::from("curl")),
+            path: Some(Arc::from("/usr/bin/curl")),
+        };
+        let domain: Arc<str> = Arc::from("example.com");
+
+        stats.record_flow(
+            flow_with_domain(
+                Direction::Outbound,
+                [203, 0, 113, 1],
+                40,
+                Some(domain.clone()),
+            ),
+            Some(process.clone()),
+        );
+        stats.record_flow(
+            flow_with_domain(Direction::Inbound, [203, 0, 113, 2], 20, Some(domain)),
+            Some(process),
+        );
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_ip_entries, 1);
+        assert_eq!(diagnostics.outbound_ip_entries, 1);
+        assert_eq!(diagnostics.process_entries, 1);
+        assert_eq!(diagnostics.domain_entries, 1);
+        assert_eq!(diagnostics.inbound_observation_ip_entries, 1);
+        assert_eq!(diagnostics.outbound_observation_ip_entries, 1);
+        assert_eq!(diagnostics.ip_promotions, 0);
+    }
+
+    #[test]
+    fn ip_dimensions_are_bounded_per_direction() {
+        let mut stats = Stats::default();
+        let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+
+        for index in 0..(MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH * 2) {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), 1),
+                None,
+                observed_at,
+            );
+            stats.record_flow_at(
+                flow_ip(Direction::Outbound, unique_ip(index + 1_000_000), 1),
+                None,
+                observed_at,
+            );
+        }
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert!(diagnostics.inbound_ip_entries <= MAX_IP_DIMENSION_ENTRIES);
+        assert!(diagnostics.outbound_ip_entries <= MAX_IP_DIMENSION_ENTRIES);
+    }
+
+    #[test]
+    fn ip_dimension_prunes_lowest_traffic_without_changing_totals() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+
+        for index in 0..MAX_IP_DIMENSION_ENTRIES {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), (index + 1) as u64),
+                None,
+                first,
+            );
+        }
+        let second = first + Duration::minutes(1);
+        for offset in 0..IP_DIMENSION_PRUNE_BATCH {
+            stats.record_flow_at(
+                flow_ip(
+                    Direction::Inbound,
+                    unique_ip(MAX_IP_DIMENSION_ENTRIES + offset),
+                    1_000_000,
+                ),
+                None,
+                second,
+            );
+        }
+
+        let snapshot = stats.snapshot(MAX_IP_DIMENSION_ENTRIES);
+        assert_eq!(
+            snapshot.in_bytes,
+            (MAX_IP_DIMENSION_ENTRIES * (MAX_IP_DIMENSION_ENTRIES + 1) / 2) as u64
+                + (IP_DIMENSION_PRUNE_BATCH * 1_000_000) as u64
+        );
+        assert_eq!(snapshot.out_bytes, 0);
+        assert!(snapshot.inbound_ips.len() <= MAX_IP_DIMENSION_ENTRIES);
+        assert!(
+            !snapshot
+                .inbound_ips
+                .iter()
+                .any(|entry| entry.ip == unique_ip(0))
+        );
+        assert!(
+            snapshot
+                .inbound_ips
+                .iter()
+                .any(|entry| entry.ip == unique_ip(IP_DIMENSION_PRUNE_BATCH + 1))
+        );
+        assert!(snapshot.inbound_ips.iter().any(|entry| {
+            entry.ip == unique_ip(MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH - 1)
+        }));
+    }
+
+    #[test]
+    fn ip_window_tracks_recent_bytes_and_surge() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+        let peer = unique_ip(7);
+
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 100), None, first);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 50), None, second);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 300), None, third);
+
+        let state = stats.in_ip_windows.get(&peer).unwrap();
+        assert_eq!(state.current_bucket_bytes(bucket_epoch(third)), 300);
+        assert_eq!(state.window_bytes(bucket_epoch(third)), 450);
+        assert_eq!(state.previous_window_bytes(bucket_epoch(third)), 150);
+        assert_eq!(state.surge_bytes(bucket_epoch(third)), 1_050);
+        assert_eq!(state.observed_buckets, 3);
+    }
+
+    #[test]
+    fn ip_tier_promotion_waits_for_two_buckets() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+        let peer = unique_ip(8);
+
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 100), None, first);
+        assert_eq!(
+            stats.diagnostics_snapshot().inbound_observation_ip_entries,
+            1
+        );
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 200), None, second);
+        assert_eq!(stats.diagnostics_snapshot().ip_promotions, 0);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 10), None, third);
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_heavy_ip_entries, 1);
+        assert_eq!(diagnostics.inbound_observation_ip_entries, 0);
+        assert_eq!(diagnostics.ip_promotions, 1);
+    }
+
+    #[test]
+    fn rising_tier_keeps_recent_candidates_when_heavy_capacity_is_unused() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+
+        for index in 0..100 {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), 10),
+                None,
+                first,
+            );
+        }
+        for index in 0..100 {
+            let bytes = if index == 0 { 10_000 } else { 10 };
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), bytes),
+                None,
+                second,
+            );
+        }
+        stats.record_flow_at(flow_ip(Direction::Inbound, unique_ip(0), 1), None, third);
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_rising_ip_entries, 20);
+        assert_eq!(diagnostics.inbound_heavy_ip_entries, 80);
+        assert_eq!(stats.in_ip_windows[&unique_ip(0)].tier, IpTier::Rising);
+    }
+
+    #[test]
+    fn idle_heavy_ip_is_demoted_after_three_windows() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+        let after_idle = first + Duration::minutes(17);
+        let peer = unique_ip(9);
+
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 100), None, first);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 200), None, second);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 10), None, third);
+        assert_eq!(stats.diagnostics_snapshot().inbound_heavy_ip_entries, 1);
+
+        stats.record_flow_at(
+            flow_ip(Direction::Inbound, unique_ip(10), 1),
+            None,
+            after_idle,
+        );
+
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_heavy_ip_entries, 0);
+        assert!(diagnostics.ip_demotions >= 1);
     }
 
     #[test]
@@ -733,6 +1495,23 @@ mod tests {
             },
             &process_name
         ));
+    }
+
+    #[test]
+    fn ip_top_n_keeps_lifetime_byte_ranking() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let historical = unique_ip(20);
+        let recent = unique_ip(21);
+
+        stats.record_flow_at(flow_ip(Direction::Inbound, historical, 1_000), None, first);
+        stats.record_flow_at(flow_ip(Direction::Inbound, historical, 1), None, second);
+        stats.record_flow_at(flow_ip(Direction::Inbound, recent, 500), None, second);
+
+        let snapshot = stats.snapshot(1);
+        assert_eq!(snapshot.inbound_ips[0].ip, historical);
+        assert_eq!(snapshot.inbound_ips[0].bytes, 1_001);
     }
 
     #[test]
@@ -956,9 +1735,13 @@ mod tests {
     }
 
     fn flow(direction: Direction, peer: [u8; 4], bytes: u64) -> Flow {
+        flow_ip(direction, ip(peer), bytes)
+    }
+
+    fn flow_ip(direction: Direction, peer: IpAddr, bytes: u64) -> Flow {
         Flow {
             direction,
-            peer: ip(peer),
+            peer,
             peer_port: None,
             bytes,
             local_socket: None,
@@ -986,5 +1769,15 @@ mod tests {
 
     fn ip(octets: [u8; 4]) -> IpAddr {
         IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
+    fn unique_ip(index: usize) -> IpAddr {
+        let index = index as u32;
+        IpAddr::V4(Ipv4Addr::new(
+            10,
+            ((index >> 16) & 0xff) as u8,
+            ((index >> 8) & 0xff) as u8,
+            (index & 0xff) as u8,
+        ))
     }
 }

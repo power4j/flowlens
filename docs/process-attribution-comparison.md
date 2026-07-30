@@ -4,9 +4,9 @@ Use this runbook to compare the old build and the ProcessProbe build on the same
 
 ## Capture
 
-Run one version at a time for a fixed window, for example 10 minutes. Keep JSONL on stdout and diagnostics on stderr. A typical command is:
+Run one version at a time for a fixed window, for example 10 minutes. Keep traffic JSONL on stdout and diagnostics in a separate JSONL file. A typical command is:
 
-    delray.exe <interface> --format json --diagnostics > new.jsonl 2> new.diag
+    delray.exe <interface> --format json --diagnostics --diagnostics-output new.diag.jsonl > new.jsonl
 
 Use the same command for the old executable and replace the output names. Record the OS build, Delray commit, Rust toolchain, Npcap/listeners version, interface selector, start/end time, and whether the process ran elevated.
 
@@ -27,7 +27,7 @@ For every JSONL frame, extract:
 - the sum of all attributed process rows;
 - frame timestamp and elapsed time.
 
-For every diagnostics line, record these cumulative counters:
+For every `kind=snapshot` diagnostics record, record these cumulative counters:
 
     no_local_socket
     lookup_no_candidate
@@ -52,6 +52,8 @@ For every diagnostics line, record these cumulative counters:
     probe_query_count
     probe_query_ms
     probe_last_query_ms
+
+Keep `kind=lookup_miss_sample` records as event samples and associate them with their snapshot using `seq`.
 
 Compare both the final totals and the per-window deltas. The useful result is the composition of unidentified traffic, not only the final <unattributed traffic> byte count.
 
