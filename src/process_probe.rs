@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -201,7 +201,9 @@ impl ProcessProbe {
                 self.metrics.query_duration_nanos.load(Ordering::Relaxed),
             ),
             last_query_duration: std::time::Duration::from_nanos(
-                self.metrics.last_query_duration_nanos.load(Ordering::Relaxed),
+                self.metrics
+                    .last_query_duration_nanos
+                    .load(Ordering::Relaxed),
             ),
         }
     }
@@ -236,7 +238,15 @@ impl ProcessProbe {
 
         thread::Builder::new()
             .name("delray-process-probe".to_string())
-            .spawn(move || worker_loop(request_rx, result_tx, worker_in_flight, worker_metrics, query))
+            .spawn(move || {
+                worker_loop(
+                    request_rx,
+                    result_tx,
+                    worker_in_flight,
+                    worker_metrics,
+                    query,
+                )
+            })
             .expect("process probe worker should spawn");
 
         Self {
@@ -526,9 +536,9 @@ mod tests {
             }],
             Ok(listeners),
         )
-            .into_iter()
-            .next()
-            .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
     }
 
     #[test]
@@ -863,7 +873,10 @@ mod tests {
             ProbeRequestOutcome::Queued(request_id) => request_id,
             outcome => panic!("unexpected first request outcome: {outcome:?}"),
         };
-        assert_eq!(probe.request(request), ProbeRequestOutcome::InFlight(first_request));
+        assert_eq!(
+            probe.request(request),
+            ProbeRequestOutcome::InFlight(first_request)
+        );
 
         block_tx.send(()).unwrap();
         let result = loop {

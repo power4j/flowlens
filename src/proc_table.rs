@@ -219,16 +219,28 @@ impl ProcTable {
             .fetch_add(1, Ordering::Relaxed);
         match reason {
             LookupMissReason::NoCandidate => {
-                self.diagnostics.lookup_no_candidate.fetch_add(1, Ordering::Relaxed);
-                self.diagnostics.lookup_no_candidate_bytes.fetch_add(bytes, Ordering::Relaxed);
+                self.diagnostics
+                    .lookup_no_candidate
+                    .fetch_add(1, Ordering::Relaxed);
+                self.diagnostics
+                    .lookup_no_candidate_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
             LookupMissReason::Ambiguous => {
-                self.diagnostics.lookup_ambiguous.fetch_add(1, Ordering::Relaxed);
-                self.diagnostics.lookup_ambiguous_bytes.fetch_add(bytes, Ordering::Relaxed);
+                self.diagnostics
+                    .lookup_ambiguous
+                    .fetch_add(1, Ordering::Relaxed);
+                self.diagnostics
+                    .lookup_ambiguous_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
             LookupMissReason::Stale => {
-                self.diagnostics.lookup_stale.fetch_add(1, Ordering::Relaxed);
-                self.diagnostics.lookup_stale_bytes.fetch_add(bytes, Ordering::Relaxed);
+                self.diagnostics
+                    .lookup_stale
+                    .fetch_add(1, Ordering::Relaxed);
+                self.diagnostics
+                    .lookup_stale_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
         };
     }
@@ -324,10 +336,7 @@ impl ProcTable {
                 .diagnostics
                 .lookup_ambiguous_bytes
                 .load(Ordering::Relaxed),
-            lookup_stale_bytes: self
-                .diagnostics
-                .lookup_stale_bytes
-                .load(Ordering::Relaxed),
+            lookup_stale_bytes: self.diagnostics.lookup_stale_bytes.load(Ordering::Relaxed),
             lookup_v4_mapped_hits: self
                 .diagnostics
                 .lookup_v4_mapped_hits

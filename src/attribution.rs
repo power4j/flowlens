@@ -5,11 +5,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::capture::{Flow, LocalSocket};
-use crate::process_probe::{
-    ConnectionMatch, ProbeProcess, ProbeRequestId, ProbeRequestOutcome,
-    ProbeResult, ProcessProbe,
-};
 use crate::proc_table::{self, LookupOutcome, SharedProcTable};
+use crate::process_probe::{
+    ConnectionMatch, ProbeProcess, ProbeRequestId, ProbeRequestOutcome, ProbeResult, ProcessProbe,
+};
 use crate::stats::{Direction, ObservedProcess, Stats};
 
 pub(crate) const PENDING_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(1);
@@ -299,7 +298,9 @@ impl PendingAttributor {
                     self.probe_state.remove(&socket);
                 }
             }
-            ProbeResult::Ambiguous { request_id, socket, .. } => {
+            ProbeResult::Ambiguous {
+                request_id, socket, ..
+            } => {
                 self.probe_result_ambiguous += 1;
                 self.probe_ambiguous_pending_bytes += self.pending_bytes_for_socket(socket);
                 let Some(state) = self.probe_state.get_mut(&socket) else {
@@ -344,7 +345,9 @@ impl PendingAttributor {
                     self.probe_state.remove(&socket);
                 }
             }
-            ProbeResult::Unavailable { request_id, socket, .. } => {
+            ProbeResult::Unavailable {
+                request_id, socket, ..
+            } => {
                 self.probe_result_unavailable += 1;
                 self.probe_unavailable_pending_bytes += self.pending_bytes_for_socket(socket);
                 let Some(state) = self.probe_state.get_mut(&socket) else {
@@ -455,7 +458,7 @@ impl PendingAttributor {
 
     fn resolve_pending_on_generation_change(
         &mut self,
- stats: &mut Stats,
+        stats: &mut Stats,
         proc_table: &SharedProcTable,
     ) {
         let generation = proc_table.read().ok().map(|table| table.generation());
@@ -554,10 +557,8 @@ impl PendingAttributor {
             if pending.socket != socket {
                 continue;
             }
-            let peer = std::net::SocketAddr::new(
-                pending.connection.peer_ip,
-                pending.connection.peer_port,
-            );
+            let peer =
+                std::net::SocketAddr::new(pending.connection.peer_ip, pending.connection.peer_port);
             if !peers.contains(&peer) {
                 peers.push(peer);
             }
@@ -720,10 +721,7 @@ fn connection_process(
     pending: &PendingAttribution,
     matches: &[ConnectionMatch],
 ) -> Option<ProbeProcess> {
-    let peer = std::net::SocketAddr::new(
-        pending.connection.peer_ip,
-        pending.connection.peer_port,
-    );
+    let peer = std::net::SocketAddr::new(pending.connection.peer_ip, pending.connection.peer_port);
     matches
         .iter()
         .find(|connection| connection.peer == peer)
@@ -734,7 +732,7 @@ fn connection_process(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{mpsc, Arc, RwLock};
+    use std::sync::{Arc, RwLock, mpsc};
     use std::thread;
 
     use super::*;
@@ -873,10 +871,7 @@ mod tests {
         };
         let observed_at = observed_at();
         let (release_tx, release_rx) = mpsc::channel();
-        let probe = ProcessProbe::spawn_blocked_for_test(
-            Arc::new(AtomicUsize::new(0)),
-            release_rx,
-        );
+        let probe = ProcessProbe::spawn_blocked_for_test(Arc::new(AtomicUsize::new(0)), release_rx);
         let request_id = match probe.request_for_peers(socket, vec![first_peer, second_peer]) {
             ProbeRequestOutcome::Queued(request_id) => request_id,
             outcome => panic!("unexpected probe request outcome: {outcome:?}"),

@@ -4,8 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
-    MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
-    TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+    MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
 
 use crate::capture::TransportProtocol;
@@ -213,7 +212,11 @@ fn parse_udp6(table: &[u8]) -> Result<Vec<ConnectionRecord>, String> {
 fn rows<T: Copy>(table: &[u8], count: usize) -> Result<Vec<T>, String> {
     let row_size = size_of::<T>();
     let required = size_of::<u32>()
-        .checked_add(row_size.checked_mul(count).ok_or("connection table is too large")?)
+        .checked_add(
+            row_size
+                .checked_mul(count)
+                .ok_or("connection table is too large")?,
+        )
         .ok_or("connection table is too large")?;
     if table.len() < required {
         return Err("connection table rows are truncated".to_string());
