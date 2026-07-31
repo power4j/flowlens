@@ -34,6 +34,7 @@ pub(crate) enum ProbeRequestOutcome {
 struct ProbeRequest {
     id: ProbeRequestId,
     socket: LocalSocket,
+    #[cfg_attr(not(windows), allow(dead_code))]
     peers: Vec<SocketAddr>,
 }
 
@@ -65,6 +66,7 @@ pub(crate) enum ProbeResult {
         socket: LocalSocket,
         error: Arc<str>,
     },
+    #[cfg_attr(not(windows), allow(dead_code))]
     ConnectionMatches {
         request_id: ProbeRequestId,
         socket: LocalSocket,
