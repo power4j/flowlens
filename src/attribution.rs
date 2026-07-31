@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use crate::capture::{Flow, LocalSocket};
 use crate::process_probe::{
-    ConnectionMatch, ProbeDiagnosticsSnapshot, ProbeProcess, ProbeRequestId, ProbeRequestOutcome,
+    ConnectionMatch, ProbeProcess, ProbeRequestId, ProbeRequestOutcome,
     ProbeResult, ProcessProbe,
 };
 use crate::proc_table::{self, LookupOutcome, SharedProcTable};
@@ -491,7 +491,7 @@ impl PendingAttributor {
             .probe
             .as_ref()
             .map(ProcessProbe::diagnostics_snapshot)
-            .unwrap_or(ProbeDiagnosticsSnapshot::default());
+            .unwrap_or_default();
         PendingAttributionSnapshot {
             records: self.pending.len(),
             bytes: self.pending.iter().map(|pending| pending.bytes).sum(),
