@@ -101,6 +101,7 @@ fn capture_loop<N, E>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aggregate_loop_with_probe(
     flow_rx: Receiver<Flow>,
     snapshot_tx: SyncSender<Arc<TrafficSnapshot>>,
