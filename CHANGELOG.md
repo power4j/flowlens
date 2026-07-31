@@ -6,6 +6,20 @@ All notable changes to Delray are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.2.0] - 2026-07-31
+
+### Added
+
 - TUI views for interface totals, processes, IP addresses, outbound domains, and application information.
 - Plain-text, JSON, and JSON Lines output modes.
 - Best-effort process attribution with PID, executable identity, and unattributed traffic reporting.
