@@ -663,10 +663,10 @@ impl PendingAttributor {
                 self.pending_expired_bytes += pending.bytes;
             }
             stats.record_process(None, pending.direction, pending.bytes, pending.observed_at);
-            if !self.pending.iter().any(|pending| pending.socket == socket) {
-                if let Some(state) = self.probe_state.get_mut(&socket) {
-                    state.accept_results = false;
-                }
+            if !self.pending.iter().any(|pending| pending.socket == socket)
+                && let Some(state) = self.probe_state.get_mut(&socket)
+            {
+                state.accept_results = false;
             }
         }
     }

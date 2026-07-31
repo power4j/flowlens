@@ -277,10 +277,10 @@ fn worker_loop(
         for result in resolve_batch(&sockets, listeners) {
             let socket = result.socket();
             let request_id = result.request_id();
-            if let Ok(mut in_flight) = in_flight.lock() {
-                if in_flight.get(&socket) == Some(&request_id) {
-                    in_flight.remove(&socket);
-                }
+            if let Ok(mut in_flight) = in_flight.lock()
+                && in_flight.get(&socket) == Some(&request_id)
+            {
+                in_flight.remove(&socket);
             }
             if result_tx.send(result).is_err() {
                 return;
