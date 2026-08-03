@@ -207,6 +207,9 @@ pub struct DiagnosticsCounters {
     pub ip_evictions_heavy: u64,
     pub ip_evictions_rising: u64,
     pub ip_evictions_observation: u64,
+    pub pcap_received: u64,
+    pub pcap_dropped: u64,
+    pub pcap_if_dropped: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

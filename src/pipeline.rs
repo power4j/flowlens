@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::attribution::{self, PendingAttributor};
-use crate::capture::{CaptureSource, Flow};
+use crate::capture::{CaptureCounters, CaptureSource, Flow};
 use crate::diagnostics;
 #[cfg(test)]
 use crate::proc_table;
@@ -111,6 +111,7 @@ fn aggregate_loop_with_probe(
     probe: Option<ProcessProbe>,
     flow_table_entries: Option<Arc<AtomicU64>>,
     diagnostics_enabled: bool,
+    pcap_counters: Option<Arc<CaptureCounters>>,
     stop: Arc<AtomicBool>,
     failure: Arc<OnceLock<PipelineError>>,
 ) {
@@ -143,6 +144,7 @@ fn aggregate_loop_with_probe(
                 top_n,
                 pending_bytes,
                 flow_table_entries.as_ref(),
+                pcap_counters.as_ref(),
                 false,
             );
             let published = match snapshot_tx.try_send(Arc::new(snapshot)) {
@@ -167,6 +169,7 @@ fn aggregate_loop_with_probe(
                 top_n,
                 pending_bytes,
                 flow_table_entries.as_ref(),
+                pcap_counters.as_ref(),
                 diagnostics_enabled,
             );
             let snapshot = Arc::new(snapshot);
@@ -226,6 +229,7 @@ fn aggregate_loop(
         None,
         None,
         false,
+        None,
         stop,
         failure,
     );
@@ -238,6 +242,7 @@ fn snapshot_for_publish(
     top_n: usize,
     pending_attribution_bytes: u64,
     flow_table_entries: Option<&Arc<AtomicU64>>,
+    pcap_counters: Option<&Arc<CaptureCounters>>,
     diagnostics_enabled: bool,
 ) -> TrafficSnapshot {
     let mut snapshot = stats.snapshot(top_n);
@@ -249,6 +254,7 @@ fn snapshot_for_publish(
             attributor.snapshot(),
             stats.diagnostics_snapshot(),
             flow_table_entries.map_or(0, |entries| entries.load(Ordering::Relaxed)),
+            pcap_counters.map(|counters| counters.as_ref()),
         )
         .map(Arc::new)
     } else {
@@ -278,6 +284,7 @@ impl TrafficPipeline {
         let breakloop = source.breakloop_handle();
         let flow_table_entries = Arc::new(AtomicU64::new(0));
         let capture_flow_table_entries = flow_table_entries.clone();
+        let pcap_counters = source.pcap_counters();
         Self::spawn_with_next_using(
             move || {
                 let result = source.next();
@@ -290,6 +297,7 @@ impl TrafficPipeline {
             Some(flow_table_entries),
             diagnostics_enabled,
             Some(Box::new(move || breakloop.breakloop())),
+            Some(pcap_counters),
             spawn_named_thread,
         )
     }
@@ -310,6 +318,7 @@ impl TrafficPipeline {
             top_n,
             None,
             false,
+            None,
             None,
             spawn_named_thread,
         )
@@ -334,6 +343,7 @@ impl TrafficPipeline {
             None,
             false,
             Some(Box::new(wake_capture)),
+            None,
             spawn_named_thread,
         )
     }
@@ -345,6 +355,7 @@ impl TrafficPipeline {
         flow_table_entries: Option<Arc<AtomicU64>>,
         diagnostics_enabled: bool,
         capture_wakeup: Option<CaptureWakeup>,
+        pcap_counters: Option<Arc<CaptureCounters>>,
         mut spawn_thread: S,
     ) -> io::Result<Self>
     where
@@ -375,6 +386,7 @@ impl TrafficPipeline {
                     Some(ProcessProbe::spawn()),
                     flow_table_entries,
                     diagnostics_enabled,
+                    pcap_counters,
                     aggregate_stop,
                     aggregate_failure,
                 );
@@ -1116,6 +1128,7 @@ mod tests {
             10,
             None,
             false,
+            None,
             None,
             move |name, task| {
                 if name == "delray-capture" {

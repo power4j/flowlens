@@ -240,6 +240,7 @@ fn background_loop(
                     attributor.snapshot(),
                     stats.diagnostics_snapshot(),
                     source.flow_table_entry_count(),
+                    Some(source.pcap_counters().as_ref()),
                 )
                 && let Err(error) = writer.write(interface, &snapshot)
             {
@@ -280,6 +281,7 @@ fn json_stdout_loop(
                     attributor.snapshot(),
                     stats.diagnostics_snapshot(),
                     source.flow_table_entry_count(),
+                    Some(source.pcap_counters().as_ref()),
                 )
                 && let Err(error) = writer.write(interface, &snapshot)
             {

@@ -1,11 +1,13 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use serde::Serialize;
 
 use crate::attribution::PendingAttributionSnapshot;
+use crate::capture::CaptureCounters;
 use crate::proc_table::{LookupMissSample, ProcDiagnosticsSnapshot, SharedProcTable};
 use crate::stats::{
     DiagnosticsCounters, DiagnosticsGauges, DiagnosticsIp, DiagnosticsMissSample,
@@ -27,9 +29,10 @@ pub(crate) fn collect(
     pending: PendingAttributionSnapshot,
     stats: StatsDiagnostics,
     flow_table_entries: u64,
+    pcap: Option<&CaptureCounters>,
 ) -> Option<DiagnosticsSnapshot> {
     let proc = crate::proc_table::diagnostics_snapshot(proc_table)?;
-    Some(from_parts(proc, pending, stats, flow_table_entries))
+    Some(from_parts(proc, pending, stats, flow_table_entries, pcap))
 }
 
 pub(crate) fn from_parts(
@@ -37,6 +40,7 @@ pub(crate) fn from_parts(
     pending: PendingAttributionSnapshot,
     stats: StatsDiagnostics,
     flow_table_entries: u64,
+    pcap: Option<&CaptureCounters>,
 ) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot {
         counters: DiagnosticsCounters {
@@ -76,6 +80,9 @@ pub(crate) fn from_parts(
             ip_evictions_heavy: stats.ip_evictions_heavy,
             ip_evictions_rising: stats.ip_evictions_rising,
             ip_evictions_observation: stats.ip_evictions_observation,
+            pcap_received: pcap.map_or(0, |c| c.received.load(Ordering::Relaxed)),
+            pcap_dropped: pcap.map_or(0, |c| c.dropped.load(Ordering::Relaxed)),
+            pcap_if_dropped: pcap.map_or(0, |c| c.if_dropped.load(Ordering::Relaxed)),
         },
         gauges: DiagnosticsGauges {
             flow_table_entries,

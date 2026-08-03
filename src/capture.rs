@@ -4,6 +4,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use etherparse::{EtherType, NetHeaders, PacketHeaders, TransportHeader};
@@ -15,6 +17,14 @@ use crate::flow_table::{DEFAULT_FLOW_TABLE_CAPACITY, FlowEntry, FlowKey, FlowTab
 use crate::stats::Direction;
 
 /// 指定网卡的抓包源。
+/// pcap 层累计计数，由抓包线程周期采样，供诊断输出使用。
+#[derive(Default)]
+pub struct CaptureCounters {
+    pub received: AtomicU64,
+    pub dropped: AtomicU64,
+    pub if_dropped: AtomicU64,
+}
+
 pub struct CaptureSource {
     cap: Capture<pcap::Active>,
     interface_name: String,
@@ -24,6 +34,8 @@ pub struct CaptureSource {
     /// 连接级域名流表（5-tuple → Resolved/NoDomain），生产路径默认启用。
     /// 测试可通过 [`open_with_domain_parser`] 注入自定义实例。
     flow_table: Arc<FlowTable>,
+    pcap_counters: Arc<CaptureCounters>,
+    last_pcap_stats_sample: Instant,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -278,6 +290,8 @@ impl CaptureSource {
             local_ips,
             domain_parser,
             flow_table,
+            pcap_counters: Arc::new(CaptureCounters::default()),
+            last_pcap_stats_sample: Instant::now(),
         })
     }
 
@@ -295,7 +309,7 @@ impl CaptureSource {
 
     /// 读取下一个包；无包（读超时）返回 Ok(None)。
     pub fn next(&mut self) -> Result<Option<Flow>> {
-        match self.cap.next_packet() {
+        let result = match self.cap.next_packet() {
             Ok(packet) => parse_with_domain_parser(
                 self.link_type,
                 packet.data,
@@ -305,7 +319,30 @@ impl CaptureSource {
             ),
             Err(pcap::Error::TimeoutExpired) => Ok(None),
             Err(e) => Err(anyhow::Error::from(e)),
+        };
+        self.sample_pcap_stats();
+        result
+    }
+
+    /// 每秒采样一次 pcap 统计（received/dropped/if_dropped），供诊断输出使用。
+    fn sample_pcap_stats(&mut self) {
+        if self.last_pcap_stats_sample.elapsed() < Duration::from_secs(1) {
+            return;
         }
+        self.last_pcap_stats_sample = Instant::now();
+        if let Ok(stat) = self.cap.stats() {
+            self.pcap_counters
+                .received
+                .store(u64::from(stat.received), Ordering::Relaxed);
+            self.pcap_counters.dropped.store(u64::from(stat.dropped), Ordering::Relaxed);
+            self.pcap_counters
+                .if_dropped
+                .store(u64::from(stat.if_dropped), Ordering::Relaxed);
+        }
+    }
+
+    pub fn pcap_counters(&self) -> Arc<CaptureCounters> {
+        Arc::clone(&self.pcap_counters)
     }
 }
 
