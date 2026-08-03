@@ -103,7 +103,8 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
             eprintln!("Failed to open interface: {error}");
             return ExitCode::FAILURE;
         }
-        if let Err(error) = tui::run(&mut session, diagnostics_writer) {
+        let diagnostics_enabled = session.diagnostics_enabled_handle();
+        if let Err(error) = tui::run(&mut session, diagnostics_writer, diagnostics_enabled) {
             eprintln!("TUI error: {error}");
             return ExitCode::FAILURE;
         }

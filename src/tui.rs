@@ -5,6 +5,7 @@
 
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -152,6 +153,10 @@ struct AppState {
     /// Terminal color tier detected at startup; `Auto` follows this.
     detected_tier: palette::ColorTier,
     diagnostics_error: Option<String>,
+    /// Whether diagnostics are being written (toggled in the settings overlay).
+    diagnostics_enabled: bool,
+    /// Basename of the currently open diagnostics output file.
+    diagnostics_file: Option<String>,
 }
 
 impl AppState {
@@ -173,6 +178,8 @@ impl AppState {
             palette_choice: palette::PaletteChoice::Auto,
             detected_tier: palette::detect_tier(),
             diagnostics_error: None,
+            diagnostics_enabled: false,
+            diagnostics_file: None,
         }
     }
 
@@ -316,6 +323,10 @@ where
                 ));
                 KeyOutcome::Changed
             }
+            KeyCode::Char('d') => {
+                state.diagnostics_enabled = !state.diagnostics_enabled;
+                KeyOutcome::Changed
+            }
             // j/k/Up/Down have no effect with a single adjustable option.
             KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') => {
                 KeyOutcome::Ignored
@@ -364,6 +375,7 @@ fn finish_tui_activation(
 pub fn run(
     session: &mut TrafficSession,
     diagnostics_writer: Option<DiagnosticsWriter>,
+    diagnostics_enabled: Arc<AtomicBool>,
 ) -> io::Result<()> {
     palette::set_active_tier(palette::detect_tier());
     let started_at = Instant::now();
@@ -384,6 +396,13 @@ pub fn run(
     } else {
         AppState::startup(session.interfaces())
     };
+    if let Some(writer) = diagnostics_writer.as_ref() {
+        state.diagnostics_enabled = true;
+        state.diagnostics_file = writer
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+    }
     let result = tui_loop(
         &mut terminal,
         &mut state,
@@ -392,6 +411,7 @@ pub fn run(
         started_at,
         session,
         diagnostics_writer,
+        diagnostics_enabled,
     );
 
     // Restore terminal regardless of how the event loop exited.
@@ -410,6 +430,7 @@ fn tui_loop(
     started_at: Instant,
     session: &mut TrafficSession,
     mut diagnostics_writer: Option<DiagnosticsWriter>,
+    diagnostics_enabled: Arc<AtomicBool>,
 ) -> io::Result<()> {
     terminal.draw(|f| {
         draw_with_interfaces(
@@ -422,6 +443,8 @@ fn tui_loop(
             started_at,
         )
     })?;
+
+    let mut diagnostics_active = diagnostics_writer.is_some();
 
     loop {
         let event = if event::poll(EVENT_POLL_INTERVAL)? {
@@ -448,6 +471,33 @@ fn tui_loop(
             }
         }
 
+        if state.diagnostics_enabled != diagnostics_active {
+            if state.diagnostics_enabled {
+                match DiagnosticsWriter::create(crate::diagnostics::default_output_path()) {
+                    Ok(writer) => {
+                        state.diagnostics_file = writer
+                            .path()
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned());
+                        state.diagnostics_error = None;
+                        diagnostics_writer = Some(writer);
+                        diagnostics_active = true;
+                        diagnostics_enabled.store(true, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        state.diagnostics_enabled = false;
+                        state.diagnostics_error = Some(format!("Diagnostics unavailable: {error}"));
+                    }
+                }
+            } else {
+                diagnostics_writer = None;
+                state.diagnostics_file = None;
+                diagnostics_active = false;
+                diagnostics_enabled.store(false, Ordering::Relaxed);
+            }
+            changed = true;
+        }
+
         if let Some(result) = session.poll_activation() {
             finish_tui_activation(state, snapshot, result);
             changed = true;
@@ -472,6 +522,10 @@ fn tui_loop(
                 let interface = session.active_interface().unwrap_or("<none>");
                 if let Err(error) = writer.write(interface, diagnostics) {
                     diagnostics_writer = None;
+                    diagnostics_active = false;
+                    state.diagnostics_enabled = false;
+                    state.diagnostics_file = None;
+                    diagnostics_enabled.store(false, Ordering::Relaxed);
                     state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
                 }
             }
@@ -1996,7 +2050,7 @@ fn draw_about(f: &mut ratatui::Frame, area: Rect) {
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let popup = centered_rect(area, 60, 7);
+    let popup = centered_rect(area, 60, 9);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette::accent()))
@@ -2012,6 +2066,8 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ]));
     let detected_label = color_tier_label(state.detected_tier);
     let choice_label = palette_choice_label(state.palette_choice);
+    let diagnostics_label = if state.diagnostics_enabled { "ON" } else { "OFF" };
+    let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
     let lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -2030,9 +2086,33 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 Style::default().fg(palette::muted()),
             ),
         ]),
+        Line::from(vec![
+            Span::styled(
+                "Diagnostics: ",
+                Style::default()
+                    .fg(palette::strong())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                diagnostics_label,
+                Style::default().fg(palette::accent()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "File: ",
+                Style::default()
+                    .fg(palette::strong())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                file_label,
+                Style::default().fg(palette::muted()),
+            ),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
-            "h/l change  o or Esc close",
+            "d diagnostics  h/l change  o or Esc close",
             Style::default().fg(palette::muted()),
         )),
     ];
@@ -4218,30 +4298,78 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Settings"));
         assert!(rendered.contains("Palette:"));
-        assert!(rendered.contains("h/l change  o or Esc close"));
+        assert!(rendered.contains("d diagnostics"));
+    }
+
+    #[test]
+    fn settings_d_key_toggles_diagnostics_state() {
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        assert!(state.settings_open);
+        assert!(!state.diagnostics_enabled);
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('d')),
+            KeyOutcome::Changed
+        );
+        assert!(state.diagnostics_enabled);
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('d')),
+            KeyOutcome::Changed
+        );
+        assert!(!state.diagnostics_enabled);
+    }
+
+    #[test]
+    fn settings_overlay_renders_diagnostics_state_and_file() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        state.settings_open = true;
+        state.diagnostics_enabled = true;
+        state.diagnostics_file = Some("delray-20260803T120000Z123456789-42.log".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("Diagnostics: ON"));
+        assert!(rendered.contains("delray-20260803T120000Z123456789-42.log"));
     }
 
     #[test]
     fn settings_overlay_clears_underlying_cells() {
         let state = AppState::new();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let popup = centered_rect(area, 60, 9);
 
         terminal
             .draw(|frame| {
                 frame.render_widget(
                     Paragraph::new("underlay"),
                     Rect {
-                        x: 20,
-                        y: 10,
+                        x: popup.x + 2,
+                        y: popup.y + 1,
                         width: 8,
                         height: 1,
                     },
                 );
-                draw_settings(frame, frame.area(), &state);
+                draw_settings(frame, area, &state);
             })
             .unwrap();
 
-        assert_eq!(terminal.backend().buffer()[(20, 10)].symbol(), " ");
+        assert_eq!(
+            terminal.backend().buffer()[(popup.x + 2, popup.y + 1)].symbol(),
+            " "
+        );
     }
 
     #[test]

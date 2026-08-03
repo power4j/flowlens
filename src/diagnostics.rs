@@ -19,7 +19,7 @@ pub(crate) const SCHEMA_VERSION: u8 = 1;
 pub(crate) fn default_output_path() -> PathBuf {
     PathBuf::from(format!(
         "delray-{}-{}.log",
-        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        Utc::now().format("%Y%m%dT%H%M%SZ%f"),
         std::process::id()
     ))
 }
@@ -133,6 +133,7 @@ pub(crate) struct DiagnosticsWriter {
     writer: BufWriter<File>,
     run_id: String,
     sequence: u64,
+    path: PathBuf,
 }
 
 impl DiagnosticsWriter {
@@ -148,7 +149,12 @@ impl DiagnosticsWriter {
             writer: BufWriter::new(file),
             run_id,
             sequence: 0,
+            path: path.to_path_buf(),
         })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 
     pub(crate) fn write(

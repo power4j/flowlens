@@ -6,6 +6,8 @@ All notable changes to Delray are recorded in this file.
 
 ### Added
 
+- TUI settings overlay can toggle diagnostics at runtime (`d` key); each enable writes to a fresh timestamped log file and the overlay shows the current file name.
+
 ### Changed
 
 ### Fixed
