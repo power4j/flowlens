@@ -157,6 +157,8 @@ struct AppState {
     diagnostics_enabled: bool,
     /// Basename of the currently open diagnostics output file.
     diagnostics_file: Option<String>,
+    /// Selected settings row (0 = Palette, 1 = Diagnostics).
+    settings_selection: usize,
 }
 
 impl AppState {
@@ -180,6 +182,7 @@ impl AppState {
             diagnostics_error: None,
             diagnostics_enabled: false,
             diagnostics_file: None,
+            settings_selection: 0,
         }
     }
 
@@ -307,36 +310,40 @@ where
                 state.settings_open = false;
                 KeyOutcome::Changed
             }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                state.palette_choice = next_palette_choice(state.palette_choice);
-                palette::set_active_tier(palette::resolve(
-                    state.palette_choice,
-                    state.detected_tier,
-                ));
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.settings_selection = state.settings_selection.saturating_sub(1);
                 KeyOutcome::Changed
             }
-            KeyCode::Left | KeyCode::Char('h') => {
-                state.palette_choice = prev_palette_choice(state.palette_choice);
-                palette::set_active_tier(palette::resolve(
-                    state.palette_choice,
-                    state.detected_tier,
-                ));
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.settings_selection = (state.settings_selection + 1).min(1);
                 KeyOutcome::Changed
             }
-            KeyCode::Char('d') => {
-                state.diagnostics_enabled = !state.diagnostics_enabled;
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
+                if state.settings_selection == 0 {
+                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
+                    state.palette_choice = if forward {
+                        next_palette_choice(state.palette_choice)
+                    } else {
+                        prev_palette_choice(state.palette_choice)
+                    };
+                    palette::set_active_tier(palette::resolve(
+                        state.palette_choice,
+                        state.detected_tier,
+                    ));
+                } else {
+                    state.diagnostics_enabled = !state.diagnostics_enabled;
+                }
                 KeyOutcome::Changed
             }
-            // j/k/Up/Down have no effect with a single adjustable option.
-            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') => {
-                KeyOutcome::Ignored
-            }
+            // Enter has no action in the settings overlay.
+            KeyCode::Enter => KeyOutcome::Ignored,
             // The overlay swallows all other keys so page shortcuts do not
             // leak through while it is open.
             _ => KeyOutcome::Ignored,
         }
     } else if key.code == KeyCode::Char('o') {
         state.settings_open = true;
+        state.settings_selection = 0;
         KeyOutcome::Changed
     } else if key.code == KeyCode::Char('i') {
         state.open_interface_selector(interfaces, active, true);
@@ -2068,36 +2075,44 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let choice_label = palette_choice_label(state.palette_choice);
     let diagnostics_label = if state.diagnostics_enabled { "ON" } else { "OFF" };
     let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
+    let selection_style = palette::selection_style();
+    let mut palette_line = Line::from(vec![
+        Span::styled(
+            "Palette: ",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            choice_label.to_string(),
+            Style::default().fg(palette::accent()),
+        ),
+        Span::styled(
+            format!("  (detected: {detected_label})"),
+            Style::default().fg(palette::muted()),
+        ),
+    ]);
+    let mut diagnostics_line = Line::from(vec![
+        Span::styled(
+            "Diagnostics: ",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            diagnostics_label,
+            Style::default().fg(palette::accent()),
+        ),
+    ]);
+    if state.settings_selection == 0 {
+        palette_line.style = selection_style;
+    } else {
+        diagnostics_line.style = selection_style;
+    }
     let lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "Palette: ",
-                Style::default()
-                    .fg(palette::strong())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                choice_label.to_string(),
-                Style::default().fg(palette::accent()),
-            ),
-            Span::styled(
-                format!("  (detected: {detected_label})"),
-                Style::default().fg(palette::muted()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "Diagnostics: ",
-                Style::default()
-                    .fg(palette::strong())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                diagnostics_label,
-                Style::default().fg(palette::accent()),
-            ),
-        ]),
+        palette_line,
+        diagnostics_line,
         Line::from(vec![
             Span::styled(
                 "File: ",
@@ -2112,7 +2127,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "d diagnostics  h/l change  o or Esc close",
+            "j/k select  h/l change  o or Esc close",
             Style::default().fg(palette::muted()),
         )),
     ];
@@ -4298,27 +4313,79 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Settings"));
         assert!(rendered.contains("Palette:"));
-        assert!(rendered.contains("d diagnostics"));
+        assert!(rendered.contains("j/k select  h/l change  o or Esc close"));
     }
 
     #[test]
-    fn settings_d_key_toggles_diagnostics_state() {
+    fn settings_jk_moves_selection_and_clamps() {
         let mut state = AppState::new();
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
+        assert_eq!(state.settings_selection, 0);
+
+        // Down/j moves to Diagnostics and clamps at the bottom.
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('j')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(state.settings_selection, 1);
+        assert_eq!(send_key(&mut state, KeyCode::Down), KeyOutcome::Changed);
+        assert_eq!(state.settings_selection, 1);
+
+        // Up/k moves back to Palette and clamps at the top.
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('k')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(state.settings_selection, 0);
+        assert_eq!(send_key(&mut state, KeyCode::Up), KeyOutcome::Changed);
+        assert_eq!(state.settings_selection, 0);
+    }
+
+    #[test]
+    fn settings_hl_changes_the_selected_item_only() {
+        let mut state = AppState::new();
+        state.detected_tier = palette::ColorTier::Truecolor;
+        state.palette_choice = palette::PaletteChoice::Auto;
+        send_key(&mut state, KeyCode::Char('o'));
+
+        // Palette row selected by default: h/l cycle the palette.
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('l')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(state.palette_choice, palette::PaletteChoice::Truecolor);
         assert!(!state.diagnostics_enabled);
 
+        // Select Diagnostics: h/l toggle diagnostics instead.
+        send_key(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.settings_selection, 1);
         assert_eq!(
-            send_key(&mut state, KeyCode::Char('d')),
+            send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
         assert!(state.diagnostics_enabled);
-
         assert_eq!(
-            send_key(&mut state, KeyCode::Char('d')),
+            send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
         assert!(!state.diagnostics_enabled);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('h')),
+            KeyOutcome::Changed
+        );
+        assert!(state.diagnostics_enabled);
+    }
+
+    #[test]
+    fn settings_enter_is_ignored() {
+        let mut state = AppState::new();
+        state.detected_tier = palette::ColorTier::Truecolor;
+        state.palette_choice = palette::PaletteChoice::Auto;
+        send_key(&mut state, KeyCode::Char('o'));
+
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
+        assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
     }
 
     #[test]
@@ -4337,6 +4404,42 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Diagnostics: ON"));
         assert!(rendered.contains("delray-20260803T120000Z123456789-42.log"));
+    }
+
+    #[test]
+    fn settings_overlay_highlights_the_selected_row() {
+        let snapshot = TrafficSnapshot::default();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let popup = centered_rect(area, 60, 9);
+        let render_styles = |selection: usize| {
+            let mut state = AppState::new();
+            state.settings_open = true;
+            state.settings_selection = selection;
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now())
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (
+                buffer[(popup.x + 1, popup.y + 2)].style(),
+                buffer[(popup.x + 1, popup.y + 3)].style(),
+            )
+        };
+        let (palette_top, diagnostics_top) = render_styles(0);
+        let (palette_bottom, diagnostics_bottom) = render_styles(1);
+        assert_ne!(palette_top, palette_bottom, "palette row highlight should follow selection");
+        assert_ne!(
+            diagnostics_top,
+            diagnostics_bottom,
+            "diagnostics row highlight should follow selection"
+        );
     }
 
     #[test]
@@ -4419,10 +4522,10 @@ mod tests {
         );
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
 
-        // Enter advances too (Auto -> Truecolor, still side-effect-free).
+        // Enter is a no-op under the unified select/change model.
         state.palette_choice = palette::PaletteChoice::Auto;
-        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Changed);
-        assert_eq!(state.palette_choice, palette::PaletteChoice::Truecolor);
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
+        assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
     }
 
     #[test]
@@ -4431,7 +4534,7 @@ mod tests {
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
 
-        // Tab/1-5/hjkl get swallowed by the overlay.
+        // Tab/1-5 get swallowed by the overlay.
         assert_eq!(send_key(&mut state, KeyCode::Tab), KeyOutcome::Ignored,);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('1')),

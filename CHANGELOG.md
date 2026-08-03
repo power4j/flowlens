@@ -10,6 +10,8 @@ All notable changes to Delray are recorded in this file.
 
 ### Changed
 
+- Settings overlay uses a unified select-then-change interaction: `j/k`/arrows select an item, `h/l`/arrows change its value, with a full-row highlight; the `d` shortcut and `Enter` value cycling were removed.
+
 ### Fixed
 
 ### Removed
@@ -29,6 +31,8 @@ All notable changes to Delray are recorded in this file.
 - Linux `x86_64` and Windows `x86_64` release targets.
 
 ### Changed
+
+- Settings overlay uses a unified select-then-change interaction: `j/k`/arrows select an item, `h/l`/arrows change its value, with a full-row highlight; the `d` shortcut and `Enter` value cycling were removed.
 
 ### Fixed
 
