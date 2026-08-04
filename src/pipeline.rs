@@ -110,7 +110,7 @@ fn aggregate_loop_with_probe(
     snapshot_interval: Duration,
     probe: Option<ProcessProbe>,
     flow_table_entries: Option<Arc<AtomicU64>>,
-    diagnostics_enabled: bool,
+    diagnostics_enabled: Arc<AtomicBool>,
     pcap_counters: Option<Arc<CaptureCounters>>,
     stop: Arc<AtomicBool>,
     failure: Arc<OnceLock<PipelineError>>,
@@ -133,6 +133,7 @@ fn aggregate_loop_with_probe(
         }
 
         let now = Instant::now();
+        let diagnostics_enabled_now = diagnostics_enabled.load(Ordering::Relaxed);
         attributor.advance(&mut stats, &proc_table, now);
         let pending_bytes = attributor.snapshot().bytes;
         let has_pending = pending_bytes > 0;
@@ -170,7 +171,7 @@ fn aggregate_loop_with_probe(
                 pending_bytes,
                 flow_table_entries.as_ref(),
                 pcap_counters.as_ref(),
-                diagnostics_enabled,
+                diagnostics_enabled_now,
             );
             let snapshot = Arc::new(snapshot);
             match snapshot_tx.try_send(snapshot) {
@@ -228,13 +229,14 @@ fn aggregate_loop(
         snapshot_interval,
         None,
         None,
-        false,
+        Arc::new(AtomicBool::new(false)),
         None,
         stop,
         failure,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_for_publish(
     stats: &Stats,
     proc_table: &SharedProcTable,
@@ -279,7 +281,7 @@ impl TrafficPipeline {
         mut source: CaptureSource,
         proc_table: SharedProcTable,
         top_n: usize,
-        diagnostics_enabled: bool,
+        diagnostics_enabled: Arc<AtomicBool>,
     ) -> io::Result<Self> {
         let breakloop = source.breakloop_handle();
         let flow_table_entries = Arc::new(AtomicU64::new(0));
@@ -317,7 +319,7 @@ impl TrafficPipeline {
             proc_table,
             top_n,
             None,
-            false,
+            Arc::new(AtomicBool::new(false)),
             None,
             None,
             spawn_named_thread,
@@ -341,19 +343,20 @@ impl TrafficPipeline {
             proc_table,
             top_n,
             None,
-            false,
+            Arc::new(AtomicBool::new(false)),
             Some(Box::new(wake_capture)),
             None,
             spawn_named_thread,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_with_next_using<N, E, S>(
         next_flow: N,
         proc_table: SharedProcTable,
         top_n: usize,
         flow_table_entries: Option<Arc<AtomicU64>>,
-        diagnostics_enabled: bool,
+        diagnostics_enabled: Arc<AtomicBool>,
         capture_wakeup: Option<CaptureWakeup>,
         pcap_counters: Option<Arc<CaptureCounters>>,
         mut spawn_thread: S,
@@ -1127,7 +1130,7 @@ mod tests {
             proc_table,
             10,
             None,
-            false,
+            Arc::new(AtomicBool::new(false)),
             None,
             None,
             move |name, task| {

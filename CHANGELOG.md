@@ -6,7 +6,11 @@ All notable changes to Delray are recorded in this file.
 
 ### Added
 
+- TUI settings overlay can toggle diagnostics at runtime from the settings UI; each enable writes to a fresh timestamped log file and the overlay shows the current file name.
+
 ### Changed
+
+- Settings overlay uses a unified select-then-change interaction: `j/k`/arrows select an item, `h/l`/arrows change its value, with a full-row highlight; the `d` shortcut and `Enter` value cycling were removed.
 
 ### Fixed
 

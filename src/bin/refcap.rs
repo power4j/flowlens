@@ -65,8 +65,11 @@ fn list_devices() -> ExitCode {
         return ExitCode::FAILURE;
     }
     for (index, device) in devices.iter().enumerate() {
-        let addresses: Vec<String> =
-            device.addresses.iter().map(|address| address.addr.to_string()).collect();
+        let addresses: Vec<String> = device
+            .addresses
+            .iter()
+            .map(|address| address.addr.to_string())
+            .collect();
         let description = device.desc.as_deref().unwrap_or("");
         println!(
             "{}\t{}\t{}\t{}",
@@ -156,10 +159,10 @@ fn resolve_device<'a>(selector: &str, devices: &'a [Device]) -> Result<&'a Devic
     }
     if !selector.is_empty() && selector.bytes().all(|byte| byte.is_ascii_digit()) {
         let number = selector.parse::<usize>().ok();
-        if let Some(number) = number.filter(|number| *number >= 1) {
-            if let Some(device) = devices.get(number - 1) {
-                return Ok(device);
-            }
+        if let Some(number) = number.filter(|number| *number >= 1)
+            && let Some(device) = devices.get(number - 1)
+        {
+            return Ok(device);
         }
         return Err(format!("invalid interface number: {selector}"));
     }
@@ -228,7 +231,10 @@ fn run(args: &[String]) -> Result<(), String> {
             writer.flush().map_err(|error| error.to_string())?;
             totals = Totals::default();
             last_emit = now;
-            if options.seconds.is_some_and(|seconds| uptime_secs >= seconds) {
+            if options
+                .seconds
+                .is_some_and(|seconds| uptime_secs >= seconds)
+            {
                 break;
             }
         }
