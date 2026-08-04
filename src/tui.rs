@@ -28,6 +28,8 @@ use crate::session::{Activation, TrafficSession};
 use crate::stats::{IpSnapshot, ProcessSnapshot, TrafficSnapshot};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Number of selectable rows in the settings overlay.
+const SETTINGS_SELECTABLE_ROWS: usize = 2;
 
 /// Which page is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,7 +317,8 @@ where
                 KeyOutcome::Changed
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                state.settings_selection = (state.settings_selection + 1).min(1);
+                state.settings_selection =
+                    (state.settings_selection + 1).min(SETTINGS_SELECTABLE_ROWS - 1);
                 KeyOutcome::Changed
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
@@ -405,10 +408,7 @@ pub fn run(
     };
     if let Some(writer) = diagnostics_writer.as_ref() {
         state.diagnostics_enabled = true;
-        state.diagnostics_file = writer
-            .path()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned());
+        state.diagnostics_file = writer.file_name();
     }
     let result = tui_loop(
         &mut terminal,
@@ -429,6 +429,7 @@ pub fn run(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -482,10 +483,7 @@ fn tui_loop(
             if state.diagnostics_enabled {
                 match DiagnosticsWriter::create(crate::diagnostics::default_output_path()) {
                     Ok(writer) => {
-                        state.diagnostics_file = writer
-                            .path()
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned());
+                        state.diagnostics_file = writer.file_name();
                         state.diagnostics_error = None;
                         diagnostics_writer = Some(writer);
                         diagnostics_active = true;
@@ -2073,7 +2071,11 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ]));
     let detected_label = color_tier_label(state.detected_tier);
     let choice_label = palette_choice_label(state.palette_choice);
-    let diagnostics_label = if state.diagnostics_enabled { "ON" } else { "OFF" };
+    let diagnostics_label = if state.diagnostics_enabled {
+        "ON"
+    } else {
+        "OFF"
+    };
     let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
     let selection_style = palette::selection_style();
     let mut palette_line = Line::from(vec![
@@ -2099,10 +2101,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                 .fg(palette::strong())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            diagnostics_label,
-            Style::default().fg(palette::accent()),
-        ),
+        Span::styled(diagnostics_label, Style::default().fg(palette::accent())),
     ]);
     if state.settings_selection == 0 {
         palette_line.style = selection_style;
@@ -2120,10 +2119,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
                     .fg(palette::strong())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                file_label,
-                Style::default().fg(palette::muted()),
-            ),
+            Span::styled(file_label, Style::default().fg(palette::muted())),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -4422,9 +4418,7 @@ mod tests {
             state.settings_selection = selection;
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal
-                .draw(|frame| {
-                    draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now())
-                })
+                .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
                 .unwrap();
             let buffer = terminal.backend().buffer();
             (
@@ -4434,10 +4428,12 @@ mod tests {
         };
         let (palette_top, diagnostics_top) = render_styles(0);
         let (palette_bottom, diagnostics_bottom) = render_styles(1);
-        assert_ne!(palette_top, palette_bottom, "palette row highlight should follow selection");
         assert_ne!(
-            diagnostics_top,
-            diagnostics_bottom,
+            palette_top, palette_bottom,
+            "palette row highlight should follow selection"
+        );
+        assert_ne!(
+            diagnostics_top, diagnostics_bottom,
             "diagnostics row highlight should follow selection"
         );
     }

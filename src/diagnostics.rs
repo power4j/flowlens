@@ -153,8 +153,10 @@ impl DiagnosticsWriter {
         })
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
+    pub(crate) fn file_name(&self) -> Option<String> {
+        self.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
     }
 
     pub(crate) fn write(

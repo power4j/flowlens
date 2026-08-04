@@ -256,7 +256,6 @@ impl TrafficSession {
 mod tests {
     use std::sync::Arc;
 
-
     use super::*;
     use crate::capture::InterfaceInfo;
     use crate::pipeline::TrafficPipeline;

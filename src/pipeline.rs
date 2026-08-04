@@ -236,6 +236,7 @@ fn aggregate_loop(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_for_publish(
     stats: &Stats,
     proc_table: &SharedProcTable,
@@ -349,6 +350,7 @@ impl TrafficPipeline {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_with_next_using<N, E, S>(
         next_flow: N,
         proc_table: SharedProcTable,

@@ -334,7 +334,9 @@ impl CaptureSource {
             self.pcap_counters
                 .received
                 .store(u64::from(stat.received), Ordering::Relaxed);
-            self.pcap_counters.dropped.store(u64::from(stat.dropped), Ordering::Relaxed);
+            self.pcap_counters
+                .dropped
+                .store(u64::from(stat.dropped), Ordering::Relaxed);
             self.pcap_counters
                 .if_dropped
                 .store(u64::from(stat.if_dropped), Ordering::Relaxed);
