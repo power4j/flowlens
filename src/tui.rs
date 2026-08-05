@@ -2052,6 +2052,13 @@ fn draw_about(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(para, content_area);
 }
 
+/// Two-character selection marker column: `> ` for the selected row, two
+/// spaces otherwise, so rows stay aligned even when the highlight style is not
+/// visible (16-color/monochrome tiers).
+fn settings_selection_prefix(selected: bool) -> &'static str {
+    if selected { "> " } else { "  " }
+}
+
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -2078,7 +2085,9 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     };
     let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
     let selection_style = palette::selection_style();
+    let palette_selected = state.settings_selection == 0;
     let mut palette_line = Line::from(vec![
+        Span::raw(settings_selection_prefix(palette_selected)),
         Span::styled(
             "Palette: ",
             Style::default()
@@ -2095,6 +2104,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ),
     ]);
     let mut diagnostics_line = Line::from(vec![
+        Span::raw(settings_selection_prefix(state.settings_selection == 1)),
         Span::styled(
             "Diagnostics: ",
             Style::default()
@@ -2103,7 +2113,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ),
         Span::styled(diagnostics_label, Style::default().fg(palette::accent())),
     ]);
-    if state.settings_selection == 0 {
+    if palette_selected {
         palette_line.style = selection_style;
     } else {
         diagnostics_line.style = selection_style;
@@ -4436,6 +4446,39 @@ mod tests {
             diagnostics_top, diagnostics_bottom,
             "diagnostics row highlight should follow selection"
         );
+    }
+
+    #[test]
+    fn settings_marker_prefix_is_color_independent() {
+        // The `> ` prefix is deliberately independent of the palette: 16-color
+        // and monochrome tiers may not render the highlight style (covered by
+        // palette::tests::selection_style_reverses_below_truecolor), so the
+        // selection must stay identifiable from the marker alone.
+        assert_eq!(settings_selection_prefix(true), "> ");
+        assert_eq!(settings_selection_prefix(false), "  ");
+    }
+
+    #[test]
+    fn settings_marker_and_padding_keep_rows_aligned() {
+        let snapshot = TrafficSnapshot::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut state = AppState::new();
+        state.settings_open = true;
+        state.settings_selection = 0;
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("> Palette:"));
+        assert!(rendered.contains("  Diagnostics:"));
+
+        state.settings_selection = 1;
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("> Diagnostics:"));
+        assert!(rendered.contains("  Palette:"));
     }
 
     #[test]
