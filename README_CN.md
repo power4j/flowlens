@@ -1,10 +1,10 @@
-# Delray
+# FlowLens
 
 [English](README.md) | 简体中文
 
-Delray 是面向资源受限 Linux 和 Windows 主机的命令行网络流量分析工具，用于查看网卡流量，并以尽力而为的方式提供进程、IP 和出站域名归属信息。
+FlowLens 是面向资源受限 Linux 和 Windows 主机的命令行网络流量分析工具，用于查看网卡流量，并以尽力而为的方式提供进程、IP 和出站域名归属信息。
 
-![Delray 概览](assets/screen/ui-overview.png)
+![FlowLens 概览](assets/screen/ui-overview.png)
 
 ## 支持平台
 
@@ -17,7 +17,7 @@ Linux 和 Windows 均属于支持平台。「支持平台」表示核心功能�
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/power4j/delray/releases/latest) 下载对应平台的压缩包，解压其中唯一的可执行文件即可。
+从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应平台的压缩包，解压其中唯一的可执行文件即可。
 
 ### Linux
 
@@ -31,74 +31,74 @@ sudo apt install libpcap0.8
 sudo dnf install libpcap
 ```
 
-以 root 身份运行 Delray，或者为可执行文件授予 `CAP_NET_RAW`：
+以 root 身份运行 FlowLens，或者为可执行文件授予 `CAP_NET_RAW`：
 
 ```bash
-sudo ./delray
+sudo ./flowlens
 # 或
-sudo setcap cap_net_raw+ep ./delray
-./delray
+sudo setcap cap_net_raw+ep ./flowlens
+./flowlens
 ```
 
 ### Windows
 
-启动 Delray 前请安装 [Npcap](https://npcap.com/)。Windows 压缩包只包含 `delray.exe`，不包含 Npcap Runtime。
+启动 FlowLens 前请安装 [Npcap](https://npcap.com/)。Windows 压缩包只包含 `flowlens.exe`，不包含 Npcap Runtime。
 
-Delray 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会在打开抓包设备前报告错误。
+FlowLens 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会在打开抓包设备前报告错误。
 
 ## 使用
 
 不指定网卡，直接启动前台 TUI：
 
 ```bash
-./delray
+./flowlens
 ```
 
 直接打开指定网卡：
 
 ```bash
-./delray eth0
+./flowlens eth0
 ```
 
 将定时生成的 plain 文本快照写入文件：
 
 ```bash
-./delray eth0 --output /tmp/stats.txt
+./flowlens eth0 --output /tmp/stats.txt
 ```
 
 将 JSON Lines 流写入标准输出：
 
 ```bash
-./delray eth0 --format json
+./flowlens eth0 --format json
 ```
 
 将 JSON 快照写入文件：
 
 ```bash
-./delray eth0 --format json --output /tmp/stats.json
+./flowlens eth0 --format json --output /tmp/stats.json
 ```
 
 限制每个 top-N 列表的条目数：
 
 ```bash
-./delray eth0 --top-n 3
+./flowlens eth0 --top-n 3
 ```
 
 将进程归属诊断信息以 JSONL 格式写入默认 `.log` 文件：
 
 ```bash
-./delray eth0 --format json --diagnostics
+./flowlens eth0 --format json --diagnostics
 ```
 
 指定诊断输出文件：
 
 ```bash
-./delray eth0 --diagnostics --diagnostics-output /tmp/delray-diagnostics.jsonl
+./flowlens eth0 --diagnostics --diagnostics-output /tmp/flowlens-diagnostics.jsonl
 ```
 
 TUI 模式下诊断信息同样只写入该文件，不写入终端屏幕。
 
-完整参数列表请运行 `delray --help` 查看。
+完整参数列表请运行 `flowlens --help` 查看。
 
 ## 可查看的信息
 
@@ -120,6 +120,6 @@ Linux 和 Windows 的进程归属及抓包行为可能存在差异。每个版�
 
 ## 许可证
 
-Delray 使用 [Apache License 2.0](LICENSE) 许可证。
+FlowLens 使用 [Apache License 2.0](LICENSE) 许可证。
 
 开发和源码构建说明见 [`docs/development.md`](docs/development.md)。

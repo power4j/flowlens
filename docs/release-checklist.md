@@ -19,8 +19,8 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 
 - [ ] The Draft Release tag is the expected annotated `vX.Y.Z` tag.
 - [ ] The Release name is exactly `vX.Y.Z`.
-- [ ] Assets are named `delray-vX.Y.Z-linux-x86_64.tar.gz` and `delray-vX.Y.Z-windows-x86_64.zip`.
-- [ ] Each archive contains only its corresponding `delray` or `delray.exe` binary.
+- [ ] Assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz` and `flowlens-vX.Y.Z-windows-x86_64.zip`.
+- [ ] Each archive contains only its corresponding `flowlens` or `flowlens.exe` binary.
 - [ ] `SHA256SUMS` is present and covers both archives.
 - [ ] The generated Release Notes have been reviewed and edited.
 - [ ] The `pre-release` option is selected when the release is not considered stable.
@@ -30,7 +30,7 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 
 ## After publishing
 
-- [ ] `delray --version` and `delray.exe --version` report `X.Y.Z`.
+- [ ] `flowlens --version` and `flowlens.exe --version` report `X.Y.Z`.
 - [ ] The GitHub Release, tag, Cargo metadata, and Release Notes use the same version.
 - [ ] The `[Unreleased]` entry in `CHANGELOG.md` is renamed to `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] A new empty `[Unreleased]` section is added to `CHANGELOG.md`.

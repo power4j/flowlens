@@ -1,6 +1,6 @@
-# Delray 流量分析
+# FlowLens 流量分析
 
-Delray 观测网络接口上的流量，并区分流量是否能归属到具体进程。
+FlowLens 观测网络接口上的流量，并区分流量是否能归属到具体进程。
 
 ## Language
 
@@ -12,7 +12,7 @@ _Avoid_：未知进程、其他进程流量
 已捕获且暂时无法关联到唯一具体进程 ID、但仍处于可重新判断阶段的流量。待识别流量不属于进程列表中的进程项，也不属于未归属流量；确认归属后进入对应进程，确认无法归属后转为未归属流量。
 
 **支持平台（Supported Platform）**：
-经过原生环境构建、核心功能和基本稳定性验证，Delray 明确承诺可用的操作系统与 CPU 架构组合。目前包括 Linux `x86_64` 和 Windows `x86_64`。支持平台不表示所有边界场景都已完成穷尽测试；已知限制和运行前置条件必须在发布文档中说明。
+经过原生环境构建、核心功能和基本稳定性验证，FlowLens 明确承诺可用的操作系统与 CPU 架构组合。目前包括 Linux `x86_64` 和 Windows `x86_64`。支持平台不表示所有边界场景都已完成穷尽测试；已知限制和运行前置条件必须在发布文档中说明。
 
 **目标平台（Target Platform）**：
 计划支持但尚未完成最低原生环境验收的操作系统与 CPU 架构组合。目标平台不应作为正式支持平台发布，除非完成对应验收并更新领域词汇。
@@ -41,7 +41,7 @@ TUI、plain、JSON 字段说明和状态提示统一使用英文；中文仅用�
 
 **出站域名（Outbound Domain）**：
 本机作为发起方建立的 TCP 连接中，通过 TLS SNI 或明文 HTTP Host 头识别出的目标域名。出站域名按连接双向累计流量，统计的是连接发起方为本机的通信。识别来源覆盖 TCP 上的 TLS ClientHello SNI 与明文 HTTP/1.x 请求的 Host 头；不覆盖 QUIC/HTTP3、入站发起的连接、ECH 加密的 SNI，以及解析失败的连接——这些流量不进入出站域名维度。出站域名不绑定进程，是与进程、IP 并列的独立统计维度。
-_Avoid_：把它与反向 DNS 或 GeoIP 得到的主机名混用；后者来自外部数据库的 IP 归属查询，不是从流量 payload 解析，且 delray 不提供该能力
+_Avoid_：把它与反向 DNS 或 GeoIP 得到的主机名混用；后者来自外部数据库的 IP 归属查询，不是从流量 payload 解析，且 flowlens 不提供该能力
 
 **IP 流量维度（IP Traffic Dimension）**：
 按对端 IP 汇总的流量观察维度，同时关注近期窗口流量和进程生命周期累计流量；近期窗口用于发现快速增长，生命周期累计用于识别历史重流量。IP 流量维度不等同于永久保存的完整 IP 历史，明细容量受限时应优先保留对大流量行为有分析价值的 IP。
@@ -66,11 +66,11 @@ _Avoid_：临时缓存、未知 IP 列表
 按单一流量指标对同一方向的 IP 进行排序。当前 `topN` 使用生命周期累计字节排序，不混入近期窗口、增长趋势或观察层规则，也不从其他规则补充条目。
 
 **调色板（Palette）**：
-TUI 根据终端颜色能力选用的一组语义配色。Delray 定义三档：真彩色（24-bit RGB，默认）、16 色（ANSI 基色加 `Modifier`）、单色（仅 `Modifier`，无颜色）。档位在启动时按 `NO_COLOR`、`COLORTERM`、`TERM` 环境变量检测；用户也可在设置浮层中选择 `Auto`（沿用检测结果）或强制指定某档，选择仅本次会话生效、不持久化。同一组语义角色（如 inbound、outbound、accent）在三档下映射到不同具体颜色，但角色名不变。
+TUI 根据终端颜色能力选用的一组语义配色。FlowLens 定义三档：真彩色（24-bit RGB，默认）、16 色（ANSI 基色加 `Modifier`）、单色（仅 `Modifier`，无颜色）。档位在启动时按 `NO_COLOR`、`COLORTERM`、`TERM` 环境变量检测；用户也可在设置浮层中选择 `Auto`（沿用检测结果）或强制指定某档，选择仅本次会话生效、不持久化。同一组语义角色（如 inbound、outbound、accent）在三档下映射到不同具体颜色，但角色名不变。
 _Avoid_：把「调色板」与具体 RGB 数值混用；调色板是「角色→颜色」的映射规则，RGB 值只是真彩色档下的实现
 
 **正式版本（Stable Release Version）**：
-由 `MAJOR.MINOR.PATCH` 组成、写入 Cargo 包元数据并对应唯一 Git tag 的版本。Delray 的每次 GitHub Release 都必须在当前版本基础上通过 `major`、`minor` 或 `patch` bump 产生新版本；版本号不包含 `beta`、`rc` 等预发布后缀。
+由 `MAJOR.MINOR.PATCH` 组成、写入 Cargo 包元数据并对应唯一 Git tag 的版本。FlowLens 的每次 GitHub Release 都必须在当前版本基础上通过 `major`、`minor` 或 `patch` bump 产生新版本；版本号不包含 `beta`、`rc` 等预发布后缀。
 _Avoid_：把 GitHub Release 的预发布状态编码进 Cargo 版本号或 Git tag
 
 **草稿 Release（Draft Release）**：

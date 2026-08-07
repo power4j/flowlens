@@ -962,7 +962,7 @@ fn draw_interface_selector(
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " delray ",
+                " flowlens ",
                 Style::default()
                     .fg(palette::accent())
                     .add_modifier(Modifier::BOLD),
@@ -1086,7 +1086,7 @@ fn draw_too_small(f: &mut ratatui::Frame, area: Rect) {
         .split(area)[1];
     let lines = vec![
         Line::from(Span::styled(
-            "delray",
+            "flowlens",
             Style::default()
                 .fg(palette::accent())
                 .add_modifier(Modifier::BOLD),
@@ -1133,7 +1133,7 @@ fn draw_header(
 
 fn navigation_line(page: Page, mode: LayoutMode) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        " delray ",
+        " flowlens ",
         Style::default()
             .fg(palette::accent())
             .add_modifier(Modifier::BOLD),
@@ -2006,7 +2006,7 @@ fn domain_rows(
 
 fn draw_about(f: &mut ratatui::Frame, area: Rect) {
     let version = env!("CARGO_PKG_VERSION");
-    let commit = env!("DELRAY_BUILD_COMMIT");
+    let commit = env!("FLOWLENS_BUILD_COMMIT");
     let frame_width = area.width.saturating_sub(4).min(62);
     let horizontal = Layout::default()
         .direction(LayoutDir::Horizontal)
@@ -2032,7 +2032,7 @@ fn draw_about(f: &mut ratatui::Frame, area: Rect) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "delray",
+            "flowlens",
             Style::default()
                 .fg(palette::accent())
                 .add_modifier(Modifier::BOLD),
@@ -2062,7 +2062,7 @@ fn settings_selection_prefix(selected: bool) -> &'static str {
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let popup = centered_rect(area, 60, 9);
+    let popup = centered_rect(area, 70, 9);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette::accent()))
@@ -2825,7 +2825,9 @@ mod tests {
             .unwrap();
 
         let first_line = rendered_lines(&terminal)[0].clone();
-        assert!(first_line.contains("delray  1 Overview  2 Processes  3 IPs  4 Domains  5 About"));
+        assert!(
+            first_line.contains("flowlens  1 Overview  2 Processes  3 IPs  4 Domains  5 About")
+        );
         let overview_cell = terminal
             .backend()
             .buffer()
@@ -3130,7 +3132,7 @@ mod tests {
         let lines = rendered_lines(&terminal);
         let identity_row = lines
             .iter()
-            .rposition(|line| line.contains("delray"))
+            .rposition(|line| line.contains("flowlens"))
             .expect("about identity");
         assert!(
             lines[..identity_row]
@@ -3145,7 +3147,7 @@ mod tests {
         let rendered = lines.join("\n");
         assert!(rendered.contains("Network Traffic Analyzer"));
         assert!(rendered.contains("Version"));
-        assert!(rendered.contains(env!("DELRAY_BUILD_COMMIT")));
+        assert!(rendered.contains(env!("FLOWLENS_BUILD_COMMIT")));
         assert!(!rendered.contains("private-interface"));
         assert!(!rendered.contains("private-host"));
     }
@@ -4400,7 +4402,7 @@ mod tests {
         let mut state = AppState::new();
         state.settings_open = true;
         state.diagnostics_enabled = true;
-        state.diagnostics_file = Some("delray-20260803T120000Z123456789-42.log".to_string());
+        state.diagnostics_file = Some("flowlens-42.log".to_string());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
         terminal
@@ -4409,7 +4411,7 @@ mod tests {
 
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Diagnostics: ON"));
-        assert!(rendered.contains("delray-20260803T120000Z123456789-42.log"));
+        assert!(rendered.contains("flowlens-42.log"));
     }
 
     #[test]

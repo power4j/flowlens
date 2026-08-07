@@ -18,7 +18,7 @@ pub(crate) const SCHEMA_VERSION: u8 = 1;
 
 pub(crate) fn default_output_path() -> PathBuf {
     PathBuf::from(format!(
-        "delray-{}-{}.log",
+        "flowlens-{}-{}.log",
         Utc::now().format("%Y%m%dT%H%M%SZ%f"),
         std::process::id()
     ))
@@ -235,7 +235,7 @@ mod tests {
 
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "delray-diagnostics-{label}-{}-{}.jsonl",
+            "flowlens-diagnostics-{label}-{}-{}.jsonl",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ))
@@ -245,7 +245,7 @@ mod tests {
     fn default_path_contains_timestamp_pid_and_log_extension() {
         let path = default_output_path();
         let name = path.file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with("delray-"));
+        assert!(name.starts_with("flowlens-"));
         assert!(name.ends_with(".log"));
         assert!(name.contains(&std::process::id().to_string()));
     }

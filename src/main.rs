@@ -320,7 +320,7 @@ fn process_next<N, E>(
 
 /// CLI arguments.
 #[derive(Parser)]
-#[command(name = "delray", version, about = "Network traffic analyzer")]
+#[command(name = "flowlens", version, about = "Network traffic analyzer")]
 struct Cli {
     /// Network interface to capture on (omit to select interactively in plain foreground mode)
     interface: Option<String>,
@@ -342,7 +342,7 @@ struct Cli {
     /// Write process attribution diagnostics to a JSONL file on each output refresh
     #[arg(long)]
     diagnostics: bool,
-    /// Write diagnostics JSONL records to this file (default: delray-<timestamp>-<pid>.log)
+    /// Write diagnostics JSONL records to this file (default: flowlens-<timestamp>-<pid>.log)
     #[arg(long = "diagnostics-output")]
     diagnostics_output: Option<String>,
 }
@@ -400,7 +400,7 @@ mod cli_tests {
 
     #[test]
     fn missing_npcap_fails_before_capture_setup() {
-        let cli = Cli::try_parse_from(["delray", "--format", "json"]).unwrap();
+        let cli = Cli::try_parse_from(["flowlens", "--format", "json"]).unwrap();
 
         assert_eq!(run(cli, || Err(NPCAP_REQUIRED_MESSAGE)), ExitCode::FAILURE);
     }
@@ -408,7 +408,7 @@ mod cli_tests {
     #[test]
     fn parses_all_args() {
         let cli = Cli::try_parse_from([
-            "delray",
+            "flowlens",
             "eth0",
             "--proc-refresh",
             "5",
@@ -425,15 +425,15 @@ mod cli_tests {
     #[test]
     fn diagnostics_flag_is_available_for_linux_validation() {
         let cli =
-            Cli::try_parse_from(["delray", "eth0", "--format", "json", "--diagnostics"]).unwrap();
+            Cli::try_parse_from(["flowlens", "eth0", "--format", "json", "--diagnostics"]).unwrap();
 
         assert!(cli.diagnostics);
     }
 
     #[test]
     fn diagnostics_output_requires_diagnostics_flag() {
-        let cli =
-            Cli::try_parse_from(["delray", "eth0", "--diagnostics-output", "diag.jsonl"]).unwrap();
+        let cli = Cli::try_parse_from(["flowlens", "eth0", "--diagnostics-output", "diag.jsonl"])
+            .unwrap();
         let error = match open_diagnostics_writer(&cli) {
             Ok(_) => panic!("diagnostics output should require the flag"),
             Err(error) => error,
@@ -444,7 +444,7 @@ mod cli_tests {
     #[test]
     fn diagnostics_output_path_is_preserved() {
         let cli = Cli::try_parse_from([
-            "delray",
+            "flowlens",
             "eth0",
             "--diagnostics",
             "--diagnostics-output",
@@ -456,52 +456,52 @@ mod cli_tests {
 
     #[test]
     fn proc_refresh_defaults_to_two() {
-        let cli = Cli::try_parse_from(["delray", "eth0"]).unwrap();
+        let cli = Cli::try_parse_from(["flowlens", "eth0"]).unwrap();
         assert_eq!(cli.proc_refresh, DEFAULT_PROC_REFRESH);
         assert!(cli.output.is_none());
     }
 
     #[test]
     fn proc_refresh_zero_rejected() {
-        let result = Cli::try_parse_from(["delray", "eth0", "--proc-refresh", "0"]);
+        let result = Cli::try_parse_from(["flowlens", "eth0", "--proc-refresh", "0"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn flow_table_defaults_to_65536() {
-        let cli = Cli::try_parse_from(["delray", "eth0"]).unwrap();
+        let cli = Cli::try_parse_from(["flowlens", "eth0"]).unwrap();
         assert_eq!(cli.flow_table, DEFAULT_FLOW_TABLE);
     }
 
     #[test]
     fn flow_table_accepts_custom_capacity() {
-        let cli = Cli::try_parse_from(["delray", "eth0", "--flow-table", "4096"]).unwrap();
+        let cli = Cli::try_parse_from(["flowlens", "eth0", "--flow-table", "4096"]).unwrap();
         assert_eq!(cli.flow_table, 4096);
     }
 
     #[test]
     fn flow_table_zero_rejected() {
-        let result = Cli::try_parse_from(["delray", "eth0", "--flow-table", "0"]);
+        let result = Cli::try_parse_from(["flowlens", "eth0", "--flow-table", "0"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn flow_table_non_numeric_rejected() {
-        let result = Cli::try_parse_from(["delray", "eth0", "--flow-table", "huge"]);
+        let result = Cli::try_parse_from(["flowlens", "eth0", "--flow-table", "huge"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn interface_optional() {
-        let cli = Cli::try_parse_from(["delray"]).unwrap();
+        let cli = Cli::try_parse_from(["flowlens"]).unwrap();
         assert!(cli.interface.is_none());
     }
 
     #[test]
     fn missing_interface_starts_selector_only_for_plain_foreground_mode() {
-        let plain = Cli::try_parse_from(["delray"]).unwrap();
-        let json = Cli::try_parse_from(["delray", "--format", "json"]).unwrap();
-        let file = Cli::try_parse_from(["delray", "--output", "traffic.txt"]).unwrap();
+        let plain = Cli::try_parse_from(["flowlens"]).unwrap();
+        let json = Cli::try_parse_from(["flowlens", "--format", "json"]).unwrap();
+        let file = Cli::try_parse_from(["flowlens", "--output", "traffic.txt"]).unwrap();
 
         assert_eq!(dispatch_mode(&plain), DispatchMode::InteractiveSelector);
         assert_eq!(dispatch_mode(&json), DispatchMode::MissingInterface);
@@ -510,13 +510,13 @@ mod cli_tests {
 
     #[test]
     fn proc_refresh_non_numeric_rejected() {
-        let result = Cli::try_parse_from(["delray", "eth0", "--proc-refresh", "abc"]);
+        let result = Cli::try_parse_from(["flowlens", "eth0", "--proc-refresh", "abc"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn proc_refresh_negative_rejected() {
-        let result = Cli::try_parse_from(["delray", "eth0", "--proc-refresh", "-5"]);
+        let result = Cli::try_parse_from(["flowlens", "eth0", "--proc-refresh", "-5"]);
         assert!(result.is_err());
     }
 }

@@ -7,7 +7,7 @@ fn main() {
     }
 
     let commit = git_short_hash().unwrap_or_else(|| "unknown".to_string());
-    println!("cargo:rustc-env=DELRAY_BUILD_COMMIT={commit}");
+    println!("cargo:rustc-env=FLOWLENS_BUILD_COMMIT={commit}");
     println!("cargo:rerun-if-changed=.git/HEAD");
 }
 

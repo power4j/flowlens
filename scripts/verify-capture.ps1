@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    Automated capture-parity verification for Delray.
+    Automated capture-parity verification for FlowLens.
 
 .DESCRIPTION
-    Runs Delray and a raw reference capture counter (refcap) concurrently on the
+    Runs FlowLens and a raw reference capture counter (refcap) concurrently on the
     same Npcap device, generates high-rate TCP traffic (iperf3) or an SMB file
     copy, and compares three layers:
 
       1. Windows adapter counters  (ground truth, same source as Task Manager)
       2. refcap wire/IP bytes      (raw pcap read path + Npcap dropped stats)
-      3. Delray in+out totals      (full parse/attribution pipeline)
+      3. FlowLens in+out totals      (full parse/attribution pipeline)
 
     Each ratio isolates a different failure layer; see
     docs/research/capture-parity-verification.md for interpretation.
@@ -35,7 +35,7 @@ param(
     [int]$DurationSec = 30,
     [int]$Parallel = 1,
     [string]$IperfPath,
-    [string]$DelrayPath,
+    [string]$FlowLensPath,
     [string]$RefcapPath,
     [int]$BufferSize = 2000000,
     [int]$Snaplen = 65535,
@@ -64,11 +64,11 @@ if ($ManualMode -and ($IperfServer -or $SmbCopySource -or $StartLocalIperfServer
 }
 
 if (-not $IperfPath) { $IperfPath = Join-Path $repoRoot 'temp\iperf-3.21-win64\iperf3.exe' }
-if (-not $DelrayPath) { $DelrayPath = Join-Path $repoRoot 'target\release\delray.exe' }
+if (-not $FlowLensPath) { $FlowLensPath = Join-Path $repoRoot 'target\release\flowlens.exe' }
 if (-not $RefcapPath) { $RefcapPath = Join-Path $repoRoot 'target\release\refcap.exe' }
 if (-not $OutputDir) { $OutputDir = Join-Path $repoRoot ("temp\verify-capture-" + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 
-foreach ($tool in @($IperfPath, $DelrayPath, $RefcapPath)) {
+foreach ($tool in @($IperfPath, $FlowLensPath, $RefcapPath)) {
     if (-not (Test-Path -LiteralPath $tool)) {
         throw "Tool not found: $tool"
     }
@@ -183,12 +183,12 @@ Write-Host "Device: $($device.Name)"
 Write-Host "Description: $($device.Description)"
 Write-Host "Adapter counters: $(if ($adapterCountersAvailable) { $counterAdapterName } else { 'unavailable' })"
 
-# ---- Start reference capture and Delray ---------------------------------------
+# ---- Start reference capture and FlowLens ---------------------------------------
 
 $refcapLog = Join-Path $OutputDir 'refcap.jsonl'
 $refcapErr = Join-Path $OutputDir 'refcap.err.txt'
-$delrayJson = Join-Path $OutputDir 'delray.json'
-$delrayErr = Join-Path $OutputDir 'delray.err.txt'
+$flowlensJson = Join-Path $OutputDir 'flowlens.json'
+$flowlensErr = Join-Path $OutputDir 'flowlens.err.txt'
 
 $refcapSeconds = $DurationSec + 25
 $refcapArgs = @(
@@ -202,24 +202,24 @@ $refcapArgs = @(
 $refcap = Start-Process -FilePath $RefcapPath -ArgumentList $refcapArgs `
     -WindowStyle Hidden -RedirectStandardError $refcapErr -PassThru
 
-$delrayArgs = @($device.Name, '--format', 'json', '--output', $delrayJson, '--top-n', '5')
-$delray = Start-Process -FilePath $DelrayPath -ArgumentList $delrayArgs `
-    -WindowStyle Hidden -RedirectStandardError $delrayErr -PassThru
+$flowlensArgs = @($device.Name, '--format', 'json', '--output', $flowlensJson, '--top-n', '5')
+$flowlens = Start-Process -FilePath $FlowLensPath -ArgumentList $flowlensArgs `
+    -WindowStyle Hidden -RedirectStandardError $flowlensErr -PassThru
 
-# Delray refreshes the JSON file every 5 s; wait for the first frame.
-$delrayReady = $false
+# FlowLens refreshes the JSON file every 5 s; wait for the first frame.
+$flowlensReady = $false
 $deadline = (Get-Date).AddSeconds(20)
 while ((Get-Date) -lt $deadline) {
-    if ((Test-Path -LiteralPath $delrayJson) -and (Get-Item -LiteralPath $delrayJson).Length -gt 0) {
-        $delrayReady = $true
+    if ((Test-Path -LiteralPath $flowlensJson) -and (Get-Item -LiteralPath $flowlensJson).Length -gt 0) {
+        $flowlensReady = $true
         break
     }
     Start-Sleep -Milliseconds 500
 }
-if (-not $delrayReady) {
-    Stop-Process -Id $delray.Id -Force -ErrorAction SilentlyContinue
+if (-not $flowlensReady) {
+    Stop-Process -Id $flowlens.Id -Force -ErrorAction SilentlyContinue
     Stop-Process -Id $refcap.Id -Force -ErrorAction SilentlyContinue
-    throw 'Delray did not produce a JSON frame within 20 s.'
+    throw 'FlowLens did not produce a JSON frame within 20 s.'
 }
 
 # ---- Generate traffic ----------------------------------------------------------
@@ -276,7 +276,7 @@ if ($IperfServer) {
 
 # ---- Collect results -----------------------------------------------------------
 
-# Let Delray publish one more snapshot after traffic stops (5 s refresh + margin).
+# Let FlowLens publish one more snapshot after traffic stops (5 s refresh + margin).
 Start-Sleep -Seconds 8
 
 $adapterAfter = $null
@@ -287,19 +287,19 @@ if ($adapterCountersAvailable) {
     }
 }
 
-$delrayBytes = $null
-if (Test-Path -LiteralPath $delrayJson) {
-    $frame = Get-Content -Raw -LiteralPath $delrayJson | ConvertFrom-Json
-    $delrayBytes = [uint64]$frame.totals.in_bytes + [uint64]$frame.totals.out_bytes
+$flowlensBytes = $null
+if (Test-Path -LiteralPath $flowlensJson) {
+    $frame = Get-Content -Raw -LiteralPath $flowlensJson | ConvertFrom-Json
+    $flowlensBytes = [uint64]$frame.totals.in_bytes + [uint64]$frame.totals.out_bytes
 }
 
-# Stop captures right after the Delray frame is read so all three layers cover
+# Stop captures right after the FlowLens frame is read so all three layers cover
 # the same measurement window (also correct for early traffic failures).
 if (-not $KeepProcesses) {
-    Stop-Process -Id $delray.Id -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $flowlens.Id -Force -ErrorAction SilentlyContinue
     Stop-Process -Id $refcap.Id -Force -ErrorAction SilentlyContinue
 } else {
-    Write-Host "Keeping processes: delray pid $($delray.Id), refcap pid $($refcap.Id)"
+    Write-Host "Keeping processes: flowlens pid $($flowlens.Id), refcap pid $($refcap.Id)"
 }
 if ($localServer) {
     Stop-Process -Id $localServer.Id -Force -ErrorAction SilentlyContinue
@@ -341,8 +341,8 @@ $trafficOk = $adapterCountersAvailable -and ($adapterBytes -ge $minAdapterBytes)
 $captureRatio = if ($adapterBytes -gt 0) { [double]$refcapWireBytes / [double]$adapterBytes } else { 0 }
 $captureOk = $adapterCountersAvailable -and $captureRatio -ge (1 - $AdapterTolerancePercent / 100)
 
-$pipelineRatio = if ($refcapIpBytes -gt 0) { [double]$delrayBytes / [double]$refcapIpBytes } else { 0 }
-$pipelineOk = ($null -ne $delrayBytes) -and ($refcapIpBytes -gt 0) -and
+$pipelineRatio = if ($refcapIpBytes -gt 0) { [double]$flowlensBytes / [double]$refcapIpBytes } else { 0 }
+$pipelineOk = ($null -ne $flowlensBytes) -and ($refcapIpBytes -gt 0) -and
     $pipelineRatio -ge (1 - $TolerancePercent / 100)
 
 $overallOk = $trafficOk -and $captureOk -and $pipelineOk
@@ -365,10 +365,10 @@ $report = [ordered]@{
         other_packets   = $refcapOther
         ip_invalid      = $refcapInvalid
     }
-    delray_bytes       = $delrayBytes
+    flowlens_bytes       = $flowlensBytes
     ratios             = [ordered]@{
         refcap_wire_over_adapter = [math]::Round($captureRatio, 4)
-        delray_over_refcap_ip    = [math]::Round($pipelineRatio, 4)
+        flowlens_over_refcap_ip    = [math]::Round($pipelineRatio, 4)
     }
     verdicts           = [ordered]@{
         traffic_generated   = $trafficOk
@@ -395,14 +395,14 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine(("Windows adapter       {0,14:N0}" -f $adapterBytes))
 [void]$sb.AppendLine(("refcap wire           {0,14:N0}  {1,11:N0}  {2:P1}" -f $refcapWireBytes, $refcapPackets, $captureRatio))
 [void]$sb.AppendLine(("refcap IP             {0,14:N0}" -f $refcapIpBytes))
-[void]$sb.AppendLine(("Delray in+out         {0,14:N0}  {1,11}  {2:P1}" -f $delrayBytes, 'n/a', $pipelineRatio))
+[void]$sb.AppendLine(("FlowLens in+out         {0,14:N0}  {1,11}  {2:P1}" -f $flowlensBytes, 'n/a', $pipelineRatio))
 [void]$sb.AppendLine("")
 [void]$sb.AppendLine("Npcap dropped      : $refcapDropped packets, if_dropped: $refcapIfDropped")
 [void]$sb.AppendLine("Non-IP frames      : ARP $refcapArp, other $refcapOther, invalid IP $refcapInvalid")
 [void]$sb.AppendLine("")
 [void]$sb.AppendLine("Traffic generated  : $trafficOk (adapter bytes >= $minAdapterBytes)")
 [void]$sb.AppendLine("Capture layer OK   : $captureOk (refcap/adapter >= $((1 - $AdapterTolerancePercent / 100).ToString('P0')))")
-[void]$sb.AppendLine("Pipeline layer OK  : $pipelineOk (delray/refcap-IP >= $((1 - $TolerancePercent / 100).ToString('P0')))")
+[void]$sb.AppendLine("Pipeline layer OK  : $pipelineOk (flowlens/refcap-IP >= $((1 - $TolerancePercent / 100).ToString('P0')))")
 [void]$sb.AppendLine("OVERALL            : $overallOk")
 $sb.ToString() | Set-Content -LiteralPath $reportTxt -Encoding utf8
 

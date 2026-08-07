@@ -237,7 +237,7 @@ impl ProcessProbe {
         let worker_metrics = metrics.clone();
 
         thread::Builder::new()
-            .name("delray-process-probe".to_string())
+            .name("flowlens-process-probe".to_string())
             .spawn(move || {
                 worker_loop(
                     request_rx,

@@ -14,7 +14,7 @@ on:
           - major
 
 concurrency:
-  group: delray-release
+  group: flowlens-release
   cancel-in-progress: false
 
 permissions:
@@ -62,11 +62,11 @@ jobs:
           BUMP: ${{ inputs.bump }}
         run: |
           base_sha="$(git rev-parse HEAD)"
-          base_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "delray") | .version')"
+          base_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "flowlens") | .version')"
           cargo set-version --bump "$BUMP"
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "delray") | .version')"
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "flowlens") | .version')"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          lock_version="$(awk '/name = "delray"/ { getline; print $3; exit }' Cargo.lock | tr -d '"')"
+          lock_version="$(awk '/name = "flowlens"/ { getline; print $3; exit }' Cargo.lock | tr -d '"')"
           test "$lock_version" = "$version"
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
           {
@@ -114,7 +114,7 @@ jobs:
         run: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
       - name: Verify Linux binary baseline
         run: |
-          binary=target/x86_64-unknown-linux-gnu/release/delray
+          binary=target/x86_64-unknown-linux-gnu/release/flowlens
           test -x "$binary"
           readelf -d "$binary" | grep -q 'libpcap.so'
           max_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
@@ -125,11 +125,11 @@ jobs:
         run: |
           mkdir -p dist
           tar -C target/x86_64-unknown-linux-gnu/release \
-            -czf "dist/delray-v${RELEASE_VERSION}-linux-x86_64.tar.gz" delray
+            -czf "dist/flowlens-v${RELEASE_VERSION}-linux-x86_64.tar.gz" flowlens
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux
-          path: dist/delray-*.tar.gz
+          path: dist/flowlens-*.tar.gz
           if-no-files-found: error
 
   build-windows:
@@ -194,8 +194,8 @@ jobs:
       - name: Verify Windows binary dependencies
         shell: pwsh
         run: |
-          $binary = 'target\release\delray.exe'
-          if (-not (Test-Path $binary)) { throw 'delray.exe is missing' }
+          $binary = 'target\release\flowlens.exe'
+          if (-not (Test-Path $binary)) { throw 'flowlens.exe is missing' }
           $dependencies = (dumpbin /DEPENDENTS $binary | Out-String)
           if ($dependencies -match 'VCRUNTIME140\.dll|MSVCP140\.dll|api-ms-win-crt') {
             throw 'Windows binary still depends on the dynamic VC Runtime'
@@ -209,11 +209,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path 'target\release\delray.exe' -DestinationPath "dist\delray-v$env:RELEASE_VERSION-windows-x86_64.zip"
+          Compress-Archive -Path 'target\release\flowlens.exe' -DestinationPath "dist\flowlens-v$env:RELEASE_VERSION-windows-x86_64.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows
-          path: dist/delray-*.zip
+          path: dist/flowlens-*.zip
           if-no-files-found: error
 
   commit:
@@ -248,12 +248,12 @@ jobs:
           EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
           BASE_VERSION: ${{ needs.prepare.outputs.base_version }}
         run: |
-          current_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "delray") | .version')"
+          current_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "flowlens") | .version')"
           test "$current_version" = "$BASE_VERSION"
           cargo set-version --bump "$BUMP"
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "delray") | .version')"
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "flowlens") | .version')"
           test "$version" = "$EXPECTED_VERSION"
-          lock_version="$(awk '/name = "delray"/ { getline; print $3; exit }' Cargo.lock | tr -d '"')"
+          lock_version="$(awk '/name = "flowlens"/ { getline; print $3; exit }' Cargo.lock | tr -d '"')"
           test "$lock_version" = "$version"
           git diff --check
           git config user.name github-actions[bot]
@@ -281,7 +281,7 @@ jobs:
       - name: Create checksums
         run: |
           cd release-assets
-          sha256sum delray-*.tar.gz delray-*.zip > SHA256SUMS
+          sha256sum flowlens-*.tar.gz flowlens-*.zip > SHA256SUMS
       - name: Create Draft Release
         uses: softprops/action-gh-release@v3
         with:

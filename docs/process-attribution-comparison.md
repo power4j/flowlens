@@ -6,9 +6,9 @@ Use this runbook to compare the old build and the ProcessProbe build on the same
 
 Run one version at a time for a fixed window, for example 10 minutes. Keep traffic JSONL on stdout and diagnostics in a separate JSONL file. A typical command is:
 
-    delray.exe <interface> --format json --diagnostics --diagnostics-output new.diag.jsonl > new.jsonl
+    flowlens.exe <interface> --format json --diagnostics --diagnostics-output new.diag.jsonl > new.jsonl
 
-Use the same command for the old executable and replace the output names. Record the OS build, Delray commit, Rust toolchain, Npcap/listeners version, interface selector, start/end time, and whether the process ran elevated.
+Use the same command for the old executable and replace the output names. Record the OS build, FlowLens commit, Rust toolchain, Npcap/listeners version, interface selector, start/end time, and whether the process ran elevated.
 
 Generate known traffic during each window:
 

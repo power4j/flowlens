@@ -378,7 +378,7 @@ impl TrafficPipeline {
         let aggregate_stop = stop.clone();
         let aggregate_failure = failure.clone();
         let aggregate_thread = spawn_thread(
-            "delray-aggregate",
+            "flowlens-aggregate",
             Box::new(move || {
                 aggregate_loop_with_probe(
                     flow_rx,
@@ -399,7 +399,7 @@ impl TrafficPipeline {
         let capture_stop = stop.clone();
         let capture_failure = failure.clone();
         let capture_thread = match spawn_thread(
-            "delray-capture",
+            "flowlens-capture",
             Box::new(move || {
                 capture_loop(
                     next_flow,
@@ -459,7 +459,7 @@ impl TrafficPipeline {
             return;
         }
         let _ = thread::Builder::new()
-            .name("delray-pipeline-reaper".to_string())
+            .name("flowlens-pipeline-reaper".to_string())
             .spawn(move || Self::join_workers(workers));
     }
 
@@ -1134,7 +1134,7 @@ mod tests {
             None,
             None,
             move |name, task| {
-                if name == "delray-capture" {
+                if name == "flowlens-capture" {
                     return Err(io::Error::other("capture thread refused"));
                 }
 

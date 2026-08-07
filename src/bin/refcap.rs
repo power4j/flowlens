@@ -1,9 +1,9 @@
 //! refcap — minimal reference capture counter for capture-parity verification.
 //!
 //! Counts what Npcap hands to userspace at the raw packet layer, without
-//! running Delray's parsing/attribution pipeline. Together with
+//! running FlowLens's parsing/attribution pipeline. Together with
 //! scripts/verify-capture.ps1 it separates capture-side loss (kernel buffer
-//! overflow, driver drops) from Delray-side loss (strict parsing, pipeline
+//! overflow, driver drops) from FlowLens-side loss (strict parsing, pipeline
 //! backpressure) and from the counting scope (non-IP frames, ARP, padding).
 //!
 //! Usage:

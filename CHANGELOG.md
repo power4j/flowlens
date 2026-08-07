@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Delray are recorded in this file.
+All notable changes to FlowLens are recorded in this file.
 
 ## [Unreleased]
 

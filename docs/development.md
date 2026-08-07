@@ -10,7 +10,7 @@ This document covers source development and CI reproduction. User installation a
 - Linux: libpcap development headers and libraries.
 - Windows: MSVC build tools and Npcap SDK `1.16`.
 
-Npcap SDK is a Windows build dependency only. The SDK provides `wpcap.lib` and `Packet.lib`; Npcap Runtime remains an end-user prerequisite and is not bundled by Delray.
+Npcap SDK is a Windows build dependency only. The SDK provides `wpcap.lib` and `Packet.lib`; Npcap Runtime remains an end-user prerequisite and is not bundled by FlowLens.
 
 ## Local checks
 
@@ -32,14 +32,14 @@ cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
 The output binary is:
 
 ```text
-target/x86_64-unknown-linux-gnu/release/delray
+target/x86_64-unknown-linux-gnu/release/flowlens
 ```
 
 Check the ELF dependencies before treating the binary as a distribution artifact:
 
 ```bash
-readelf -d target/x86_64-unknown-linux-gnu/release/delray
-readelf --version-info target/x86_64-unknown-linux-gnu/release/delray
+readelf -d target/x86_64-unknown-linux-gnu/release/flowlens
+readelf --version-info target/x86_64-unknown-linux-gnu/release/flowlens
 ```
 
 The binary may depend on the target system's glibc and libpcap. Static linking is used for Rust code and other dependencies where it is appropriate; glibc and libpcap remain explicit Linux runtime prerequisites.
@@ -56,7 +56,7 @@ cargo +1.96.0 test --locked
 cargo +1.96.0 build --release --locked
 ```
 
-The release binary is `target\release\delray.exe`. The Windows Release workflow verifies that the executable does not depend on the dynamic VC Runtime and still declares the external `wpcap.dll` dependency.
+The release binary is `target\release\flowlens.exe`. The Windows Release workflow verifies that the executable does not depend on the dynamic VC Runtime and still declares the external `wpcap.dll` dependency.
 
 ## CI boundaries
 

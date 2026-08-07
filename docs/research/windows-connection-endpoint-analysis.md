@@ -26,7 +26,7 @@ listeners currently converts each native row into an internal ProtoListener cont
     protocol
     state
 
-Its public Listener therefore exposes no remote address or remote port. Delray cannot recover the discarded endpoint by calling listeners::get_all().
+Its public Listener therefore exposes no remote address or remote port. FlowLens cannot recover the discarded endpoint by calling listeners::get_all().
 
 ## Host verification
 

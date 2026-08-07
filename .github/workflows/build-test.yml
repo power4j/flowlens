@@ -14,7 +14,7 @@ on:
           - windows
 
 concurrency:
-  group: delray-build-test-${{ github.ref }}
+  group: flowlens-build-test-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -71,7 +71,7 @@ jobs:
         run: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
       - name: Verify Linux binary baseline
         run: |
-          binary=target/x86_64-unknown-linux-gnu/release/delray
+          binary=target/x86_64-unknown-linux-gnu/release/flowlens
           test -x "$binary"
           readelf -d "$binary" | grep -q 'libpcap.so'
           max_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
@@ -82,11 +82,11 @@ jobs:
         run: |
           mkdir -p dist
           tar -C target/x86_64-unknown-linux-gnu/release \
-            -czf "dist/delray-${BUILD_SHA}-linux-x86_64.tar.gz" delray
+            -czf "dist/flowlens-${BUILD_SHA}-linux-x86_64.tar.gz" flowlens
       - uses: actions/upload-artifact@v7
         with:
-          name: delray-${{ needs.metadata.outputs.short_sha }}-linux-x86_64
-          path: dist/delray-*.tar.gz
+          name: flowlens-${{ needs.metadata.outputs.short_sha }}-linux-x86_64
+          path: dist/flowlens-*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -142,8 +142,8 @@ jobs:
       - name: Verify Windows binary dependencies
         shell: pwsh
         run: |
-          $binary = 'target\release\delray.exe'
-          if (-not (Test-Path $binary)) { throw 'delray.exe is missing' }
+          $binary = 'target\release\flowlens.exe'
+          if (-not (Test-Path $binary)) { throw 'flowlens.exe is missing' }
           $dependencies = (dumpbin /DEPENDENTS $binary | Out-String)
           if ($dependencies -match 'VCRUNTIME140\.dll|MSVCP140\.dll|api-ms-win-crt') {
             throw 'Windows binary still depends on the dynamic VC Runtime'
@@ -157,11 +157,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path 'target\release\delray.exe' -DestinationPath "dist\delray-$env:BUILD_SHA-windows-x86_64.zip"
+          Compress-Archive -Path 'target\release\flowlens.exe' -DestinationPath "dist\flowlens-$env:BUILD_SHA-windows-x86_64.zip"
       - uses: actions/upload-artifact@v7
         with:
-          name: delray-${{ needs.metadata.outputs.short_sha }}-windows-x86_64
-          path: dist/delray-*.zip
+          name: flowlens-${{ needs.metadata.outputs.short_sha }}-windows-x86_64
+          path: dist/flowlens-*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -174,7 +174,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: delray-${{ needs.metadata.outputs.short_sha }}-*
+          pattern: flowlens-${{ needs.metadata.outputs.short_sha }}-*
           path: dist
           merge-multiple: true
       - name: Create checksums
@@ -182,12 +182,12 @@ jobs:
         run: |
           cd dist
           shopt -s nullglob
-          archives=(delray-*.tar.gz delray-*.zip)
+          archives=(flowlens-*.tar.gz flowlens-*.zip)
           test "${#archives[@]}" -gt 0
           sha256sum "${archives[@]}" > SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
-          name: delray-${{ needs.metadata.outputs.short_sha }}-checksums
+          name: flowlens-${{ needs.metadata.outputs.short_sha }}-checksums
           path: dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14

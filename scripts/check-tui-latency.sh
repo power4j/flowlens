@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary=${1:-target/debug/delray}
+binary=${1:-target/debug/flowlens}
 interface=${2:-lo}
-threshold=${DELRAY_TUI_LATENCY_THRESHOLD:-0.100}
-cycles=${DELRAY_TUI_CYCLES:-100}
-key_interval=${DELRAY_TUI_KEY_INTERVAL:-0.125}
+threshold=${FLOWLENS_TUI_LATENCY_THRESHOLD:-0.100}
+cycles=${FLOWLENS_TUI_CYCLES:-100}
+key_interval=${FLOWLENS_TUI_KEY_INTERVAL:-0.125}
 
 if [[ ! $cycles =~ ^[1-9][0-9]*$ ]]; then
-    printf 'DELRAY_TUI_CYCLES must be a positive integer\n' >&2
+    printf 'FLOWLENS_TUI_CYCLES must be a positive integer\n' >&2
     exit 2
 fi
 timeout_seconds=$(perl -MPOSIX=ceil -e 'print ceil(10 + 4 * $ARGV[0] * $ARGV[1])' "$cycles" "$key_interval")
@@ -19,8 +19,8 @@ if [[ ! -x $binary ]]; then
     exit 2
 fi
 
-if [[ $interface == lo && ${DELRAY_TUI_NETNS:-0} != 1 ]]; then
-    exec unshare -Urn env DELRAY_TUI_NETNS=1 "$0" "$binary" "$interface"
+if [[ $interface == lo && ${FLOWLENS_TUI_NETNS:-0} != 1 ]]; then
+    exec unshare -Urn env FLOWLENS_TUI_NETNS=1 "$0" "$binary" "$interface"
 fi
 
 if ! ip link show dev "$interface" > /dev/null 2>&1; then
@@ -34,7 +34,7 @@ cleanup() {
     if [[ -n $ping_pid ]]; then
         kill "$ping_pid" 2>/dev/null || true
     fi
-    if [[ ${DELRAY_KEEP_TUI_LOGS:-0} == 1 ]]; then
+    if [[ ${FLOWLENS_KEEP_TUI_LOGS:-0} == 1 ]]; then
         printf 'TUI logs: %s\n' "$tmpdir" >&2
     else
         rm -rf "$tmpdir"

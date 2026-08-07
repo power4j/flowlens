@@ -1,6 +1,6 @@
 # TUI 调色板按终端色深降级，并提供会话级设置浮层
 
-Delray 的 TUI 原先全部使用 24-bit `Color::Rgb` 硬编码配色（`src/tui.rs` 中 15 个命名常量，约 89 处引用）。在仅支持 16 色或单色的终端（`TERM=linux` 控制台、极简终端、部分 SSH 会话）上，真彩色转义序列被忽略或粗略降采样，深底浅字的自定义主题常退化为不可读。Delray 改为按终端色深提供三档语义调色板：真彩色（保持现有 RGB 不变）、16 色（手挑 ANSI 基色映射，底色改用 `Color::Reset` 跟随终端配色，靠 `Modifier` 制造层次）、单色（完全不用颜色，仅靠 `Modifier` 与文本符号区分）。档位在启动时按 `NO_COLOR`、`COLORTERM`、`TERM` 启发式检测一次：`COLORTERM=truecolor/24bit` 是真彩色的权威正信号；`NO_COLOR` 为单色；仅 `linux`/`vt*`/`dumb` 等明确受限的 TERM 归 16 色；其余（含 `xterm-256color`、`tmux-256color`）默认真彩色。理由：当 `COLORTERM` 未设置时无法可靠区分真彩色终端与 256-only 终端（两者都标 `*-256color`），故取常见情形（真彩色）为默认，256-only 终端（如经 MobaXterm 的 SSH）用户经设置浮层手动切 16 色。crossterm 无现成色深 API，故用环境变量启发式，不引入额外 crate。
+FlowLens 的 TUI 原先全部使用 24-bit `Color::Rgb` 硬编码配色（`src/tui.rs` 中 15 个命名常量，约 89 处引用）。在仅支持 16 色或单色的终端（`TERM=linux` 控制台、极简终端、部分 SSH 会话）上，真彩色转义序列被忽略或粗略降采样，深底浅字的自定义主题常退化为不可读。FlowLens 改为按终端色深提供三档语义调色板：真彩色（保持现有 RGB 不变）、16 色（手挑 ANSI 基色映射，底色改用 `Color::Reset` 跟随终端配色，靠 `Modifier` 制造层次）、单色（完全不用颜色，仅靠 `Modifier` 与文本符号区分）。档位在启动时按 `NO_COLOR`、`COLORTERM`、`TERM` 启发式检测一次：`COLORTERM=truecolor/24bit` 是真彩色的权威正信号；`NO_COLOR` 为单色；仅 `linux`/`vt*`/`dumb` 等明确受限的 TERM 归 16 色；其余（含 `xterm-256color`、`tmux-256color`）默认真彩色。理由：当 `COLORTERM` 未设置时无法可靠区分真彩色终端与 256-only 终端（两者都标 `*-256color`），故取常见情形（真彩色）为默认，256-only 终端（如经 MobaXterm 的 SSH）用户经设置浮层手动切 16 色。crossterm 无现成色深 API，故用环境变量启发式，不引入额外 crate。
 
 激活的调色板通过模块级 `static` 变量保存，由一组访问器函数（如 `accent()`）读取。这避免了把调色板逐层穿透进各 draw 函数——约 89 处调用点只需把常量名机械替换为访问器调用，是改动最小的接缝。该 `static` 仅作单线程事件循环内按键处理与渲染之间的进程内通信，进程退出即失效，不构成持久化。
 

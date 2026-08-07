@@ -178,7 +178,7 @@ impl TrafficSession {
         let (result_tx, result_rx) = sync_channel(1);
         let worker_interface = interface.clone();
         thread::Builder::new()
-            .name("delray-interface-open".to_string())
+            .name("flowlens-interface-open".to_string())
             .spawn(move || {
                 let result = start(&worker_interface).and_then(|pipeline| {
                     let readiness = pipeline

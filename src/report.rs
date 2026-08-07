@@ -78,7 +78,7 @@ fn plain_snapshot(
     let mut out = String::new();
 
     out.push_str(&format!(
-        "delray\t{interface}\thost: {host}\tstarted: {}\tuptime: {}\t{}\n\n",
+        "flowlens\t{interface}\thost: {host}\tstarted: {}\tuptime: {}\t{}\n\n",
         started_wall.format("%Y-%m-%d %H:%M:%S"),
         fmt_elapsed(started_at.elapsed()),
         now.format("%Y-%m-%d %H:%M:%S")

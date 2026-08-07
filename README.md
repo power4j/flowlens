@@ -1,10 +1,10 @@
-# Delray
+# FlowLens
 
 English | [简体中文](README_CN.md)
 
-Delray is a command-line network traffic analyzer for resource-constrained Linux and Windows hosts. It shows interface traffic and provides best-effort process, IP, and outbound-domain attribution.
+FlowLens is a command-line network traffic analyzer for resource-constrained Linux and Windows hosts. It shows interface traffic and provides best-effort process, IP, and outbound-domain attribution.
 
-![Delray overview](assets/screen/ui-overview.png)
+![FlowLens overview](assets/screen/ui-overview.png)
 
 ## Supported platforms
 
@@ -17,7 +17,7 @@ Windows and Linux are supported release platforms. Support means that the core f
 
 ## Install
 
-Download the archive for the target platform from the [GitHub Releases](https://github.com/power4j/delray/releases/latest) page and extract the single executable inside it.
+Download the archive for the target platform from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
 
 ### Linux
 
@@ -31,74 +31,74 @@ sudo apt install libpcap0.8
 sudo dnf install libpcap
 ```
 
-Run Delray as root, or grant the executable `CAP_NET_RAW`:
+Run FlowLens as root, or grant the executable `CAP_NET_RAW`:
 
 ```bash
-sudo ./delray
+sudo ./flowlens
 # or
-sudo setcap cap_net_raw+ep ./delray
-./delray
+sudo setcap cap_net_raw+ep ./flowlens
+./flowlens
 ```
 
 ### Windows
 
-Install [Npcap](https://npcap.com/) before starting Delray. The Windows archive contains only `delray.exe`; it does not include Npcap Runtime.
+Install [Npcap](https://npcap.com/) before starting FlowLens. The Windows archive contains only `flowlens.exe`; it does not include Npcap Runtime.
 
-Delray checks for `wpcap.dll` at startup and reports a missing Npcap Runtime before opening a capture device.
+FlowLens checks for `wpcap.dll` at startup and reports a missing Npcap Runtime before opening a capture device.
 
 ## Usage
 
 Start the foreground TUI without selecting an interface:
 
 ```bash
-./delray
+./flowlens
 ```
 
 Start directly on an interface:
 
 ```bash
-./delray eth0
+./flowlens eth0
 ```
 
 Write periodic plain-text snapshots to a file:
 
 ```bash
-./delray eth0 --output /tmp/stats.txt
+./flowlens eth0 --output /tmp/stats.txt
 ```
 
 Stream JSON Lines to standard output:
 
 ```bash
-./delray eth0 --format json
+./flowlens eth0 --format json
 ```
 
 Write JSON snapshots to a file:
 
 ```bash
-./delray eth0 --format json --output /tmp/stats.json
+./flowlens eth0 --format json --output /tmp/stats.json
 ```
 
 Limit each top-N list:
 
 ```bash
-./delray eth0 --top-n 3
+./flowlens eth0 --top-n 3
 ```
 
 Write process-attribution diagnostics as JSONL to the default `.log` file:
 
 ```bash
-./delray eth0 --format json --diagnostics
+./flowlens eth0 --format json --diagnostics
 ```
 
 Specify the diagnostics output file:
 
 ```bash
-./delray eth0 --diagnostics --diagnostics-output /tmp/delray-diagnostics.jsonl
+./flowlens eth0 --diagnostics --diagnostics-output /tmp/flowlens-diagnostics.jsonl
 ```
 
 In TUI mode, diagnostics are written to this file and never to the terminal.
 
-Use `delray --help` for the complete option list.
+Use `flowlens --help` for the complete option list.
 
 ## What it shows
 
@@ -120,6 +120,6 @@ The process attribution and capture behavior may differ between Linux and Window
 
 ## License
 
-Delray is licensed under the [Apache License 2.0](LICENSE).
+FlowLens is licensed under the [Apache License 2.0](LICENSE).
 
 For development and source-build instructions, see [`docs/development.md`](docs/development.md).

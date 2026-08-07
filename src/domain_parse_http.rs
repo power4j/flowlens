@@ -134,7 +134,7 @@ mod tests {
         let req = b"GET /index.html HTTP/1.1\r\n\
                     Accept: */*\r\n\
                     Accept-Language: en-US\r\n\
-                    User-Agent: delray-test/1.0\r\n\
+                    User-Agent: flowlens-test/1.0\r\n\
                     Host: example.com\r\n\
                     Connection: keep-alive\r\n\
                     \r\n";

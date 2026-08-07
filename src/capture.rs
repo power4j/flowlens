@@ -201,8 +201,8 @@ pub fn format_interface_list(interfaces: &[InterfaceInfo]) -> String {
             writeln!(output, "     {label}: {secondary}").unwrap();
         }
     }
-    output.push_str("\nUsage: delray <interface-or-number> [OPTIONS]\n");
-    output.push_str("Run delray --help for full usage\n");
+    output.push_str("\nUsage: flowlens <interface-or-number> [OPTIONS]\n");
+    output.push_str("Run flowlens --help for full usage\n");
     output
 }
 
@@ -1509,8 +1509,8 @@ mod tests {
                 "  1. Wired Ethernet  [default route]\n",
                 "     Name: eth0\n",
                 "  2. \\Device\\NPF_{1234}\n",
-                "\nUsage: delray <interface-or-number> [OPTIONS]\n",
-                "Run delray --help for full usage\n",
+                "\nUsage: flowlens <interface-or-number> [OPTIONS]\n",
+                "Run flowlens --help for full usage\n",
             )
         } else {
             concat!(
@@ -1518,8 +1518,8 @@ mod tests {
                 "  1. eth0  [default route]\n",
                 "     Description: Wired Ethernet\n",
                 "  2. \\Device\\NPF_{1234}\n",
-                "\nUsage: delray <interface-or-number> [OPTIONS]\n",
-                "Run delray --help for full usage\n",
+                "\nUsage: flowlens <interface-or-number> [OPTIONS]\n",
+                "Run flowlens --help for full usage\n",
             )
         };
         assert_eq!(rendered, expected);
@@ -1930,8 +1930,8 @@ mod tests {
             );
 
             // 宽松下限：>100k packets/sec 表示查表 O(1)（含 L3/L4 parse + flow_key + moka get）。
-            // 1 CPU/1G 服务器目标：网卡突发 100k pps 也远超 delray 处理能力，
-            // delray 限速瓶颈是 pcap 抓包（系统调用）而非查表。
+            // 1 CPU/1G 服务器目标：网卡突发 100k pps 也远超 flowlens 处理能力，
+            // flowlens 限速瓶颈是 pcap 抓包（系统调用）而非查表。
             assert!(
                 packets_per_sec > 100_000.0,
                 "查表吞吐 {packets_per_sec:.0} packets/sec 应大于 100k（O(1) lookup）"
