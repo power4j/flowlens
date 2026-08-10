@@ -11,6 +11,7 @@ All notable changes to FlowLens are recorded in this file.
 ### Changed
 
 - Settings overlay uses a unified select-then-change interaction: `j/k`/arrows select an item, `h/l`/arrows change its value, with a full-row highlight and a `> ` selection marker that keeps the selected row identifiable on 16-color/monochrome terminals; the `d` shortcut and `Enter` value cycling were removed.
+- Release workflows now build and publish Linux `x86_64`/`aarch64` and Windows `x86_64`/`aarch64` archives with architecture-specific checksums.
 
 ### Fixed
 
