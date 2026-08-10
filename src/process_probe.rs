@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::capture::{LocalSocket, TransportProtocol};
 #[cfg(windows)]
 use crate::windows_connection_probe;
 
 const REQUEST_CHANNEL_CAPACITY: usize = 1_024;
+const SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 type SocketKey = (IpAddr, u16, TransportProtocol);
 type ListenerQuery = Box<dyn FnMut() -> Result<Vec<ListenerSnapshot>, String> + Send + 'static>;
@@ -107,6 +108,16 @@ struct ListenerSnapshot {
     socket: SocketAddr,
     protocol: TransportProtocol,
     process: ProbeProcess,
+}
+
+struct ProcessSnapshot {
+    captured_at: Instant,
+    listeners: Vec<ListenerSnapshot>,
+    index: HashMap<SocketKey, HashMap<u32, ProbeProcess>>,
+    #[cfg(windows)]
+    connections: Option<Vec<windows_connection_probe::ConnectionRecord>>,
+    #[cfg(windows)]
+    connections_queried: bool,
 }
 
 pub(crate) struct ProcessProbe {
@@ -229,6 +240,13 @@ impl ProcessProbe {
     }
 
     fn spawn_with_query(query: ListenerQuery) -> Self {
+        Self::spawn_with_query_and_interval(query, SNAPSHOT_REFRESH_INTERVAL)
+    }
+
+    fn spawn_with_query_and_interval(
+        query: ListenerQuery,
+        snapshot_refresh_interval: Duration,
+    ) -> Self {
         let (request_tx, request_rx) = mpsc::sync_channel(REQUEST_CHANNEL_CAPACITY);
         let (result_tx, result_rx) = mpsc::channel();
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
@@ -245,6 +263,7 @@ impl ProcessProbe {
                     worker_in_flight,
                     worker_metrics,
                     query,
+                    snapshot_refresh_interval,
                 )
             })
             .expect("process probe worker should spawn");
@@ -265,26 +284,80 @@ fn worker_loop(
     in_flight: Arc<Mutex<HashMap<LocalSocket, ProbeRequestId>>>,
     metrics: Arc<ProbeMetrics>,
     mut query: ListenerQuery,
+    snapshot_refresh_interval: Duration,
 ) {
+    let mut snapshot: Option<ProcessSnapshot> = None;
     while let Ok(first) = request_rx.recv() {
         let mut sockets = vec![first];
         while let Ok(request) = request_rx.try_recv() {
             sockets.push(request);
         }
 
-        let query_started = Instant::now();
-        let listeners = query();
-        let elapsed = query_started.elapsed();
-        metrics.query_count.fetch_add(1, Ordering::Relaxed);
-        metrics.query_duration_nanos.fetch_add(
-            elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
-            Ordering::Relaxed,
-        );
-        metrics.last_query_duration_nanos.store(
-            elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
-            Ordering::Relaxed,
-        );
-        for result in resolve_batch(&sockets, listeners) {
+        let now = Instant::now();
+        let needs_connections = {
+            #[cfg(windows)]
+            {
+                sockets.iter().any(|request| {
+                    request.socket.protocol == TransportProtocol::Tcp && !request.peers.is_empty()
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        };
+        let snapshot_result = match snapshot.as_ref() {
+            Some(snapshot)
+                if now.duration_since(snapshot.captured_at) < snapshot_refresh_interval && {
+                    #[cfg(windows)]
+                    {
+                        !needs_connections || snapshot.connections_queried
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        true
+                    }
+                } =>
+            {
+                Ok(snapshot)
+            }
+            _ => {
+                let query_started = Instant::now();
+                let refreshed = query().map(|listeners| {
+                    #[cfg(windows)]
+                    let connections = needs_connections
+                        .then(|| windows_connection_probe::query().ok())
+                        .flatten();
+                    ProcessSnapshot {
+                        captured_at: Instant::now(),
+                        index: listener_index(&listeners),
+                        listeners,
+                        #[cfg(windows)]
+                        connections,
+                        #[cfg(windows)]
+                        connections_queried: needs_connections,
+                    }
+                });
+                let elapsed = query_started.elapsed();
+                metrics.query_count.fetch_add(1, Ordering::Relaxed);
+                metrics.query_duration_nanos.fetch_add(
+                    elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
+                    Ordering::Relaxed,
+                );
+                metrics.last_query_duration_nanos.store(
+                    elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,
+                    Ordering::Relaxed,
+                );
+                match refreshed {
+                    Ok(refreshed) => {
+                        snapshot = Some(refreshed);
+                        Ok(snapshot.as_ref().expect("snapshot was just stored"))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        for result in resolve_snapshot_batch(&sockets, snapshot_result) {
             let socket = result.socket();
             let request_id = result.request_id();
             if let Ok(mut in_flight) = in_flight.lock()
@@ -299,6 +372,37 @@ fn worker_loop(
     }
 }
 
+fn resolve_snapshot_batch(
+    requests: &[ProbeRequest],
+    snapshot: Result<&ProcessSnapshot, String>,
+) -> Vec<ProbeResult> {
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let error: Arc<str> = Arc::from(error);
+            return requests
+                .iter()
+                .map(|request| ProbeResult::Unavailable {
+                    request_id: request.id,
+                    socket: request.socket,
+                    error: error.clone(),
+                })
+                .collect();
+        }
+    };
+
+    #[cfg(windows)]
+    let connections = snapshot.connections.as_deref();
+    resolve_requests(
+        requests,
+        &snapshot.listeners,
+        &snapshot.index,
+        #[cfg(windows)]
+        connections,
+    )
+}
+
+#[cfg(test)]
 fn resolve_batch(
     requests: &[ProbeRequest],
     listeners: Result<Vec<ListenerSnapshot>, String>,
@@ -326,18 +430,45 @@ fn resolve_batch(
     } else {
         None
     };
-    let index = listener_index(listeners.clone());
+    let index = listener_index(&listeners);
+    resolve_requests(
+        requests,
+        &listeners,
+        &index,
+        #[cfg(windows)]
+        connections.as_deref(),
+    )
+}
+
+#[cfg(not(windows))]
+fn resolve_requests(
+    requests: &[ProbeRequest],
+    _listeners: &[ListenerSnapshot],
+    index: &HashMap<SocketKey, HashMap<u32, ProbeProcess>>,
+) -> Vec<ProbeResult> {
+    requests
+        .iter()
+        .map(|request| resolve_socket(request.id, request.socket, index))
+        .collect()
+}
+
+#[cfg(windows)]
+fn resolve_requests(
+    requests: &[ProbeRequest],
+    listeners: &[ListenerSnapshot],
+    index: &HashMap<SocketKey, HashMap<u32, ProbeProcess>>,
+    connections: Option<&[windows_connection_probe::ConnectionRecord]>,
+) -> Vec<ProbeResult> {
     requests
         .iter()
         .map(|request| {
-            #[cfg(windows)]
             if request.socket.protocol == TransportProtocol::Tcp
                 && !request.peers.is_empty()
-                && let Some(connections) = connections.as_ref()
+                && let Some(connections) = connections
             {
-                return resolve_connections(request, connections, &listeners, &index);
+                return resolve_connections(request, connections, listeners, index);
             }
-            resolve_socket(request.id, request.socket, &index)
+            resolve_socket(request.id, request.socket, index)
         })
         .collect()
 }
@@ -425,7 +556,7 @@ fn resolve_socket(
 }
 
 fn listener_index(
-    listeners: Vec<ListenerSnapshot>,
+    listeners: &[ListenerSnapshot],
 ) -> HashMap<SocketKey, HashMap<u32, ProbeProcess>> {
     let mut index: HashMap<SocketKey, HashMap<u32, ProbeProcess>> = HashMap::new();
     for listener in listeners {
@@ -595,7 +726,7 @@ mod tests {
                 state: Some(5),
             }],
             &listeners,
-            &listener_index(listeners.clone()),
+            &listener_index(&listeners),
         );
 
         assert_eq!(
@@ -630,12 +761,7 @@ mod tests {
         let listeners = vec![listener(local, 49_152, TransportProtocol::Tcp, 7)];
 
         assert_eq!(
-            resolve_connections(
-                &request,
-                &[],
-                &listeners,
-                &listener_index(listeners.clone()),
-            ),
+            resolve_connections(&request, &[], &listeners, &listener_index(&listeners),),
             ProbeResult::Unique {
                 request_id: request.id,
                 socket: request.socket,
@@ -676,7 +802,7 @@ mod tests {
             &request,
             &connections,
             &listeners,
-            &listener_index(listeners.clone()),
+            &listener_index(&listeners),
         );
 
         assert_eq!(
@@ -892,5 +1018,83 @@ mod tests {
             probe.request(request),
             ProbeRequestOutcome::Queued(_)
         ));
+    }
+
+    fn wait_for_result(probe: &ProcessProbe) -> ProbeResult {
+        loop {
+            if let Some(result) = probe.drain_results().into_iter().next() {
+                return result;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn fresh_snapshot_is_reused_across_request_batches() {
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let query_count_for_worker = query_count.clone();
+        let local = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let request = socket(local, 443, TransportProtocol::Tcp);
+        let probe = ProcessProbe::spawn_with_query_and_interval(
+            Box::new(move || {
+                query_count_for_worker.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![listener(local, 443, TransportProtocol::Tcp, 7)])
+            }),
+            Duration::from_millis(100),
+        );
+
+        assert!(matches!(
+            probe.request(request),
+            ProbeRequestOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            wait_for_result(&probe),
+            ProbeResult::Unique { .. }
+        ));
+        assert!(matches!(
+            probe.request(request),
+            ProbeRequestOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            wait_for_result(&probe),
+            ProbeResult::Unique { .. }
+        ));
+
+        assert_eq!(query_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn expired_snapshot_is_refreshed_for_a_later_request() {
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let query_count_for_worker = query_count.clone();
+        let local = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let request = socket(local, 443, TransportProtocol::Tcp);
+        let probe = ProcessProbe::spawn_with_query_and_interval(
+            Box::new(move || {
+                query_count_for_worker.fetch_add(1, Ordering::Relaxed);
+                Ok(vec![listener(local, 443, TransportProtocol::Tcp, 7)])
+            }),
+            Duration::from_millis(10),
+        );
+
+        assert!(matches!(
+            probe.request(request),
+            ProbeRequestOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            wait_for_result(&probe),
+            ProbeResult::Unique { .. }
+        ));
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(matches!(
+            probe.request(request),
+            ProbeRequestOutcome::Queued(_)
+        ));
+        assert!(matches!(
+            wait_for_result(&probe),
+            ProbeResult::Unique { .. }
+        ));
+
+        assert_eq!(query_count.load(Ordering::Relaxed), 2);
     }
 }
