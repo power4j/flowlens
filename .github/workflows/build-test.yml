@@ -41,11 +41,26 @@ jobs:
         run: echo "short_sha=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
   build-linux:
-    name: build-linux
+    name: build-linux-${{ matrix.arch }}
     if: inputs.platform == 'all' || inputs.platform == 'linux'
     needs: metadata
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu.2.28
+            target_dir: x86_64-unknown-linux-gnu
+            pkg_config_libdir: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu.2.28
+            target_dir: aarch64-unknown-linux-gnu
+            pkg_config_libdir: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+    env:
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      PKG_CONFIG_LIBDIR: ${{ matrix.pkg_config_libdir }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -57,21 +72,24 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-build-test-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-build-test-rust-${{ env.RUST_VERSION }}-
+            ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libpcap-dev
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install --yes libpcap-dev:amd64 libpcap-dev:arm64
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
       - name: Build Linux distribution binary
-        run: cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
+        run: cargo zigbuild --release --locked --target "${{ matrix.target }}"
       - name: Verify Linux binary baseline
         run: |
-          binary=target/x86_64-unknown-linux-gnu/release/flowlens
+          binary=target/${{ matrix.target_dir }}/release/flowlens
           test -x "$binary"
           readelf -d "$binary" | grep -q 'libpcap.so'
           max_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
@@ -81,21 +99,35 @@ jobs:
           BUILD_SHA: ${{ needs.metadata.outputs.short_sha }}
         run: |
           mkdir -p dist
-          tar -C target/x86_64-unknown-linux-gnu/release \
-            -czf "dist/flowlens-${BUILD_SHA}-linux-x86_64.tar.gz" flowlens
+          tar -C target/${{ matrix.target_dir }}/release \
+            -czf "dist/flowlens-${BUILD_SHA}-linux-${{ matrix.arch }}.tar.gz" flowlens
       - uses: actions/upload-artifact@v7
         with:
-          name: flowlens-${{ needs.metadata.outputs.short_sha }}-linux-x86_64
+          name: flowlens-${{ needs.metadata.outputs.short_sha }}-linux-${{ matrix.arch }}
           path: dist/flowlens-*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
   build-windows:
-    name: build-windows
+    name: build-windows-${{ matrix.arch }}
     if: inputs.platform == 'all' || inputs.platform == 'windows'
     needs: metadata
     runs-on: windows-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            target_dir: x86_64-pc-windows-msvc
+            npcap_libdir: x64
+            msvc_arch: amd64
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            target_dir: aarch64-pc-windows-msvc
+            npcap_libdir: ARM64
+            msvc_arch: amd64_arm64
     env:
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
@@ -109,9 +141,9 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             target
-          key: ${{ runner.os }}-build-test-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-build-test-rust-${{ env.RUST_VERSION }}-
+            ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-
       - uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}\npcap-sdk-${{ env.NPCAP_SDK_VERSION }}.zip
@@ -132,17 +164,21 @@ jobs:
             Remove-Item -LiteralPath $extract -Recurse -Force
           }
           Expand-Archive -LiteralPath $archive -DestinationPath $extract
-          $libdir = Join-Path $extract 'Lib\x64'
+          $libdir = Join-Path $extract "Lib\${{ matrix.npcap_libdir }}"
           if (-not (Test-Path (Join-Path $libdir 'wpcap.lib'))) { throw 'wpcap.lib is missing' }
           if (-not (Test-Path (Join-Path $libdir 'Packet.lib'))) { throw 'Packet.lib is missing' }
           "LIBPCAP_LIBDIR=$libdir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build Windows distribution binary
-        run: cargo build --release --locked
       - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build Windows distribution binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Verify Windows binary dependencies
         shell: pwsh
         run: |
-          $binary = 'target\release\flowlens.exe'
+          $binary = 'target\${{ matrix.target_dir }}\release\flowlens.exe'
           if (-not (Test-Path $binary)) { throw 'flowlens.exe is missing' }
           $dependencies = (dumpbin /DEPENDENTS $binary | Out-String)
           if ($dependencies -match 'VCRUNTIME140\.dll|MSVCP140\.dll|api-ms-win-crt') {
@@ -157,10 +193,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path 'target\release\flowlens.exe' -DestinationPath "dist\flowlens-$env:BUILD_SHA-windows-x86_64.zip"
+          Compress-Archive -Path 'target\${{ matrix.target_dir }}\release\flowlens.exe' -DestinationPath "dist\flowlens-$env:BUILD_SHA-windows-${{ matrix.arch }}.zip"
       - uses: actions/upload-artifact@v7
         with:
-          name: flowlens-${{ needs.metadata.outputs.short_sha }}-windows-x86_64
+          name: flowlens-${{ needs.metadata.outputs.short_sha }}-windows-${{ matrix.arch }}
           path: dist/flowlens-*.zip
           if-no-files-found: error
           retention-days: 14

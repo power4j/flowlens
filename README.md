@@ -11,13 +11,15 @@ FlowLens is a command-line network traffic analyzer for resource-constrained Lin
 | Platform | Runtime requirements |
 | --- | --- |
 | Linux `x86_64` | glibc `2.28` or newer, libpcap, and root or `CAP_NET_RAW` |
+| Linux `aarch64` | glibc `2.28` or newer, libpcap, and root or `CAP_NET_RAW` |
 | Windows `x86_64` | Windows with [Npcap Runtime](https://npcap.com/) installed |
+| Windows `aarch64` | Windows on ARM with [Npcap Runtime](https://npcap.com/) installed |
 
-Windows and Linux are supported release platforms. Support means that the core functions and basic stability meet the minimum acceptance bar; it does not mean that every boundary condition has been exhaustively tested.
+Windows `x86_64`/`aarch64` and Linux `x86_64`/`aarch64` are supported release platforms. Support means that the core functions and basic stability meet the minimum acceptance bar; it does not mean that every boundary condition has been exhaustively tested.
 
 ## Install
 
-Download the archive for the target platform from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
+Download the archive for the target operating system and CPU architecture from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
 
 ### Linux
 

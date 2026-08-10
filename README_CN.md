@@ -11,13 +11,15 @@ FlowLens 是面向资源受限 Linux 和 Windows 主机的命令行网络流量�
 | 平台 | 运行前置条件 |
 | --- | --- |
 | Linux `x86_64` | glibc `2.28` 或更新版本、libpcap，以及 root 权限或 `CAP_NET_RAW` |
+| Linux `aarch64` | glibc `2.28` 或更新版本、libpcap，以及 root 权限或 `CAP_NET_RAW` |
 | Windows `x86_64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows 系统 |
+| Windows `aarch64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows on ARM 系统 |
 
-Linux 和 Windows 均属于支持平台。「支持平台」表示核心功能和基本稳定性达到最低验收线，不表示所有边界情况都已完成穷尽测试。
+Windows `x86_64`/`aarch64` 以及 Linux `x86_64`/`aarch64` 属于支持平台。「支持平台」表示核心功能和基本稳定性达到最低验收线，不表示所有边界情况都已完成穷尽测试。
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应平台的压缩包，解压其中唯一的可执行文件即可。
+从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应操作系统和 CPU 架构的压缩包，解压其中唯一的可执行文件即可。
 
 ### Linux
 
