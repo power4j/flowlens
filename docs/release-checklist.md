@@ -1,6 +1,6 @@
 # Release Checklist
 
-This checklist records the manual checks around the GitHub Release workflow. The workflow itself performs the version bump, builds both platform artifacts, pushes the version metadata, and creates a Draft Release.
+This checklist records the manual checks around the GitHub Release workflow. The workflow itself performs the version bump, builds all platform artifacts, pushes the version metadata, and creates a Draft Release.
 
 ## Before triggering Release
 
@@ -9,8 +9,8 @@ This checklist records the manual checks around the GitHub Release workflow. The
 - [ ] `CHANGELOG.md` has a complete `[Unreleased]` entry for this release.
 - [ ] The bump type is selected intentionally: `patch`, `minor`, or `major`.
 - [ ] The expected version is strictly greater than the current Cargo version.
-- [ ] Linux manual smoke check completed on a supported host: start-up, interface discovery, capture, and representative output.
-- [ ] Windows manual smoke check completed on a supported host: Npcap detection, interface discovery, capture, and representative output.
+- [ ] Linux `x86_64` and `aarch64` manual smoke checks completed on supported hosts: start-up, interface discovery, capture, and representative output.
+- [ ] Windows `x86_64` and `aarch64` manual smoke checks completed on supported hosts: Npcap detection, interface discovery, capture, and representative output.
 - [ ] Any known platform limitation or incomplete boundary test is ready to state in the Release Notes.
 
 Real traffic and performance checks are manual. They are not required CI jobs and are not silently replaced by a passing unit-test job.
@@ -19,9 +19,9 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 
 - [ ] The Draft Release tag is the expected annotated `vX.Y.Z` tag.
 - [ ] The Release name is exactly `vX.Y.Z`.
-- [ ] Assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz` and `flowlens-vX.Y.Z-windows-x86_64.zip`.
+- [ ] Assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz`, `flowlens-vX.Y.Z-linux-aarch64.tar.gz`, `flowlens-vX.Y.Z-windows-x86_64.zip`, and `flowlens-vX.Y.Z-windows-aarch64.zip`.
 - [ ] Each archive contains only its corresponding `flowlens` or `flowlens.exe` binary.
-- [ ] `SHA256SUMS` is present and covers both archives.
+- [ ] `SHA256SUMS` is present and covers all release archives.
 - [ ] The generated Release Notes have been reviewed and edited.
 - [ ] The `pre-release` option is selected when the release is not considered stable.
 - [ ] The Npcap Runtime prerequisite is stated for Windows releases.

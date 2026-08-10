@@ -5,7 +5,7 @@ This document covers source development and CI reproduction. User installation a
 ## Toolchain
 
 - Rust `1.96.0` (`edition = "2024"` and the current stable application baseline).
-- Linux release builds: Zig `0.16.0` and `cargo-zigbuild` `0.23.0`.
+- Linux release builds: Zig `0.16.0` and `cargo-zigbuild` `0.23.0`, targeting `x86_64` and `aarch64` with glibc `2.28`.
 - Version bumps: `cargo-edit` `0.13.13`.
 - Linux: libpcap development headers and libraries.
 - Windows: MSVC build tools and Npcap SDK `1.16`.
@@ -27,26 +27,37 @@ Install Zig, `cargo-zigbuild`, and the libpcap development package first. The di
 
 ```bash
 cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
+cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.28
+```
+
+For an `aarch64` cross-build on Ubuntu, enable the foreign architecture and install its libpcap package, then point pkg-config at the target directory:
+
+```bash
+sudo dpkg --add-architecture arm64
+sudo apt-get update
+sudo apt-get install --yes libpcap-dev:amd64 libpcap-dev:arm64
+export PKG_CONFIG_ALLOW_CROSS=1
+export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
 ```
 
 The output binary is:
 
 ```text
-target/x86_64-unknown-linux-gnu/release/flowlens
+target/<target-architecture>-unknown-linux-gnu/release/flowlens
 ```
 
 Check the ELF dependencies before treating the binary as a distribution artifact:
 
 ```bash
-readelf -d target/x86_64-unknown-linux-gnu/release/flowlens
-readelf --version-info target/x86_64-unknown-linux-gnu/release/flowlens
+readelf -d target/<target-architecture>-unknown-linux-gnu/release/flowlens
+readelf --version-info target/<target-architecture>-unknown-linux-gnu/release/flowlens
 ```
 
 The binary may depend on the target system's glibc and libpcap. Static linking is used for Rust code and other dependencies where it is appropriate; glibc and libpcap remain explicit Linux runtime prerequisites.
 
 ## Windows build
 
-Set `LIBPCAP_LIBDIR` to the x64 `Lib` directory from Npcap SDK `1.16`:
+Set `LIBPCAP_LIBDIR` to the target architecture's `Lib` directory from Npcap SDK `1.16`:
 
 ```powershell
 $env:LIBPCAP_LIBDIR = 'path-to-npcap-sdk\Lib\x64'
@@ -79,8 +90,8 @@ The workflow can also be started with GitHub CLI:
 gh workflow run build-test.yml --ref <branch> -f platform=all
 ```
 
-The Linux artifact uses the glibc `2.28` baseline. The Windows artifact uses static VC Runtime linking and still requires Npcap Runtime on the test machine.
+Linux artifacts use the glibc `2.28` baseline for both `x86_64` and `aarch64`. Windows artifacts for `x86_64` and `aarch64` use static VC Runtime linking and still require Npcap Runtime on the test machine.
 
 ## Release development
 
-The Release workflow uses `cargo-edit` for `major`, `minor`, and `patch` bumps. It builds and validates both platform artifacts before pushing the version commit and annotated tag. The maintainer checklist is in [`release-checklist.md`](release-checklist.md).
+The Release workflow uses `cargo-edit` for `major`, `minor`, and `patch` bumps. It builds and validates Linux `x86_64`/`aarch64` and Windows `x86_64`/`aarch64` artifacts before pushing the version commit and annotated tag. The maintainer checklist is in [`release-checklist.md`](release-checklist.md).
