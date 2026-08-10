@@ -44,23 +44,20 @@ jobs:
     name: build-linux-${{ matrix.arch }}
     if: inputs.platform == 'all' || inputs.platform == 'linux'
     needs: metadata
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
+            runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu.2.28
             target_dir: x86_64-unknown-linux-gnu
-            pkg_config_libdir: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           - arch: aarch64
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu.2.28
             target_dir: aarch64-unknown-linux-gnu
-            pkg_config_libdir: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-    env:
-      PKG_CONFIG_ALLOW_CROSS: "1"
-      PKG_CONFIG_LIBDIR: ${{ matrix.pkg_config_libdir }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -76,10 +73,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-
       - name: Install native dependencies
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install --yes libpcap-dev:amd64 libpcap-dev:arm64
+        run: sudo apt-get update && sudo apt-get install --yes libpcap-dev
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
