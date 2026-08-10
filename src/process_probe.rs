@@ -294,18 +294,10 @@ fn worker_loop(
         }
 
         let now = Instant::now();
-        let needs_connections = {
-            #[cfg(windows)]
-            {
-                sockets.iter().any(|request| {
-                    request.socket.protocol == TransportProtocol::Tcp && !request.peers.is_empty()
-                })
-            }
-            #[cfg(not(windows))]
-            {
-                false
-            }
-        };
+        #[cfg(windows)]
+        let needs_connections = sockets.iter().any(|request| {
+            request.socket.protocol == TransportProtocol::Tcp && !request.peers.is_empty()
+        });
         let snapshot_result = match snapshot.as_ref() {
             Some(snapshot)
                 if now.duration_since(snapshot.captured_at) < snapshot_refresh_interval && {
