@@ -209,7 +209,7 @@ fn run(args: &[String]) -> Result<(), String> {
         let now = Instant::now();
         if now.duration_since(last_emit) >= options.interval {
             let stat = cap.stats().ok();
-            let (dropped, if_dropped, received) = stat_deltas(last_stat, stat);
+            let deltas = stat_deltas(last_stat, stat);
             last_stat = stat;
             let uptime_secs = now.duration_since(started).as_secs();
             let line = serde_json::json!({
@@ -223,9 +223,9 @@ fn run(args: &[String]) -> Result<(), String> {
                 "arp_packets": totals.arp_packets,
                 "other_packets": totals.other_packets,
                 "ip_invalid_packets": totals.ip_invalid_packets,
-                "dropped": dropped,
-                "if_dropped": if_dropped,
-                "received": received,
+                "dropped": deltas.dropped,
+                "if_dropped": deltas.if_dropped,
+                "received": deltas.received,
             });
             writeln!(writer, "{line}").map_err(|error| error.to_string())?;
             writer.flush().map_err(|error| error.to_string())?;
@@ -242,15 +242,23 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn stat_deltas(before: Option<pcap::Stat>, after: Option<pcap::Stat>) -> (u64, u64, u64) {
+/// Per-interval pcap statistics deltas emitted in each JSONL line.
+#[derive(Clone, Copy, Debug, Default)]
+struct StatDelta {
+    dropped: u64,
+    if_dropped: u64,
+    received: u64,
+}
+
+fn stat_deltas(before: Option<pcap::Stat>, after: Option<pcap::Stat>) -> StatDelta {
     let (Some(before), Some(after)) = (before, after) else {
-        return (0, 0, 0);
+        return StatDelta::default();
     };
-    (
-        u64::from(after.dropped.saturating_sub(before.dropped)),
-        u64::from(after.if_dropped.saturating_sub(before.if_dropped)),
-        u64::from(after.received.saturating_sub(before.received)),
-    )
+    StatDelta {
+        dropped: u64::from(after.dropped.saturating_sub(before.dropped)),
+        if_dropped: u64::from(after.if_dropped.saturating_sub(before.if_dropped)),
+        received: u64::from(after.received.saturating_sub(before.received)),
+    }
 }
 
 fn count_frame(link: Linktype, data: &[u8], wire_len: u64, totals: &mut Totals) {
