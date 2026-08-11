@@ -24,23 +24,22 @@ pub(crate) fn default_output_path() -> PathBuf {
     ))
 }
 
-pub(crate) fn collect(
-    proc_table: &SharedProcTable,
-    pending: PendingAttributionSnapshot,
-    stats: StatsDiagnostics,
-    flow_table_entries: u64,
-    pcap: Option<&CaptureCounters>,
-) -> Option<DiagnosticsSnapshot> {
-    let proc = crate::proc_table::diagnostics_snapshot(proc_table)?;
-    Some(from_parts(proc, pending, stats, flow_table_entries, pcap))
+pub(crate) struct DiagnosticsInputs<'a> {
+    pub proc_table: &'a SharedProcTable,
+    pub pending: PendingAttributionSnapshot,
+    pub stats: StatsDiagnostics,
+    pub flow_table_entries: u64,
+    pub pcap: Option<&'a CaptureCounters>,
+}
+
+pub(crate) fn collect(inputs: DiagnosticsInputs<'_>) -> Option<DiagnosticsSnapshot> {
+    let proc = crate::proc_table::diagnostics_snapshot(inputs.proc_table)?;
+    Some(from_parts(proc, inputs))
 }
 
 pub(crate) fn from_parts(
     proc: ProcDiagnosticsSnapshot,
-    pending: PendingAttributionSnapshot,
-    stats: StatsDiagnostics,
-    flow_table_entries: u64,
-    pcap: Option<&CaptureCounters>,
+    inputs: DiagnosticsInputs<'_>,
 ) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot {
         counters: DiagnosticsCounters {
@@ -60,48 +59,52 @@ pub(crate) fn from_parts(
             refresh_failure: proc.refresh_failure,
             refresh_records: proc.refresh_records,
             refresh_v4_mapped_records: proc.refresh_v4_mapped_records,
-            probe_request_queued: pending.probe_request_queued,
-            probe_result_unique: pending.probe_result_unique,
-            probe_result_not_found: pending.probe_result_not_found,
-            probe_result_ambiguous: pending.probe_result_ambiguous,
-            probe_result_unavailable: pending.probe_result_unavailable,
-            probe_result_dropped: pending.probe_result_dropped,
-            probe_result_late: pending.probe_result_late,
-            probe_query_count: pending.probe_query_count,
-            probe_query_ms: pending.probe_query_ms,
-            pending_expired_bytes: pending.pending_expired_bytes,
-            pending_capacity_bytes: pending.pending_capacity_bytes,
-            probe_unique_pending_bytes: pending.probe_unique_pending_bytes,
-            probe_not_found_pending_bytes: pending.probe_not_found_pending_bytes,
-            probe_ambiguous_pending_bytes: pending.probe_ambiguous_pending_bytes,
-            probe_unavailable_pending_bytes: pending.probe_unavailable_pending_bytes,
-            ip_promotions: stats.ip_promotions,
-            ip_demotions: stats.ip_demotions,
-            ip_evictions_heavy: stats.ip_evictions_heavy,
-            ip_evictions_rising: stats.ip_evictions_rising,
-            ip_evictions_observation: stats.ip_evictions_observation,
-            pcap_received: pcap.map_or(0, |c| c.received.load(Ordering::Relaxed)),
-            pcap_dropped: pcap.map_or(0, |c| c.dropped.load(Ordering::Relaxed)),
-            pcap_if_dropped: pcap.map_or(0, |c| c.if_dropped.load(Ordering::Relaxed)),
+            probe_request_queued: inputs.pending.probe_request_queued,
+            probe_result_unique: inputs.pending.probe_result_unique,
+            probe_result_not_found: inputs.pending.probe_result_not_found,
+            probe_result_ambiguous: inputs.pending.probe_result_ambiguous,
+            probe_result_unavailable: inputs.pending.probe_result_unavailable,
+            probe_result_dropped: inputs.pending.probe_result_dropped,
+            probe_result_late: inputs.pending.probe_result_late,
+            probe_query_count: inputs.pending.probe_query_count,
+            probe_query_ms: inputs.pending.probe_query_ms,
+            pending_expired_bytes: inputs.pending.pending_expired_bytes,
+            pending_capacity_bytes: inputs.pending.pending_capacity_bytes,
+            probe_unique_pending_bytes: inputs.pending.probe_unique_pending_bytes,
+            probe_not_found_pending_bytes: inputs.pending.probe_not_found_pending_bytes,
+            probe_ambiguous_pending_bytes: inputs.pending.probe_ambiguous_pending_bytes,
+            probe_unavailable_pending_bytes: inputs.pending.probe_unavailable_pending_bytes,
+            ip_promotions: inputs.stats.ip_promotions,
+            ip_demotions: inputs.stats.ip_demotions,
+            ip_evictions_heavy: inputs.stats.ip_evictions_heavy,
+            ip_evictions_rising: inputs.stats.ip_evictions_rising,
+            ip_evictions_observation: inputs.stats.ip_evictions_observation,
+            pcap_received: inputs
+                .pcap
+                .map_or(0, |c| c.received.load(Ordering::Relaxed)),
+            pcap_dropped: inputs.pcap.map_or(0, |c| c.dropped.load(Ordering::Relaxed)),
+            pcap_if_dropped: inputs
+                .pcap
+                .map_or(0, |c| c.if_dropped.load(Ordering::Relaxed)),
         },
         gauges: DiagnosticsGauges {
-            flow_table_entries,
-            process_entries: stats.process_entries,
-            domain_entries: stats.domain_entries,
+            flow_table_entries: inputs.flow_table_entries,
+            process_entries: inputs.stats.process_entries,
+            domain_entries: inputs.stats.domain_entries,
             last_refresh_ms: proc.last_refresh_duration.as_millis(),
-            pending_records: pending.records,
-            pending_bytes: pending.bytes,
-            probe_last_query_ms: pending.probe_last_query_ms,
+            pending_records: inputs.pending.records,
+            pending_bytes: inputs.pending.bytes,
+            probe_last_query_ms: inputs.pending.probe_last_query_ms,
         },
         ip: DiagnosticsIp {
-            inbound_entries: stats.inbound_ip_entries,
-            outbound_entries: stats.outbound_ip_entries,
-            inbound_heavy_entries: stats.inbound_heavy_ip_entries,
-            inbound_rising_entries: stats.inbound_rising_ip_entries,
-            inbound_observation_entries: stats.inbound_observation_ip_entries,
-            outbound_heavy_entries: stats.outbound_heavy_ip_entries,
-            outbound_rising_entries: stats.outbound_rising_ip_entries,
-            outbound_observation_entries: stats.outbound_observation_ip_entries,
+            inbound_entries: inputs.stats.inbound_ip_entries,
+            outbound_entries: inputs.stats.outbound_ip_entries,
+            inbound_heavy_entries: inputs.stats.inbound_heavy_ip_entries,
+            inbound_rising_entries: inputs.stats.inbound_rising_ip_entries,
+            inbound_observation_entries: inputs.stats.inbound_observation_ip_entries,
+            outbound_heavy_entries: inputs.stats.outbound_heavy_ip_entries,
+            outbound_rising_entries: inputs.stats.outbound_rising_ip_entries,
+            outbound_observation_entries: inputs.stats.outbound_observation_ip_entries,
         },
         miss_samples: proc
             .lookup_miss_samples

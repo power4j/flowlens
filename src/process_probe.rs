@@ -278,6 +278,13 @@ impl ProcessProbe {
     }
 }
 
+/// Whether a request needs the Windows connection-endpoint probe: TCP with
+/// at least one remote endpoint to match.
+#[cfg(windows)]
+fn requires_connection_probe(request: &ProbeRequest) -> bool {
+    request.socket.protocol == TransportProtocol::Tcp && !request.peers.is_empty()
+}
+
 fn worker_loop(
     request_rx: Receiver<ProbeRequest>,
     result_tx: mpsc::Sender<ProbeResult>,
@@ -295,9 +302,7 @@ fn worker_loop(
 
         let now = Instant::now();
         #[cfg(windows)]
-        let needs_connections = sockets.iter().any(|request| {
-            request.socket.protocol == TransportProtocol::Tcp && !request.peers.is_empty()
-        });
+        let needs_connections = sockets.iter().any(requires_connection_probe);
         let snapshot_result = match snapshot.as_ref() {
             Some(snapshot)
                 if now.duration_since(snapshot.captured_at) < snapshot_refresh_interval && {
@@ -415,9 +420,7 @@ fn resolve_batch(
     };
 
     #[cfg(windows)]
-    let connections = if requests.iter().any(|request| {
-        request.socket.protocol == TransportProtocol::Tcp && !request.peers.is_empty()
-    }) {
+    let connections = if requests.iter().any(requires_connection_probe) {
         windows_connection_probe::query().ok()
     } else {
         None
@@ -454,8 +457,7 @@ fn resolve_requests(
     requests
         .iter()
         .map(|request| {
-            if request.socket.protocol == TransportProtocol::Tcp
-                && !request.peers.is_empty()
+            if requires_connection_probe(request)
                 && let Some(connections) = connections
             {
                 return resolve_connections(request, connections, listeners, index);
@@ -805,6 +807,30 @@ mod tests {
                 matches: Vec::new(),
             }
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn requires_connection_probe_requires_tcp_and_peers() {
+        let local = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let tcp_with_peers = ProbeRequest {
+            id: ProbeRequestId(1),
+            socket: socket(local, 443, TransportProtocol::Tcp),
+            peers: vec![SocketAddr::new(local, 50_000)],
+        };
+        let tcp_without_peers = ProbeRequest {
+            id: ProbeRequestId(1),
+            socket: socket(local, 443, TransportProtocol::Tcp),
+            peers: Vec::new(),
+        };
+        let udp_with_peers = ProbeRequest {
+            id: ProbeRequestId(1),
+            socket: socket(local, 53, TransportProtocol::Udp),
+            peers: vec![SocketAddr::new(local, 50_000)],
+        };
+        assert!(requires_connection_probe(&tcp_with_peers));
+        assert!(!requires_connection_probe(&tcp_without_peers));
+        assert!(!requires_connection_probe(&udp_with_peers));
     }
 
     #[test]

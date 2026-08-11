@@ -13,7 +13,6 @@
 //!
 //! Output is JSONL; one object per interval with per-interval deltas.
 
-use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::process::ExitCode;
@@ -23,7 +22,34 @@ use pcap::{Capture, Device, Linktype};
 
 const DEFAULT_SNAPLEN: i32 = 65_535;
 const DEFAULT_BUFFER_SIZE: i32 = 2_000_000;
+use clap::Parser;
 const DEFAULT_INTERVAL_SECS: u64 = 1;
+
+/// Minimal reference capture counter for capture-parity verification.
+#[derive(Parser)]
+#[command(name = "refcap", version, about = "Minimal reference capture counter for capture-parity verification.", long_about = None)]
+struct Cli {
+    /// Capture device name or 1-based index (see `--list`).
+    selector: Option<String>,
+    /// List capture devices as tab-separated rows and exit.
+    #[arg(short = 'l', long)]
+    list: bool,
+    /// Seconds between JSONL output lines.
+    #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
+    interval: u64,
+    /// Write JSONL to FILE instead of stdout.
+    #[arg(long)]
+    out: Option<String>,
+    /// Stop after N seconds of capture.
+    #[arg(long)]
+    seconds: Option<u64>,
+    /// Capture snaplen in bytes.
+    #[arg(long, default_value_t = DEFAULT_SNAPLEN)]
+    snaplen: i32,
+    /// Capture kernel buffer size in bytes.
+    #[arg(long, default_value_t = DEFAULT_BUFFER_SIZE)]
+    buffer_size: i32,
+}
 
 #[derive(Default)]
 struct Totals {
@@ -39,11 +65,15 @@ struct Totals {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--list" || arg == "-l") {
+    let cli = Cli::parse();
+    if cli.list {
         return list_devices();
     }
-    match run(&args) {
+    let Some(ref selector) = cli.selector else {
+        eprintln!("refcap: missing device selector; run `refcap --list` to enumerate devices");
+        return ExitCode::FAILURE;
+    };
+    match run(selector, &cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("refcap: {message}");
@@ -82,77 +112,6 @@ fn list_devices() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-struct Options {
-    selector: String,
-    interval: Duration,
-    out: Option<String>,
-    seconds: Option<u64>,
-    snaplen: i32,
-    buffer_size: i32,
-}
-
-fn parse_options(args: &[String]) -> Result<Options, String> {
-    let mut options = Options {
-        selector: String::new(),
-        interval: Duration::from_secs(DEFAULT_INTERVAL_SECS),
-        out: None,
-        seconds: None,
-        snaplen: DEFAULT_SNAPLEN,
-        buffer_size: DEFAULT_BUFFER_SIZE,
-    };
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--interval" => {
-                options.interval = Duration::from_secs(next_u64(args, &mut index, "--interval")?);
-            }
-            "--out" => {
-                options.out = Some(next_arg(args, &mut index, "--out")?.to_string());
-            }
-            "--seconds" => {
-                options.seconds = Some(next_u64(args, &mut index, "--seconds")?);
-            }
-            "--snaplen" => {
-                options.snaplen = next_i32(args, &mut index, "--snaplen")?;
-            }
-            "--buffer-size" => {
-                options.buffer_size = next_i32(args, &mut index, "--buffer-size")?;
-            }
-            other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
-            other => {
-                if !options.selector.is_empty() {
-                    return Err(format!("unexpected extra argument: {other}"));
-                }
-                options.selector = other.to_string();
-            }
-        }
-        index += 1;
-    }
-    if options.selector.is_empty() {
-        return Err("missing device selector; run `refcap --list` to enumerate devices".into());
-    }
-    Ok(options)
-}
-
-fn next_arg<'a>(args: &'a [String], index: &mut usize, name: &str) -> Result<&'a str, String> {
-    *index += 1;
-    args.get(*index)
-        .map(String::as_str)
-        .ok_or_else(|| format!("{name} requires a value"))
-}
-
-fn next_u64(args: &[String], index: &mut usize, name: &str) -> Result<u64, String> {
-    next_arg(args, index, name)?
-        .parse()
-        .map_err(|_| format!("{name} requires a positive integer"))
-}
-
-fn next_i32(args: &[String], index: &mut usize, name: &str) -> Result<i32, String> {
-    next_arg(args, index, name)?
-        .parse()
-        .map_err(|_| format!("{name} requires an integer"))
-}
-
 fn resolve_device<'a>(selector: &str, devices: &'a [Device]) -> Result<&'a Device, String> {
     if let Some(device) = devices.iter().find(|device| device.name == selector) {
         return Ok(device);
@@ -169,22 +128,22 @@ fn resolve_device<'a>(selector: &str, devices: &'a [Device]) -> Result<&'a Devic
     Err(format!("interface not found: {selector}"))
 }
 
-fn run(args: &[String]) -> Result<(), String> {
-    let options = parse_options(args)?;
+fn run(selector: &str, cli: &Cli) -> Result<(), String> {
+    let interval = Duration::from_secs(cli.interval);
     let devices = Device::list().map_err(|error| error.to_string())?;
-    let device = resolve_device(&options.selector, &devices)?.clone();
+    let device = resolve_device(selector, &devices)?.clone();
 
     let mut cap = Capture::from_device(device)
         .map_err(|error| error.to_string())?
         .timeout(150)
-        .snaplen(options.snaplen)
-        .buffer_size(options.buffer_size)
+        .snaplen(cli.snaplen)
+        .buffer_size(cli.buffer_size)
         .promisc(false)
         .open()
         .map_err(|error| error.to_string())?;
     let link = cap.get_datalink();
 
-    let mut writer: Box<dyn Write> = match &options.out {
+    let mut writer: Box<dyn Write> = match &cli.out {
         Some(path) => Box::new(BufWriter::new(
             File::create(path).map_err(|error| error.to_string())?,
         )),
@@ -207,9 +166,9 @@ fn run(args: &[String]) -> Result<(), String> {
         }
 
         let now = Instant::now();
-        if now.duration_since(last_emit) >= options.interval {
+        if now.duration_since(last_emit) >= interval {
             let stat = cap.stats().ok();
-            let (dropped, if_dropped, received) = stat_deltas(last_stat, stat);
+            let deltas = stat_deltas(last_stat, stat);
             last_stat = stat;
             let uptime_secs = now.duration_since(started).as_secs();
             let line = serde_json::json!({
@@ -223,18 +182,15 @@ fn run(args: &[String]) -> Result<(), String> {
                 "arp_packets": totals.arp_packets,
                 "other_packets": totals.other_packets,
                 "ip_invalid_packets": totals.ip_invalid_packets,
-                "dropped": dropped,
-                "if_dropped": if_dropped,
-                "received": received,
+                "dropped": deltas.dropped,
+                "if_dropped": deltas.if_dropped,
+                "received": deltas.received,
             });
             writeln!(writer, "{line}").map_err(|error| error.to_string())?;
             writer.flush().map_err(|error| error.to_string())?;
             totals = Totals::default();
             last_emit = now;
-            if options
-                .seconds
-                .is_some_and(|seconds| uptime_secs >= seconds)
-            {
+            if cli.seconds.is_some_and(|seconds| uptime_secs >= seconds) {
                 break;
             }
         }
@@ -242,15 +198,23 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn stat_deltas(before: Option<pcap::Stat>, after: Option<pcap::Stat>) -> (u64, u64, u64) {
+/// Per-interval pcap statistics deltas emitted in each JSONL line.
+#[derive(Clone, Copy, Debug, Default)]
+struct StatDelta {
+    dropped: u64,
+    if_dropped: u64,
+    received: u64,
+}
+
+fn stat_deltas(before: Option<pcap::Stat>, after: Option<pcap::Stat>) -> StatDelta {
     let (Some(before), Some(after)) = (before, after) else {
-        return (0, 0, 0);
+        return StatDelta::default();
     };
-    (
-        u64::from(after.dropped.saturating_sub(before.dropped)),
-        u64::from(after.if_dropped.saturating_sub(before.if_dropped)),
-        u64::from(after.received.saturating_sub(before.received)),
-    )
+    StatDelta {
+        dropped: u64::from(after.dropped.saturating_sub(before.dropped)),
+        if_dropped: u64::from(after.if_dropped.saturating_sub(before.if_dropped)),
+        received: u64::from(after.received.saturating_sub(before.received)),
+    }
 }
 
 fn count_frame(link: Linktype, data: &[u8], wire_len: u64, totals: &mut Totals) {

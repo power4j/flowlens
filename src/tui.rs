@@ -30,6 +30,10 @@ use crate::stats::{IpSnapshot, ProcessSnapshot, TrafficSnapshot};
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Number of selectable rows in the settings overlay.
 const SETTINGS_SELECTABLE_ROWS: usize = 2;
+/// Settings row index for the palette choice.
+const PALETTE_ROW: usize = 0;
+/// Settings row index for the diagnostics toggle.
+const DIAGNOSTICS_ROW: usize = 1;
 
 /// Which page is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,7 +326,7 @@ where
                 KeyOutcome::Changed
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
-                if state.settings_selection == 0 {
+                if state.settings_selection == PALETTE_ROW {
                     let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
                     state.palette_choice = if forward {
                         next_palette_choice(state.palette_choice)
@@ -333,8 +337,10 @@ where
                         state.palette_choice,
                         state.detected_tier,
                     ));
-                } else {
+                } else if state.settings_selection == DIAGNOSTICS_ROW {
                     state.diagnostics_enabled = !state.diagnostics_enabled;
+                } else {
+                    return KeyOutcome::Ignored;
                 }
                 KeyOutcome::Changed
             }
@@ -381,6 +387,56 @@ fn finish_tui_activation(
     }
 }
 
+/// Runtime side of the diagnostics toggle: the open writer plus the shared
+/// enable flag that gates pipeline-side collection.
+struct DiagnosticsRuntime {
+    writer: Option<DiagnosticsWriter>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl DiagnosticsRuntime {
+    fn new(writer: Option<DiagnosticsWriter>, enabled: Arc<AtomicBool>) -> Self {
+        Self { writer, enabled }
+    }
+
+    /// Reconcile the toggle intent in `state` with the writer state, opening
+    /// or closing the diagnostics file as needed. Returns true when a redraw
+    /// is required.
+    fn reconcile(&mut self, state: &mut AppState) -> bool {
+        if state.diagnostics_enabled == self.writer.is_some() {
+            return false;
+        }
+        if state.diagnostics_enabled {
+            match DiagnosticsWriter::create(crate::diagnostics::default_output_path()) {
+                Ok(writer) => {
+                    state.diagnostics_file = writer.file_name();
+                    state.diagnostics_error = None;
+                    self.writer = Some(writer);
+                    self.enabled.store(true, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    state.diagnostics_enabled = false;
+                    state.diagnostics_error = Some(format!("Diagnostics unavailable: {error}"));
+                }
+            }
+        } else {
+            self.writer = None;
+            state.diagnostics_file = None;
+            self.enabled.store(false, Ordering::Relaxed);
+        }
+        true
+    }
+
+    /// Disable diagnostics after a write failure.
+    fn note_write_failure(&mut self, state: &mut AppState, error: io::Error) {
+        self.writer = None;
+        state.diagnostics_enabled = false;
+        state.diagnostics_file = None;
+        self.enabled.store(false, Ordering::Relaxed);
+        state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
+    }
+}
+
 /// Run the TUI until the user quits.
 pub fn run(
     session: &mut TrafficSession,
@@ -417,8 +473,7 @@ pub fn run(
         &host,
         started_at,
         session,
-        diagnostics_writer,
-        diagnostics_enabled,
+        DiagnosticsRuntime::new(diagnostics_writer, diagnostics_enabled),
     );
 
     // Restore terminal regardless of how the event loop exited.
@@ -437,8 +492,7 @@ fn tui_loop(
     host: &str,
     started_at: Instant,
     session: &mut TrafficSession,
-    mut diagnostics_writer: Option<DiagnosticsWriter>,
-    diagnostics_enabled: Arc<AtomicBool>,
+    mut diagnostics: DiagnosticsRuntime,
 ) -> io::Result<()> {
     terminal.draw(|f| {
         draw_with_interfaces(
@@ -451,8 +505,6 @@ fn tui_loop(
             started_at,
         )
     })?;
-
-    let mut diagnostics_active = diagnostics_writer.is_some();
 
     loop {
         let event = if event::poll(EVENT_POLL_INTERVAL)? {
@@ -479,27 +531,7 @@ fn tui_loop(
             }
         }
 
-        if state.diagnostics_enabled != diagnostics_active {
-            if state.diagnostics_enabled {
-                match DiagnosticsWriter::create(crate::diagnostics::default_output_path()) {
-                    Ok(writer) => {
-                        state.diagnostics_file = writer.file_name();
-                        state.diagnostics_error = None;
-                        diagnostics_writer = Some(writer);
-                        diagnostics_active = true;
-                        diagnostics_enabled.store(true, Ordering::Relaxed);
-                    }
-                    Err(error) => {
-                        state.diagnostics_enabled = false;
-                        state.diagnostics_error = Some(format!("Diagnostics unavailable: {error}"));
-                    }
-                }
-            } else {
-                diagnostics_writer = None;
-                state.diagnostics_file = None;
-                diagnostics_active = false;
-                diagnostics_enabled.store(false, Ordering::Relaxed);
-            }
+        if diagnostics.reconcile(state) {
             changed = true;
         }
 
@@ -521,17 +553,12 @@ fn tui_loop(
         }
 
         if let Some(latest) = session.try_latest().map_err(io::Error::other)? {
-            if let Some(writer) = diagnostics_writer.as_mut()
-                && let Some(diagnostics) = latest.diagnostics.as_ref()
+            if let Some(writer) = diagnostics.writer.as_mut()
+                && let Some(diag) = latest.diagnostics.as_ref()
             {
                 let interface = session.active_interface().unwrap_or("<none>");
-                if let Err(error) = writer.write(interface, diagnostics) {
-                    diagnostics_writer = None;
-                    diagnostics_active = false;
-                    state.diagnostics_enabled = false;
-                    state.diagnostics_file = None;
-                    diagnostics_enabled.store(false, Ordering::Relaxed);
-                    state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
+                if let Err(error) = writer.write(interface, diag) {
+                    diagnostics.note_write_failure(state, error);
                 }
             }
             *snapshot = latest;
@@ -2085,7 +2112,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     };
     let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
     let selection_style = palette::selection_style();
-    let palette_selected = state.settings_selection == 0;
+    let palette_selected = state.settings_selection == PALETTE_ROW;
     let mut palette_line = Line::from(vec![
         Span::raw(settings_selection_prefix(palette_selected)),
         Span::styled(
@@ -2104,7 +2131,9 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ),
     ]);
     let mut diagnostics_line = Line::from(vec![
-        Span::raw(settings_selection_prefix(state.settings_selection == 1)),
+        Span::raw(settings_selection_prefix(
+            state.settings_selection == DIAGNOSTICS_ROW,
+        )),
         Span::styled(
             "Diagnostics: ",
             Style::default()
