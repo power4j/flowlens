@@ -339,9 +339,9 @@ where
         }
     } else if state.settings_open {
         match key.code {
-            // All three keys close the overlay; the draft is committed by
+            // `o` and Esc close the overlay; the draft is committed by
             // `DiagnosticsRuntime::reconcile` on the next loop iteration.
-            KeyCode::Esc | KeyCode::Char('o') | KeyCode::Enter => {
+            KeyCode::Esc | KeyCode::Char('o') => {
                 state.settings_open = false;
                 KeyOutcome::Changed
             }
@@ -371,11 +371,21 @@ where
                     // enable flag are touched once, when the overlay closes
                     // (see `DiagnosticsRuntime::reconcile`).
                     state.diagnostics_draft = !state.diagnostics_draft;
+                    // After a write failure forced diagnostics off mid-edit,
+                    // the reserved path was cleared; re-reserve one when the
+                    // draft moves back ON so the overlay keeps showing it.
+                    if state.diagnostics_draft {
+                        state
+                            .diagnostics_pending_path
+                            .get_or_insert_with(crate::diagnostics::default_output_path);
+                    }
                 } else {
                     return KeyOutcome::Ignored;
                 }
                 KeyOutcome::Changed
             }
+            // Enter has no action in the settings overlay.
+            KeyCode::Enter => KeyOutcome::Ignored,
             // The overlay swallows all other keys so page shortcuts do not
             // leak through while it is open.
             _ => KeyOutcome::Ignored,
@@ -485,20 +495,20 @@ impl DiagnosticsRuntime {
         true
     }
 
-    /// Disable diagnostics after a write failure.
+    /// Disable diagnostics after a write failure. The actual state, the
+    /// settings draft and the shared flag are all turned off together, and
+    /// any reserved path is cleared, so the next `reconcile` has nothing to
+    /// commit and never re-opens the writer. The error stays visible in the
+    /// status bar; the user can re-open the settings overlay and manually
+    /// turn diagnostics back on.
     fn note_write_failure(&mut self, state: &mut AppState, error: io::Error) {
         self.writer = None;
         state.diagnostics_enabled = false;
+        state.diagnostics_draft = false;
         state.diagnostics_file = None;
+        state.diagnostics_pending_path = None;
         self.enabled.store(false, Ordering::Relaxed);
         state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
-        // If the user is mid-edit with the draft on, keep a pending path
-        // available so the overlay can still show what would be written.
-        if state.settings_open && state.diagnostics_draft {
-            state
-                .diagnostics_pending_path
-                .get_or_insert_with(crate::diagnostics::default_output_path);
-        }
     }
 }
 
@@ -4529,15 +4539,16 @@ mod tests {
     }
 
     #[test]
-    fn settings_enter_closes_the_overlay() {
+    fn settings_enter_is_ignored() {
         let mut state = AppState::new();
         state.detected_tier = palette::ColorTier::Truecolor;
         state.palette_choice = palette::PaletteChoice::Auto;
         send_key(&mut state, KeyCode::Char('o'));
 
-        // Enter closes the overlay (the draft is committed by reconcile).
-        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Changed);
-        assert!(!state.settings_open);
+        // Enter has no action in the settings overlay: it neither closes the
+        // overlay nor commits the diagnostics draft.
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
+        assert!(state.settings_open, "Enter must not close the overlay");
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
     }
 
@@ -4855,6 +4866,101 @@ mod tests {
     }
 
     #[test]
+    fn write_failure_forces_draft_and_pending_off_without_retry() {
+        // A runtime write failure must shut diagnostics down completely: the
+        // actual state, the settings draft, the writer and the shared flag
+        // all go OFF, the reserved path is cleared, and the next reconcile
+        // does not re-open the writer. The error stays visible.
+        let file = diagnostics_temp_path("write-fail");
+        let writer = DiagnosticsWriter::create(&file).unwrap();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
+
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some("flowlens-42.log".to_string());
+        state.diagnostics_pending_path = Some(PathBuf::from("stale-pending.log"));
+
+        runtime.note_write_failure(&mut state, io::Error::other("disk full"));
+
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(
+            !state.diagnostics_draft,
+            "the draft is forced off together with the actual state"
+        );
+        assert!(state.diagnostics_file.is_none());
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "the stale pending path is cleared"
+        );
+        assert!(
+            state
+                .diagnostics_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Diagnostics disabled:"))
+        );
+
+        // The next reconcile must not re-create the writer or re-enable
+        // diagnostics, and the error must survive it.
+        assert!(!runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(
+            state
+                .diagnostics_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Diagnostics disabled:"))
+        );
+
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn write_failure_then_manual_reopen_commits_a_fresh_writer() {
+        // After a forced shutdown the user can re-open the settings overlay,
+        // toggle the draft ON manually and commit a fresh writer.
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        runtime.note_write_failure(&mut state, io::Error::other("disk full"));
+        assert!(!state.diagnostics_draft);
+
+        let pending = diagnostics_temp_path("reopen");
+        state.diagnostics_pending_path = Some(pending.clone());
+        send_key(&mut state, KeyCode::Char('o')); // draft := actual (OFF)
+        assert!(state.settings_open);
+        assert!(!state.diagnostics_draft);
+        assert_eq!(
+            state.diagnostics_pending_path.as_deref(),
+            Some(pending.as_path())
+        );
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft ON
+        assert!(state.diagnostics_draft);
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_some());
+        assert!(enabled.load(Ordering::Relaxed));
+        assert!(state.diagnostics_enabled);
+        assert_eq!(
+            state.diagnostics_error, None,
+            "a successful manual commit clears the stale error"
+        );
+        assert!(pending.is_file());
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
     fn interface_switch_keeps_diagnostics_enabled_and_file() {
         let interfaces = interfaces();
         let mut state = AppState::new();
@@ -5081,10 +5187,9 @@ mod tests {
         );
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
 
-        // Enter closes the overlay without touching the palette.
+        // Enter is a no-op under the unified select/change model.
         state.palette_choice = palette::PaletteChoice::Auto;
-        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Changed);
-        assert!(!state.settings_open);
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
     }
 
