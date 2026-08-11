@@ -4,7 +4,7 @@ This document covers source development and CI reproduction. User installation a
 
 ## Toolchain
 
-- Rust `1.96.0` (`edition = "2024"` and the current stable application baseline).
+- Rust toolchain: see [`rust-toolchain.toml`](../rust-toolchain.toml) (`edition = "2024"`).
 - Linux release builds: Zig `0.16.0` and `cargo-zigbuild` `0.23.0`, targeting `x86_64` and `aarch64` with glibc `2.28`.
 - Version bumps: `cargo-edit` `0.13.13`.
 - Linux: libpcap development headers and libraries.
@@ -15,10 +15,10 @@ Npcap SDK is a Windows build dependency only. The SDK provides `wpcap.lib` and `
 ## Local checks
 
 ```bash
-cargo +1.96.0 fmt --all -- --check
-cargo +1.96.0 check --locked
-cargo +1.96.0 test --locked
-cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo check --locked
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 ## Linux distribution build
@@ -63,8 +63,8 @@ Set `LIBPCAP_LIBDIR` to the target architecture's `Lib` directory from Npcap SDK
 $env:LIBPCAP_LIBDIR = 'path-to-npcap-sdk\Lib\x64'
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 
-cargo +1.96.0 test --locked
-cargo +1.96.0 build --release --locked
+cargo test --locked
+cargo build --release --locked
 ```
 
 The release binary is `target\release\flowlens.exe`. The Windows Release workflow verifies that the executable does not depend on the dynamic VC Runtime and still declares the external `wpcap.dll` dependency.

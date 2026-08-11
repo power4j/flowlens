@@ -4671,9 +4671,15 @@ mod tests {
         send_key(&mut state, KeyCode::Char('j'));
         for _ in 0..6 {
             send_key(&mut state, KeyCode::Char('l'));
-            assert_eq!(state.diagnostics_pending_path.as_deref(), Some(pending.as_path()));
+            assert_eq!(
+                state.diagnostics_pending_path.as_deref(),
+                Some(pending.as_path())
+            );
             send_key(&mut state, KeyCode::Char('l'));
-            assert_eq!(state.diagnostics_pending_path.as_deref(), Some(pending.as_path()));
+            assert_eq!(
+                state.diagnostics_pending_path.as_deref(),
+                Some(pending.as_path())
+            );
         }
     }
 
@@ -4692,7 +4698,10 @@ mod tests {
         send_key(&mut state, KeyCode::Char('l')); // draft OFF
         send_key(&mut state, KeyCode::Char('l')); // draft ON again
         assert!(state.diagnostics_draft);
-        assert_eq!(send_key(&mut state, KeyCode::Char('o')), KeyOutcome::Changed);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Changed
+        );
         assert!(!state.settings_open);
 
         // Commit happens on the next reconcile (same loop iteration in the TUI).
@@ -4705,7 +4714,10 @@ mod tests {
         let committed = state.diagnostics_file.clone().unwrap();
         assert_eq!(
             Some(committed.as_str()),
-            pending.file_name().map(|n| n.to_string_lossy().into_owned()).as_deref()
+            pending
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .as_deref()
         );
         assert!(pending.is_file(), "the committed file must exist");
 
@@ -4740,7 +4752,10 @@ mod tests {
             state.diagnostics_pending_path.is_none(),
             "an OFF draft discards the pending path"
         );
-        assert!(!pending.exists(), "no file may be created for a final OFF state");
+        assert!(
+            !pending.exists(),
+            "no file may be created for a final OFF state"
+        );
     }
 
     #[test]
@@ -4769,7 +4784,10 @@ mod tests {
         assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
         assert!(!state.settings_open);
 
-        assert!(!runtime.reconcile(&mut state), "draft matches actual: no change");
+        assert!(
+            !runtime.reconcile(&mut state),
+            "draft matches actual: no change"
+        );
         assert!(runtime.writer.is_some());
         assert_eq!(
             runtime.writer.as_ref().unwrap().file_name().as_deref(),
@@ -4820,11 +4838,16 @@ mod tests {
         assert!(!enabled.load(Ordering::Relaxed));
         assert!(!state.diagnostics_enabled, "actual state stays OFF");
         assert!(!state.diagnostics_draft, "failed intent is reverted");
-        assert!(state.diagnostics_pending_path.is_none(), "failed path is consumed");
-        assert!(state
-            .diagnostics_error
-            .as_deref()
-            .is_some_and(|e| e.starts_with("Diagnostics unavailable:")));
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "failed path is consumed"
+        );
+        assert!(
+            state
+                .diagnostics_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Diagnostics unavailable:"))
+        );
         // The failed intent must not be retried on every loop iteration.
         assert!(!runtime.reconcile(&mut state));
 

@@ -17,6 +17,22 @@ The release artifact is `target/x86_64-unknown-linux-gnu/release/flowlens`.
 Plain `cargo build --release` is only for local development or same-host
 testing, not for Linux distribution builds.
 
+### Definition of done
+
+Before handing off or committing any code change, run these checks after the
+final source edit:
+
+```bash
+cargo fmt --all -- --check
+cargo check --locked
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+All four commands must pass. If a check fails, fix the issue and rerun the
+complete set before committing. Report the result of each command in the
+handoff.
+
 ### Triage labels
 
 Five default triage roles map to labels of the same name. See `docs/agents/triage-labels.md`.
