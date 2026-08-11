@@ -236,13 +236,13 @@ fn background_loop(
                 eprintln!("Failed to write output file: {e}");
             }
             if let Some(writer) = diagnostics_writer.as_mut()
-                && let Some(snapshot) = diagnostics::collect(
+                && let Some(snapshot) = diagnostics::collect(diagnostics::DiagnosticsInputs {
                     proc_table,
-                    attributor.snapshot(),
-                    stats.diagnostics_snapshot(),
-                    source.flow_table_entry_count(),
-                    Some(source.pcap_counters().as_ref()),
-                )
+                    pending: attributor.snapshot(),
+                    stats: stats.diagnostics_snapshot(),
+                    flow_table_entries: source.flow_table_entry_count(),
+                    pcap: Some(source.pcap_counters().as_ref()),
+                })
                 && let Err(error) = writer.write(interface, &snapshot)
             {
                 eprintln!("Failed to write diagnostics output: {error}");
@@ -277,13 +277,13 @@ fn json_stdout_loop(
             attributor.advance(&mut stats, proc_table, Instant::now());
             report::render_jsonl(interface, started_wall, started_at, &stats, top_n);
             if let Some(writer) = diagnostics_writer.as_mut()
-                && let Some(snapshot) = diagnostics::collect(
+                && let Some(snapshot) = diagnostics::collect(diagnostics::DiagnosticsInputs {
                     proc_table,
-                    attributor.snapshot(),
-                    stats.diagnostics_snapshot(),
-                    source.flow_table_entry_count(),
-                    Some(source.pcap_counters().as_ref()),
-                )
+                    pending: attributor.snapshot(),
+                    stats: stats.diagnostics_snapshot(),
+                    flow_table_entries: source.flow_table_entry_count(),
+                    pcap: Some(source.pcap_counters().as_ref()),
+                })
                 && let Err(error) = writer.write(interface, &snapshot)
             {
                 eprintln!("Failed to write diagnostics output: {error}");

@@ -251,13 +251,14 @@ fn snapshot_for_publish(
     snapshot.pending_attribution_bytes = pending_attribution_bytes;
     snapshot.process_data_fresh = proc_table.read().is_ok_and(|table| table.is_fresh());
     snapshot.diagnostics = if diagnostics_enabled {
-        diagnostics::collect(
+        diagnostics::collect(diagnostics::DiagnosticsInputs {
             proc_table,
-            attributor.snapshot(),
-            stats.diagnostics_snapshot(),
-            flow_table_entries.map_or(0, |entries| entries.load(Ordering::Relaxed)),
-            pcap_counters.map(|counters| counters.as_ref()),
-        )
+            pending: attributor.snapshot(),
+            stats: stats.diagnostics_snapshot(),
+            flow_table_entries: flow_table_entries
+                .map_or(0, |entries| entries.load(Ordering::Relaxed)),
+            pcap: pcap_counters.map(|counters| counters.as_ref()),
+        })
         .map(Arc::new)
     } else {
         None
