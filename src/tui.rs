@@ -4,6 +4,7 @@
 //! Capture and aggregation run in the traffic pipeline.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -159,10 +160,19 @@ struct AppState {
     /// Terminal color tier detected at startup; `Auto` follows this.
     detected_tier: palette::ColorTier,
     diagnostics_error: Option<String>,
-    /// Whether diagnostics are being written (toggled in the settings overlay).
+    /// Actual diagnostics state: true while a writer is open. Kept in sync
+    /// with `DiagnosticsRuntime::writer` and the shared enable flag.
     diagnostics_enabled: bool,
+    /// Draft diagnostics state edited in the settings overlay. Copied from
+    /// the actual state when the overlay opens and committed only when it
+    /// closes, so h/l toggling never touches the writer mid-edit.
+    diagnostics_draft: bool,
     /// Basename of the currently open diagnostics output file.
     diagnostics_file: Option<String>,
+    /// Path reserved for a future writer while the overlay is open, when the
+    /// actual state is OFF. Never turned into a real file except by a final
+    /// ON commit; discarded when the final state is OFF.
+    diagnostics_pending_path: Option<PathBuf>,
     /// Selected settings row (0 = Palette, 1 = Diagnostics).
     settings_selection: usize,
 }
@@ -187,7 +197,9 @@ impl AppState {
             detected_tier: palette::detect_tier(),
             diagnostics_error: None,
             diagnostics_enabled: false,
+            diagnostics_draft: false,
             diagnostics_file: None,
+            diagnostics_pending_path: None,
             settings_selection: 0,
         }
     }
@@ -222,6 +234,21 @@ impl AppState {
             activating: None,
             error: None,
         });
+    }
+
+    /// Reset the view after a successful interface switch while preserving the
+    /// actual diagnostics state, so an open writer, its file name and any
+    /// pending error survive the reset instead of being silently disabled.
+    fn reset_after_interface_switch(&mut self) {
+        let diagnostics_enabled = self.diagnostics_enabled;
+        let diagnostics_draft = self.diagnostics_draft;
+        let diagnostics_file = self.diagnostics_file.clone();
+        let diagnostics_error = self.diagnostics_error.clone();
+        *self = AppState::new();
+        self.diagnostics_enabled = diagnostics_enabled;
+        self.diagnostics_draft = diagnostics_draft;
+        self.diagnostics_file = diagnostics_file;
+        self.diagnostics_error = diagnostics_error;
     }
 
     fn update_process_detail(&mut self, snapshot: &TrafficSnapshot) {
@@ -294,7 +321,7 @@ where
                 let interface_name = interface.name.clone();
                 match activate(&interface_name) {
                     Ok(Activation::Activated) => {
-                        *state = AppState::new();
+                        state.reset_after_interface_switch();
                         *snapshot = Arc::new(TrafficSnapshot::default());
                     }
                     Ok(Activation::Pending) => {
@@ -312,7 +339,9 @@ where
         }
     } else if state.settings_open {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('o') => {
+            // All three keys close the overlay; the draft is committed by
+            // `DiagnosticsRuntime::reconcile` on the next loop iteration.
+            KeyCode::Esc | KeyCode::Char('o') | KeyCode::Enter => {
                 state.settings_open = false;
                 KeyOutcome::Changed
             }
@@ -338,14 +367,15 @@ where
                         state.detected_tier,
                     ));
                 } else if state.settings_selection == DIAGNOSTICS_ROW {
-                    state.diagnostics_enabled = !state.diagnostics_enabled;
+                    // Only the draft changes here; the writer and the shared
+                    // enable flag are touched once, when the overlay closes
+                    // (see `DiagnosticsRuntime::reconcile`).
+                    state.diagnostics_draft = !state.diagnostics_draft;
                 } else {
                     return KeyOutcome::Ignored;
                 }
                 KeyOutcome::Changed
             }
-            // Enter has no action in the settings overlay.
-            KeyCode::Enter => KeyOutcome::Ignored,
             // The overlay swallows all other keys so page shortcuts do not
             // leak through while it is open.
             _ => KeyOutcome::Ignored,
@@ -353,6 +383,15 @@ where
     } else if key.code == KeyCode::Char('o') {
         state.settings_open = true;
         state.settings_selection = 0;
+        // Start editing from the actual diagnostics state, and reserve one
+        // pending output path up front when diagnostics are currently off.
+        // Repeated in-overlay toggles reuse it; no file is created here.
+        state.diagnostics_draft = state.diagnostics_enabled;
+        if !state.diagnostics_enabled {
+            state
+                .diagnostics_pending_path
+                .get_or_insert_with(crate::diagnostics::default_output_path);
+        }
         KeyOutcome::Changed
     } else if key.code == KeyCode::Char('i') {
         state.open_interface_selector(interfaces, active, true);
@@ -374,7 +413,7 @@ fn finish_tui_activation(
         .unwrap_or_else(|| "interface".to_string());
     match result {
         Ok(Activation::Activated) => {
-            *state = AppState::new();
+            state.reset_after_interface_switch();
             *snapshot = Arc::new(TrafficSnapshot::default());
         }
         Ok(Activation::Unchanged) => state.interface_selector = None,
@@ -399,29 +438,48 @@ impl DiagnosticsRuntime {
         Self { writer, enabled }
     }
 
-    /// Reconcile the toggle intent in `state` with the writer state, opening
-    /// or closing the diagnostics file as needed. Returns true when a redraw
-    /// is required.
+    /// Apply the settings-overlay draft to the actual diagnostics state once
+    /// the overlay is closed. While the overlay is open the draft lives only
+    /// in `state`, so rapid h/l toggling never opens or closes the writer.
+    /// Returns true when a redraw is required.
     fn reconcile(&mut self, state: &mut AppState) -> bool {
-        if state.diagnostics_enabled == self.writer.is_some() {
+        if state.settings_open {
             return false;
         }
-        if state.diagnostics_enabled {
-            match DiagnosticsWriter::create(crate::diagnostics::default_output_path()) {
+        if state.diagnostics_draft == state.diagnostics_enabled {
+            // No runtime change (final state matches the actual one). Discard
+            // any path reserved while the overlay was open, e.g. a final OFF
+            // state; it is only ever materialized by an ON commit below.
+            state.diagnostics_pending_path.take();
+            return false;
+        }
+        if state.diagnostics_draft {
+            // Actual OFF -> draft ON: create the writer exactly once, at the
+            // path reserved when the overlay opened.
+            let path = state
+                .diagnostics_pending_path
+                .take()
+                .unwrap_or_else(crate::diagnostics::default_output_path);
+            match DiagnosticsWriter::create(&path) {
                 Ok(writer) => {
                     state.diagnostics_file = writer.file_name();
                     state.diagnostics_error = None;
+                    state.diagnostics_enabled = true;
                     self.writer = Some(writer);
                     self.enabled.store(true, Ordering::Relaxed);
                 }
                 Err(error) => {
-                    state.diagnostics_enabled = false;
+                    // The actual state stays OFF; revert the draft so the
+                    // failed intent is not retried every loop iteration.
+                    state.diagnostics_draft = false;
                     state.diagnostics_error = Some(format!("Diagnostics unavailable: {error}"));
                 }
             }
         } else {
+            // Actual ON -> draft OFF: stop writing and clear the file name.
             self.writer = None;
             state.diagnostics_file = None;
+            state.diagnostics_enabled = false;
             self.enabled.store(false, Ordering::Relaxed);
         }
         true
@@ -434,6 +492,13 @@ impl DiagnosticsRuntime {
         state.diagnostics_file = None;
         self.enabled.store(false, Ordering::Relaxed);
         state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
+        // If the user is mid-edit with the draft on, keep a pending path
+        // available so the overlay can still show what would be written.
+        if state.settings_open && state.diagnostics_draft {
+            state
+                .diagnostics_pending_path
+                .get_or_insert_with(crate::diagnostics::default_output_path);
+        }
     }
 }
 
@@ -464,6 +529,7 @@ pub fn run(
     };
     if let Some(writer) = diagnostics_writer.as_ref() {
         state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
         state.diagnostics_file = writer.file_name();
     }
     let result = tui_loop(
@@ -2086,6 +2152,25 @@ fn settings_selection_prefix(selected: bool) -> &'static str {
     if selected { "> " } else { "  " }
 }
 
+/// Truncate a single-line label to at most `max` display columns, keeping the
+/// start and end with a middle ellipsis. Used so long diagnostics basenames
+/// cannot overflow the settings overlay.
+fn truncate_with_ellipsis(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let keep_head = (max - 1) / 2;
+    let keep_tail = (max - 1) - keep_head;
+    let mut out: String = text.chars().take(keep_head).collect();
+    out.push('…');
+    out.extend(text.chars().skip(count - keep_tail));
+    out
+}
+
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -2105,12 +2190,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ]));
     let detected_label = color_tier_label(state.detected_tier);
     let choice_label = palette_choice_label(state.palette_choice);
-    let diagnostics_label = if state.diagnostics_enabled {
-        "ON"
-    } else {
-        "OFF"
-    };
-    let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
+    let diagnostics_label = if state.diagnostics_draft { "ON" } else { "OFF" };
     let selection_style = palette::selection_style();
     let palette_selected = state.settings_selection == PALETTE_ROW;
     let mut palette_line = Line::from(vec![
@@ -2147,6 +2227,38 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     } else {
         diagnostics_line.style = selection_style;
     }
+    // File display follows the (actual, draft) matrix: the live file name is
+    // shown while diagnostics are actually on (flagged when the draft would
+    // stop them on close); a pending path is shown while actually off but
+    // drafted on; otherwise "(none)".
+    let file_text = match (state.diagnostics_enabled, state.diagnostics_draft) {
+        (true, true) => state
+            .diagnostics_file
+            .as_deref()
+            .unwrap_or("(none)")
+            .to_string(),
+        (true, false) => format!(
+            "{} (stops on close)",
+            state.diagnostics_file.as_deref().unwrap_or("(none)")
+        ),
+        (false, true) => {
+            let name = state
+                .diagnostics_pending_path
+                .as_ref()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "(none)".to_string());
+            format!("{name} (pending)")
+        }
+        (false, false) => "(none)".to_string(),
+    };
+    let inner = block.inner(popup);
+    // Budget for the label: "File: " prefix plus a small right margin, so a
+    // long basename cannot overflow or misalign the overlay.
+    let label_width = inner.width.saturating_sub(8) as usize;
+    let file_label = truncate_with_ellipsis(&file_text, label_width.max(1));
     let lines = vec![
         Line::from(""),
         palette_line,
@@ -2166,7 +2278,6 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
             Style::default().fg(palette::muted()),
         )),
     ];
-    let inner = block.inner(popup);
     f.render_widget(Clear, popup);
     f.render_widget(
         Block::default().style(Style::default().bg(palette::bg())),
@@ -4392,36 +4503,41 @@ mod tests {
             KeyOutcome::Changed
         );
         assert_eq!(state.palette_choice, palette::PaletteChoice::Truecolor);
-        assert!(!state.diagnostics_enabled);
+        assert!(!state.diagnostics_draft);
 
-        // Select Diagnostics: h/l toggle diagnostics instead.
+        // Select Diagnostics: h/l toggle only the draft; the actual state
+        // (writer + shared flag) is committed when the overlay closes.
         send_key(&mut state, KeyCode::Char('j'));
         assert_eq!(state.settings_selection, 1);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
-        assert!(state.diagnostics_enabled);
+        assert!(state.diagnostics_draft);
+        assert!(!state.diagnostics_enabled);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
-        assert!(!state.diagnostics_enabled);
+        assert!(!state.diagnostics_draft);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('h')),
             KeyOutcome::Changed
         );
-        assert!(state.diagnostics_enabled);
+        assert!(state.diagnostics_draft);
+        assert!(!state.diagnostics_enabled);
     }
 
     #[test]
-    fn settings_enter_is_ignored() {
+    fn settings_enter_closes_the_overlay() {
         let mut state = AppState::new();
         state.detected_tier = palette::ColorTier::Truecolor;
         state.palette_choice = palette::PaletteChoice::Auto;
         send_key(&mut state, KeyCode::Char('o'));
 
-        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
+        // Enter closes the overlay (the draft is committed by reconcile).
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Changed);
+        assert!(!state.settings_open);
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
     }
 
@@ -4431,6 +4547,7 @@ mod tests {
         let mut state = AppState::new();
         state.settings_open = true;
         state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
         state.diagnostics_file = Some("flowlens-42.log".to_string());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
@@ -4441,6 +4558,355 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Diagnostics: ON"));
         assert!(rendered.contains("flowlens-42.log"));
+    }
+
+    /// Unique path for a real diagnostics writer under the temp dir, so the
+    /// deferred-commit tests never touch the working directory.
+    fn diagnostics_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "flowlens-tui-{label}-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn settings_overlay_renders_pending_and_stop_on_close_file_markers() {
+        let snapshot = TrafficSnapshot::default();
+        let render = |state: &mut AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, state, &snapshot, "eth0", "host", Instant::now()))
+                .unwrap();
+            rendered_lines(&terminal).join("\n")
+        };
+
+        // Actual OFF + draft ON: pending path marked (pending).
+        let mut state = AppState::new();
+        state.settings_open = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_pending_path = Some(PathBuf::from("flowlens-pending-1.log"));
+        let rendered = render(&mut state);
+        assert!(rendered.contains("Diagnostics: ON"));
+        assert!(rendered.contains("flowlens-pending-1.log (pending)"));
+
+        // Actual ON + draft OFF: live file marked as stopping on close.
+        let mut state = AppState::new();
+        state.settings_open = true;
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = false;
+        state.diagnostics_file = Some("flowlens-42.log".to_string());
+        let rendered = render(&mut state);
+        assert!(rendered.contains("Diagnostics: OFF"));
+        assert!(rendered.contains("flowlens-42.log (stops on close)"));
+
+        // Actual OFF + draft OFF: no file.
+        let mut state = AppState::new();
+        state.settings_open = true;
+        let rendered = render(&mut state);
+        assert!(rendered.contains("File: (none)"));
+    }
+
+    #[test]
+    fn long_file_label_is_truncated_with_a_middle_ellipsis() {
+        assert_eq!(truncate_with_ellipsis("short.log", 20), "short.log");
+        assert_eq!(truncate_with_ellipsis("x", 1), "x");
+        let long = "flowlens-20260811T053335Z194489942-23262.log (pending)";
+        let out = truncate_with_ellipsis(long, 30);
+        assert_eq!(out.chars().count(), 30);
+        assert!(out.starts_with("flowlens-2026"));
+        assert!(out.ends_with("(pending)"));
+        assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn diagnostics_toggles_in_settings_only_change_the_draft() {
+        // While the overlay is open, h/l flips only the draft: neither the
+        // writer nor the shared flag moves, and the pending path is not
+        // regenerated.
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+
+        send_key(&mut state, KeyCode::Char('o'));
+        assert!(state.settings_open);
+        assert!(!state.diagnostics_enabled);
+        assert!(!state.diagnostics_draft);
+        let pending = state.diagnostics_pending_path.clone();
+        assert!(pending.is_some());
+
+        send_key(&mut state, KeyCode::Char('j')); // select the Diagnostics row
+        for _ in 0..4 {
+            send_key(&mut state, KeyCode::Char('l')); // draft ON
+            assert!(state.diagnostics_draft);
+            assert_eq!(state.diagnostics_pending_path, pending);
+            assert!(
+                !runtime.reconcile(&mut state),
+                "overlay toggles must not touch the runtime"
+            );
+            assert!(runtime.writer.is_none());
+            assert!(!enabled.load(Ordering::Relaxed));
+            assert!(!state.diagnostics_enabled);
+
+            send_key(&mut state, KeyCode::Char('l')); // draft OFF
+            assert!(!state.diagnostics_draft);
+            assert_eq!(state.diagnostics_pending_path, pending);
+            assert!(!runtime.reconcile(&mut state));
+            assert!(runtime.writer.is_none());
+            assert!(!state.diagnostics_enabled);
+        }
+    }
+
+    #[test]
+    fn diagnostics_pending_path_is_generated_once_per_overlay_open() {
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        assert!(state.settings_open);
+        assert!(state.diagnostics_pending_path.is_some());
+        let pending = state.diagnostics_pending_path.clone().unwrap();
+
+        send_key(&mut state, KeyCode::Char('j'));
+        for _ in 0..6 {
+            send_key(&mut state, KeyCode::Char('l'));
+            assert_eq!(state.diagnostics_pending_path.as_deref(), Some(pending.as_path()));
+            send_key(&mut state, KeyCode::Char('l'));
+            assert_eq!(state.diagnostics_pending_path.as_deref(), Some(pending.as_path()));
+        }
+    }
+
+    #[test]
+    fn diagnostics_final_on_commits_a_single_writer_at_the_pending_path() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        let pending = diagnostics_temp_path("final-on");
+        assert!(!pending.exists());
+        state.diagnostics_pending_path = Some(pending.clone());
+
+        send_key(&mut state, KeyCode::Char('o'));
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft ON
+        send_key(&mut state, KeyCode::Char('l')); // draft OFF
+        send_key(&mut state, KeyCode::Char('l')); // draft ON again
+        assert!(state.diagnostics_draft);
+        assert_eq!(send_key(&mut state, KeyCode::Char('o')), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        // Commit happens on the next reconcile (same loop iteration in the TUI).
+        assert!(runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_some());
+        assert!(enabled.load(Ordering::Relaxed));
+        assert!(state.diagnostics_enabled);
+        assert_eq!(state.diagnostics_error, None);
+        assert!(state.diagnostics_pending_path.is_none());
+        let committed = state.diagnostics_file.clone().unwrap();
+        assert_eq!(
+            Some(committed.as_str()),
+            pending.file_name().map(|n| n.to_string_lossy().into_owned()).as_deref()
+        );
+        assert!(pending.is_file(), "the committed file must exist");
+
+        // A follow-up reconcile is quiescent: no second writer or file.
+        assert!(!runtime.reconcile(&mut state));
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_final_off_creates_no_file_and_discards_the_pending_path() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        let pending = diagnostics_temp_path("final-off");
+        state.diagnostics_pending_path = Some(pending.clone());
+        assert!(!pending.exists());
+
+        send_key(&mut state, KeyCode::Char('o')); // draft := actual (OFF)
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft ON
+        send_key(&mut state, KeyCode::Char('l')); // draft OFF
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(!runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "an OFF draft discards the pending path"
+        );
+        assert!(!pending.exists(), "no file may be created for a final OFF state");
+    }
+
+    #[test]
+    fn diagnostics_actual_on_keeps_writer_and_file_when_draft_returns_on() {
+        let pending = diagnostics_temp_path("keep-on");
+        let writer = DiagnosticsWriter::create(&pending).unwrap();
+        let file_name = writer.file_name().unwrap();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
+
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some(file_name.clone());
+
+        send_key(&mut state, KeyCode::Char('o')); // draft := actual (ON)
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "no pending path is reserved while diagnostics are actually on"
+        );
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft OFF
+        assert!(!state.diagnostics_draft);
+        send_key(&mut state, KeyCode::Char('l')); // draft ON again
+        assert!(state.diagnostics_draft);
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(!runtime.reconcile(&mut state), "draft matches actual: no change");
+        assert!(runtime.writer.is_some());
+        assert_eq!(
+            runtime.writer.as_ref().unwrap().file_name().as_deref(),
+            Some(file_name.as_str())
+        );
+        assert!(enabled.load(Ordering::Relaxed));
+        assert_eq!(state.diagnostics_file.as_deref(), Some(file_name.as_str()));
+        assert!(pending.is_file());
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_unchanged_close_does_nothing() {
+        // Actual OFF + draft OFF: closing without toggling must not create a
+        // writer, and the pending path is discarded.
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        let pending = state.diagnostics_pending_path.clone().unwrap();
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(!runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(state.diagnostics_pending_path.is_none());
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn diagnostics_commit_failure_keeps_actual_state_and_reports_error() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        // Point the pending path at an existing file so create_new fails.
+        let blocking = diagnostics_temp_path("block");
+        std::fs::write(&blocking, "occupied").unwrap();
+        state.diagnostics_enabled = false;
+        state.diagnostics_draft = true; // final intent ON
+        state.diagnostics_pending_path = Some(blocking.clone());
+
+        assert!(runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none(), "no half-baked writer on failure");
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled, "actual state stays OFF");
+        assert!(!state.diagnostics_draft, "failed intent is reverted");
+        assert!(state.diagnostics_pending_path.is_none(), "failed path is consumed");
+        assert!(state
+            .diagnostics_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Diagnostics unavailable:")));
+        // The failed intent must not be retried on every loop iteration.
+        assert!(!runtime.reconcile(&mut state));
+
+        std::fs::remove_file(&blocking).unwrap();
+    }
+
+    #[test]
+    fn interface_switch_keeps_diagnostics_enabled_and_file() {
+        let interfaces = interfaces();
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some("flowlens-42.log".to_string());
+        let mut snapshot = Arc::new(TrafficSnapshot::default());
+
+        handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            Some("eth0"),
+            |_| unreachable!(),
+        );
+        handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            Some("eth0"),
+            |_| unreachable!(),
+        );
+        let outcome = handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            Some("eth0"),
+            |_| Ok(Activation::Activated),
+        );
+
+        assert_eq!(outcome, KeyOutcome::Changed);
+        assert!(state.interface_selector.is_none());
+        assert!(
+            state.diagnostics_enabled,
+            "a successful interface switch must not disable diagnostics"
+        );
+        assert_eq!(state.diagnostics_file.as_deref(), Some("flowlens-42.log"));
+    }
+
+    #[test]
+    fn interface_switch_preserves_writer_flag_and_file_name() {
+        // The runtime side of the switch: after the view reset, reconcile must
+        // not see a state mismatch and silently close an open writer.
+        let pending = diagnostics_temp_path("switch");
+        let writer = DiagnosticsWriter::create(&pending).unwrap();
+        let file_name = writer.file_name().unwrap();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
+
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some(file_name.clone());
+
+        state.reset_after_interface_switch();
+
+        assert!(state.diagnostics_enabled);
+        assert!(state.diagnostics_draft);
+        assert_eq!(state.diagnostics_file.as_deref(), Some(file_name.as_str()));
+        assert!(
+            !runtime.reconcile(&mut state),
+            "no reconcile churn after the switch"
+        );
+        assert!(runtime.writer.is_some());
+        assert_eq!(
+            runtime.writer.as_ref().unwrap().file_name().as_deref(),
+            Some(file_name.as_str())
+        );
+        assert!(enabled.load(Ordering::Relaxed));
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
     }
 
     #[test]
@@ -4592,9 +5058,10 @@ mod tests {
         );
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
 
-        // Enter is a no-op under the unified select/change model.
+        // Enter closes the overlay without touching the palette.
         state.palette_choice = palette::PaletteChoice::Auto;
-        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Changed);
+        assert!(!state.settings_open);
         assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
     }
 
