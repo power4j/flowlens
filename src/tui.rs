@@ -2109,6 +2109,7 @@ fn domain_rows(
 
 fn draw_about(f: &mut ratatui::Frame, area: Rect) {
     let version = env!("CARGO_PKG_VERSION");
+    let repository = env!("CARGO_PKG_REPOSITORY");
     let commit = env!("FLOWLENS_BUILD_COMMIT");
     let frame_width = area.width.saturating_sub(4).min(62);
     let horizontal = Layout::default()
@@ -2123,7 +2124,7 @@ fn draw_about(f: &mut ratatui::Frame, area: Rect) {
         .direction(LayoutDir::Vertical)
         .constraints([
             Constraint::Fill(1),
-            Constraint::Length(7),
+            Constraint::Length(9),
             Constraint::Fill(1),
         ])
         .split(horizontal)[1];
@@ -2148,6 +2149,11 @@ fn draw_about(f: &mut ratatui::Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             format!("Version {version} ({commit})"),
+            Style::default().fg(palette::muted()),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            repository,
             Style::default().fg(palette::muted()),
         )),
     ];
@@ -3298,6 +3304,7 @@ mod tests {
         assert!(rendered.contains("Network Traffic Analyzer"));
         assert!(rendered.contains("Version"));
         assert!(rendered.contains(env!("FLOWLENS_BUILD_COMMIT")));
+        assert!(rendered.contains(env!("CARGO_PKG_REPOSITORY")));
         assert!(!rendered.contains("private-interface"));
         assert!(!rendered.contains("private-host"));
     }
