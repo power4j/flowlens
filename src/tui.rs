@@ -30,6 +30,10 @@ use crate::stats::{IpSnapshot, ProcessSnapshot, TrafficSnapshot};
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Number of selectable rows in the settings overlay.
 const SETTINGS_SELECTABLE_ROWS: usize = 2;
+/// Settings row index for the palette choice.
+const PALETTE_ROW: usize = 0;
+/// Settings row index for the diagnostics toggle.
+const DIAGNOSTICS_ROW: usize = 1;
 
 /// Which page is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,7 +326,7 @@ where
                 KeyOutcome::Changed
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
-                if state.settings_selection == 0 {
+                if state.settings_selection == PALETTE_ROW {
                     let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
                     state.palette_choice = if forward {
                         next_palette_choice(state.palette_choice)
@@ -333,8 +337,10 @@ where
                         state.palette_choice,
                         state.detected_tier,
                     ));
-                } else {
+                } else if state.settings_selection == DIAGNOSTICS_ROW {
                     state.diagnostics_enabled = !state.diagnostics_enabled;
+                } else {
+                    return KeyOutcome::Ignored;
                 }
                 KeyOutcome::Changed
             }
@@ -2106,7 +2112,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     };
     let file_label = state.diagnostics_file.as_deref().unwrap_or("(none)");
     let selection_style = palette::selection_style();
-    let palette_selected = state.settings_selection == 0;
+    let palette_selected = state.settings_selection == PALETTE_ROW;
     let mut palette_line = Line::from(vec![
         Span::raw(settings_selection_prefix(palette_selected)),
         Span::styled(
@@ -2125,7 +2131,9 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ),
     ]);
     let mut diagnostics_line = Line::from(vec![
-        Span::raw(settings_selection_prefix(state.settings_selection == 1)),
+        Span::raw(settings_selection_prefix(
+            state.settings_selection == DIAGNOSTICS_ROW,
+        )),
         Span::styled(
             "Diagnostics: ",
             Style::default()
