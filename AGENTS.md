@@ -57,3 +57,7 @@ Single-context layout: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.
   parallel after implementation is complete.
 - Subagents must preserve the current branch, existing user changes, task scope,
   and repository instructions.
+
+## Host sandbox failures
+
+When required gh, build, test, or generator commands fail because the agent sandbox blocks credentials, network, IPC, file watching, or nested sandbox-exec, retry unchanged with the narrowest host escalation before diagnosing authentication or project failure. Require sandbox evidence; never bypass genuine test failures or the product sandbox under test.
