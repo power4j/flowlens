@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.3.0] - 2026-08-14
+
+### Added
+
 - TUI settings overlay can toggle diagnostics at runtime from the settings UI; each enable writes to a fresh timestamped log file and the overlay shows the current file name.
 
 ### Changed
