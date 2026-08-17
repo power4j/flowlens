@@ -190,6 +190,37 @@ pub struct ProcessAttribution {
     pub shared: ProcTraffic,
     /// 共享伙伴的进程显示名。
     pub shared_with: Vec<Arc<str>>,
+    /// 独占通道的证据来源集合（ADR 0013 第三刀）；共享通道证据不单独追踪。
+    pub evidence: Evidence,
+}
+
+/// 归属证据来源（ADR 0013）：位标志，进程维度按出现顺序累积。
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Evidence(u8);
+
+impl Evidence {
+    pub(crate) const SNAPSHOT: Evidence = Evidence(1 << 0);
+    pub(crate) const PROBE: Evidence = Evidence(1 << 1);
+    pub(crate) const HISTORY: Evidence = Evidence(1 << 2);
+
+    pub(crate) fn merge(self, other: Evidence) -> Evidence {
+        Evidence(self.0 | other.0)
+    }
+
+    /// JSON `attribution.evidence` 的输出值。
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if self.0 & Self::SNAPSHOT.0 != 0 {
+            labels.push("snapshot");
+        }
+        if self.0 & Self::PROBE.0 != 0 {
+            labels.push("probe");
+        }
+        if self.0 & Self::HISTORY.0 != 0 {
+            labels.push("history");
+        }
+        labels
+    }
 }
 
 #[derive(Clone)]
@@ -343,6 +374,7 @@ impl ProcessSnapshot {
                 exclusive: ProcTraffic { recv, sent },
                 shared: ProcTraffic::default(),
                 shared_with: Vec::new(),
+                evidence: Evidence::default(),
             },
             window: ProcTraffic::default(),
             recv,
@@ -368,6 +400,7 @@ impl ProcessSnapshot {
                 exclusive,
                 shared,
                 shared_with,
+                evidence: Evidence::default(),
             },
             window: ProcTraffic::default(),
             last_seen,
@@ -519,6 +552,8 @@ pub struct Stats {
     shared_total: ProcTraffic,
     /// 共享伙伴（进程统计身份），详情页 shared_with 数据来源。
     shared_partners: HashMap<ProcessKey, Vec<ProcessKey>>,
+    /// 独占通道证据来源（ADR 0013 第三刀）。
+    evidence_by_proc: HashMap<ProcessKey, Evidence>,
     /// 系统流量（无本地套接字，ADR 0013），独立于未归属。
     system: ProcTraffic,
     /// 进程维度滚动窗口（ADR 0013 第二刀）：per-process inclusive 字节。
@@ -749,6 +784,29 @@ impl Stats {
         self.add_process_or_unattributed(process, direction, bytes, observed_at);
     }
 
+    /// ADR 0013 第三刀：带证据来源的归属记录（snapshot / probe / history）。
+    pub(crate) fn record_process_evidence(
+        &mut self,
+        process: ObservedProcess,
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+        evidence: Evidence,
+    ) {
+        let key = ProcessKey {
+            pid: process.pid,
+            path: process.path.clone(),
+        };
+        let merged = self
+            .evidence_by_proc
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+            .merge(evidence);
+        self.evidence_by_proc.insert(key, merged);
+        self.record_process(Some(process), direction, bytes, observed_at);
+    }
+
     /// 按 spec Q8 / Q10：已识别连接（domain=Some）的双向流量按方向累计到该域名，
     /// 并更新该域名的 last_seen；未识别（domain=None）不进维度。
     ///
@@ -900,7 +958,7 @@ impl Stats {
 
     pub fn snapshot(&self, top_n: usize) -> TrafficSnapshot {
         let proc_epoch = self.proc_window_epoch.unwrap_or(0);
-        let mut processes = self
+        let processes = self
             .top_procs(top_n)
             .into_iter()
             .map(|(key, traffic)| {
@@ -924,6 +982,7 @@ impl Stats {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let evidence = self.evidence_by_proc.get(&key).copied();
                 let window = self
                     .proc_windows
                     .get(&key)
@@ -937,6 +996,9 @@ impl Stats {
                     shared,
                     shared_with,
                 );
+                if let Some(evidence) = evidence {
+                    process.attribution.evidence = evidence;
+                }
                 process.window = window;
                 process
             })

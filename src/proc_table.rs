@@ -147,6 +147,15 @@ impl ProcTable {
         self.generation
     }
 
+    /// 历史区间日志的数据源（ADR 0013 第三刀）：当前代全部 socket→PID 映射。
+    pub(crate) fn iter_entries(
+        &self,
+    ) -> impl Iterator<Item = ((IpAddr, u16, TransportProtocol), &ProcInfo)> {
+        self.entries
+            .iter()
+            .flat_map(|(socket, by_pid)| by_pid.values().map(move |info| (*socket, info)))
+    }
+
     #[cfg(test)]
     fn lookup_at(
         &self,

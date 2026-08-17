@@ -242,6 +242,8 @@ struct JsonProcAttribution {
     shared_recv: u64,
     shared_sent: u64,
     shared_with: Vec<String>,
+    /// 独占通道证据来源（snapshot / probe / history，ADR 0013 第三刀）。
+    evidence: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -292,6 +294,13 @@ fn build_json_frame<'a>(
                     .shared_with
                     .iter()
                     .map(|name| name.to_string())
+                    .collect(),
+                evidence: process
+                    .attribution
+                    .evidence
+                    .labels()
+                    .into_iter()
+                    .map(str::to_string)
                     .collect(),
             },
             window_recv: process.window.recv,

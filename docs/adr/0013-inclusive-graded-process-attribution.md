@@ -69,6 +69,7 @@
 - JSON 每进程新增：
   `"attribution": { "exclusive": {"recv","sent"}, "shared": {"recv","sent"}, "shared_with": [进程身份...], "evidence": ["snapshot"|"probe"|"history"] }`
 - plain/TSV 在 `Total` 后加 `Attr` 列，值 `single` / `mixed`（报表供机器消费，保留完整单词，不受 TUI 极简约束）。
+- `evidence` 目前仅覆盖独占通道（snapshot / probe / history）；共享通道的构成由 `shared_with` 表达，不单独追踪证据来源。
 - `<unattributed traffic>` 行名保留；新增 `<system traffic (no socket)>` 行。
 
 ## 验收
