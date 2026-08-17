@@ -8,16 +8,13 @@
 //! （错误归属比未知更有害）。
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::capture::{LocalSocket, TransportProtocol};
-use crate::proc_table::ProcInfo;
+use crate::capture::LocalSocket;
+use crate::proc_table::{ProcInfo, SocketKey};
 use crate::stats::ObservedProcess;
-
-type SocketKey = (IpAddr, u16, TransportProtocol);
 
 /// 默认保留 15 分钟（ADR 0013）。
 pub(crate) const HISTORY_RETENTION: Duration = Duration::minutes(15);
@@ -137,7 +134,8 @@ impl AttributionHistory {
         self.intervals.retain(|_, by_pid| !by_pid.is_empty());
         // 容量超限时淘汰关闭最早（valid_to 最小）的区间；全部开启则本轮不动，
         // 避免误删正在计时的证据。
-        while self.len() > self.capacity {
+        let excess = self.len().saturating_sub(self.capacity);
+        for _ in 0..excess {
             let victim = self
                 .intervals
                 .iter()
@@ -163,10 +161,6 @@ impl AttributionHistory {
 
     pub(crate) fn len(&self) -> usize {
         self.intervals.values().map(|by_pid| by_pid.len()).sum()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 

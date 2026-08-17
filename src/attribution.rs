@@ -685,7 +685,7 @@ impl PendingAttributor {
     }
 
     fn finalize_oldest(&mut self, stats: &mut Stats, capacity: bool) {
-        if let Some(pending) = self.pending.pop_front() {
+        if let Some(mut pending) = self.pending.pop_front() {
             let socket = pending.socket;
             if capacity {
                 self.pending_capacity_bytes += pending.bytes;
@@ -694,7 +694,7 @@ impl PendingAttributor {
             }
             // ADR 0013 第三刀：候选不足时先做历史追回（含 PID 启动时间硬门槛）；
             // 唯一命中 → 独占（evidence=history），多候选 → 共享，追不回 → 未归属。
-            let mut candidates = pending.candidates.clone();
+            let mut candidates = std::mem::take(&mut pending.candidates);
             if candidates.len() < 2 {
                 candidates = self
                     .history

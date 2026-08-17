@@ -219,6 +219,21 @@ struct JsonAttributionSummary {
     unattributed_sent: u64,
 }
 
+impl From<&crate::stats::AttributionSummary> for JsonAttributionSummary {
+    fn from(summary: &crate::stats::AttributionSummary) -> Self {
+        Self {
+            exclusive_recv: summary.exclusive.recv,
+            exclusive_sent: summary.exclusive.sent,
+            shared_recv: summary.shared.recv,
+            shared_sent: summary.shared.sent,
+            system_recv: summary.system.recv,
+            system_sent: summary.system.sent,
+            unattributed_recv: summary.unattributed.recv,
+            unattributed_sent: summary.unattributed.sent,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct JsonProc {
     pid: Option<u32>,
@@ -341,17 +356,7 @@ fn build_json_frame<'a>(
         })
         .collect();
 
-    let summary = &snapshot.attribution;
-    let attribution = JsonAttributionSummary {
-        exclusive_recv: summary.exclusive.recv,
-        exclusive_sent: summary.exclusive.sent,
-        shared_recv: summary.shared.recv,
-        shared_sent: summary.shared.sent,
-        system_recv: summary.system.recv,
-        system_sent: summary.system.sent,
-        unattributed_recv: summary.unattributed.recv,
-        unattributed_sent: summary.unattributed.sent,
-    };
+    let attribution = JsonAttributionSummary::from(&snapshot.attribution);
 
     JsonFrame {
         interface,
@@ -364,16 +369,7 @@ fn build_json_frame<'a>(
             out_bytes: snapshot.out_bytes,
         },
         attribution,
-        attribution_window: JsonAttributionSummary {
-            exclusive_recv: snapshot.attribution_window.exclusive.recv,
-            exclusive_sent: snapshot.attribution_window.exclusive.sent,
-            shared_recv: snapshot.attribution_window.shared.recv,
-            shared_sent: snapshot.attribution_window.shared.sent,
-            system_recv: snapshot.attribution_window.system.recv,
-            system_sent: snapshot.attribution_window.system.sent,
-            unattributed_recv: snapshot.attribution_window.unattributed.recv,
-            unattributed_sent: snapshot.attribution_window.unattributed.sent,
-        },
+        attribution_window: JsonAttributionSummary::from(&snapshot.attribution_window),
         top_processes,
         top_hosts,
         top_inbound_ips,

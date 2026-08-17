@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::capture::{LocalSocket, TransportProtocol};
 
-type SocketKey = (IpAddr, u16, TransportProtocol);
+pub(crate) type SocketKey = (IpAddr, u16, TransportProtocol);
 const LOOKUP_MISS_SAMPLE_LIMIT: usize = 8;
 
 /// Process association table rebuilt periodically by a background thread.
@@ -148,9 +148,7 @@ impl ProcTable {
     }
 
     /// 历史区间日志的数据源（ADR 0013 第三刀）：当前代全部 socket→PID 映射。
-    pub(crate) fn iter_entries(
-        &self,
-    ) -> impl Iterator<Item = ((IpAddr, u16, TransportProtocol), &ProcInfo)> {
+    pub(crate) fn iter_entries(&self) -> impl Iterator<Item = (SocketKey, &ProcInfo)> {
         self.entries
             .iter()
             .flat_map(|(socket, by_pid)| by_pid.values().map(move |info| (*socket, info)))
