@@ -42,7 +42,7 @@ struct IpBucket {
     bytes: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct IpWindowState {
     buckets: [IpBucket; IP_WINDOW_BUCKETS],
     last_bucket_epoch: i64,
@@ -124,6 +124,30 @@ struct IpDiagnosticsCounters {
     evictions_observation: u64,
 }
 
+/// 双向滚动窗口（ADR 0013 第二刀）：复用 IP 维度 epoch bucket 机制，
+/// 60s 桶 × `IP_WINDOW_BUCKETS` = 5 分钟滚动窗口，按方向拆分。
+#[derive(Clone, Copy, Debug, Default)]
+struct DirectionalWindows {
+    inbound: IpWindowState,
+    outbound: IpWindowState,
+}
+
+impl DirectionalWindows {
+    fn record(&mut self, direction: Direction, epoch: i64, bytes: u64) {
+        match direction {
+            Direction::Inbound => self.inbound.record(epoch, bytes),
+            Direction::Outbound => self.outbound.record(epoch, bytes),
+        }
+    }
+
+    fn window(&self, epoch: i64) -> ProcTraffic {
+        ProcTraffic {
+            recv: self.inbound.window_bytes(epoch),
+            sent: self.outbound.window_bytes(epoch),
+        }
+    }
+}
+
 /// Proc traffic with recv/sent breakdown.
 #[derive(Default, Clone, Copy)]
 pub struct ProcTraffic {
@@ -189,6 +213,8 @@ pub struct TrafficSnapshot {
     pub pending_attribution_bytes: u64,
     /// 记录层守恒汇总（ADR 0013）：总计 = 独占 + 共享 + 系统 + 未归属。
     pub attribution: AttributionSummary,
+    /// 守恒汇总的窗口口径（5 分钟滚动，ADR 0013 第二刀）。
+    pub attribution_window: AttributionSummary,
     pub processes: Arc<[ProcessSnapshot]>,
     pub inbound_ips: Arc<[IpSnapshot]>,
     pub outbound_ips: Arc<[IpSnapshot]>,
@@ -287,6 +313,8 @@ pub struct ProcessSnapshot {
     pub recv: u64,
     pub sent: u64,
     pub attribution: ProcessAttribution,
+    /// 5 分钟滚动窗口内的 inclusive 字节（ADR 0013 第二刀）；表格主口径。
+    pub window: ProcTraffic,
     last_seen: DateTime<Utc>,
 }
 
@@ -316,6 +344,7 @@ impl ProcessSnapshot {
                 shared: ProcTraffic::default(),
                 shared_with: Vec::new(),
             },
+            window: ProcTraffic::default(),
             recv,
             sent,
             last_seen,
@@ -340,6 +369,7 @@ impl ProcessSnapshot {
                 shared,
                 shared_with,
             },
+            window: ProcTraffic::default(),
             last_seen,
         }
     }
@@ -491,6 +521,15 @@ pub struct Stats {
     shared_partners: HashMap<ProcessKey, Vec<ProcessKey>>,
     /// 系统流量（无本地套接字，ADR 0013），独立于未归属。
     system: ProcTraffic,
+    /// 进程维度滚动窗口（ADR 0013 第二刀）：per-process inclusive 字节。
+    proc_windows: HashMap<ProcessKey, DirectionalWindows>,
+    /// 记录层四通道滚动窗口（守恒摘要的窗口口径）。
+    exclusive_window: DirectionalWindows,
+    shared_window: DirectionalWindows,
+    system_window: DirectionalWindows,
+    unattributed_window: DirectionalWindows,
+    /// 进程窗口参考 epoch（最近一次记录的 bucket epoch）。
+    proc_window_epoch: Option<i64>,
     proc_names: HashMap<ProcessKey, Arc<str>>,
     by_domain: HashMap<Arc<str>, DomainTraffic>,
     domain_last_seen: HashMap<Arc<str>, DateTime<Utc>>,
@@ -625,6 +664,12 @@ impl Stats {
             pid: process.pid,
             path: process.path,
         };
+        let epoch = self.advance_proc_window_epoch(observed_at);
+        self.proc_windows
+            .entry(key.clone())
+            .or_default()
+            .record(direction, epoch, bytes);
+        self.exclusive_window.record(direction, epoch, bytes);
         let entry = self.by_proc.entry(key.clone()).or_default();
         match direction {
             Direction::Inbound => entry.recv += bytes,
@@ -739,6 +784,8 @@ impl Stats {
                 self.add_proc(process, direction, bytes, observed_at);
             }
             None => {
+                let epoch = self.advance_proc_window_epoch(observed_at);
+                self.unattributed_window.record(direction, epoch, bytes);
                 match direction {
                     Direction::Inbound => self.unattributed.recv += bytes,
                     Direction::Outbound => self.unattributed.sent += bytes,
@@ -761,6 +808,8 @@ impl Stats {
             self.record_process(None, direction, bytes, observed_at);
             return;
         }
+        let epoch = self.advance_proc_window_epoch(observed_at);
+        self.shared_window.record(direction, epoch, bytes);
         match direction {
             Direction::Inbound => self.shared_total.recv += bytes,
             Direction::Outbound => self.shared_total.sent += bytes,
@@ -773,6 +822,10 @@ impl Stats {
             })
             .collect();
         for (candidate, key) in candidates.iter().zip(keys.iter()) {
+            self.proc_windows
+                .entry(key.clone())
+                .or_default()
+                .record(direction, epoch, bytes);
             let entry = self.shared_by_proc.entry(key.clone()).or_default();
             match direction {
                 Direction::Inbound => entry.recv += bytes,
@@ -798,10 +851,35 @@ impl Stats {
     }
 
     /// ADR 0013 系统流量：无本地套接字的协议流量（ICMP 等），不参与进程归属。
-    pub(crate) fn record_system(&mut self, direction: Direction, bytes: u64) {
+    pub(crate) fn record_system(
+        &mut self,
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+    ) {
+        let epoch = self.advance_proc_window_epoch(observed_at);
+        self.system_window.record(direction, epoch, bytes);
         match direction {
             Direction::Inbound => self.system.recv += bytes,
             Direction::Outbound => self.system.sent += bytes,
+        }
+    }
+
+    /// 推进进程窗口参考 epoch（单调取最近），返回该 epoch 供各窗口记账。
+    fn advance_proc_window_epoch(&mut self, observed_at: DateTime<Utc>) -> i64 {
+        let epoch = bucket_epoch(observed_at);
+        self.proc_window_epoch = Some(self.proc_window_epoch.map_or(epoch, |prev| prev.max(epoch)));
+        epoch
+    }
+
+    /// 守恒汇总的窗口口径（5 分钟滚动，ADR 0013 第二刀）。
+    pub(crate) fn attribution_window_summary(&self) -> AttributionSummary {
+        let epoch = self.proc_window_epoch.unwrap_or(0);
+        AttributionSummary {
+            exclusive: self.exclusive_window.window(epoch),
+            shared: self.shared_window.window(epoch),
+            system: self.system_window.window(epoch),
+            unattributed: self.unattributed_window.window(epoch),
         }
     }
 
@@ -821,6 +899,7 @@ impl Stats {
     }
 
     pub fn snapshot(&self, top_n: usize) -> TrafficSnapshot {
+        let proc_epoch = self.proc_window_epoch.unwrap_or(0);
         let mut processes = self
             .top_procs(top_n)
             .into_iter()
@@ -845,7 +924,11 @@ impl Stats {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                ProcessSnapshot::attributed_with_shared(
+                let window = self
+                    .proc_windows
+                    .get(&key)
+                    .map_or_else(ProcTraffic::default, |windows| windows.window(proc_epoch));
+                let mut process = ProcessSnapshot::attributed_with_shared(
                     key.pid,
                     self.proc_names.get(&key).cloned(),
                     key.path,
@@ -853,11 +936,12 @@ impl Stats {
                     exclusive,
                     shared,
                     shared_with,
-                )
+                );
+                process.window = window;
+                process
             })
             .collect::<Vec<_>>();
-        processes.sort_unstable_by_key(|process| std::cmp::Reverse(process.total()));
-        processes.truncate(top_n);
+        // top_procs 已按窗口口径排序并截断（ADR 0013 第二刀），此处不再按累计重排。
         let inbound_ips = self
             .top_in(top_n)
             .into_iter()
@@ -882,6 +966,7 @@ impl Stats {
 
         TrafficSnapshot {
             attribution: self.attribution_summary(),
+            attribution_window: self.attribution_window_summary(),
             in_bytes: self.in_bytes,
             out_bytes: self.out_bytes,
             process_data_fresh: false,
@@ -911,7 +996,16 @@ impl Stats {
             entry.sent += shared.sent;
         }
         let mut entries: Vec<(ProcessKey, ProcTraffic)> = combined.into_iter().collect();
-        entries.sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.recv + t.sent));
+        // 窗口口径优先（ADR 0013 第二刀）：活跃流量排前，累计字节只作同窗决胜，
+        // 消除历史大户对 top-N 的长期占位。
+        let epoch = self.proc_window_epoch.unwrap_or(0);
+        entries.sort_unstable_by_key(|(key, lifetime)| {
+            let window = self
+                .proc_windows
+                .get(key)
+                .map_or(0u64, |windows| windows.window(epoch).total());
+            std::cmp::Reverse((window, lifetime.recv + lifetime.sent))
+        });
         entries.truncate(n);
         entries
     }
@@ -1567,6 +1661,83 @@ mod tests {
         assert_eq!(summary.unattributed.recv, 30);
         assert_eq!(summary.unattributed.sent, 20);
         assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
+    }
+
+    /// ADR 0013 第二刀：top-N 按窗口口径排序，历史大户不再长期占位。
+    #[test]
+    fn top_n_ranks_by_window_before_lifetime() {
+        let mut stats = Stats::default();
+        // 旧大户 1000 B（窗口外），新进程 10 B（窗口内）。
+        stats.record_flow_at(
+            flow(Direction::Outbound, [10, 0, 0, 1], 1000),
+            Some(ObservedProcess {
+                pid: 7,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+        );
+        stats.record_flow_at(
+            flow(Direction::Outbound, [10, 0, 0, 2], 10),
+            Some(ObservedProcess {
+                pid: 8,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:09:00Z".parse().unwrap(),
+        );
+
+        let snapshot = stats.snapshot(10);
+        assert_eq!(snapshot.processes[0].pid(), Some(8));
+        assert_eq!(snapshot.processes[0].window.sent, 10);
+        assert_eq!(snapshot.processes[1].pid(), Some(7));
+        // 1000 B 已滑出 5 分钟窗口，只保留累计值。
+        assert_eq!(snapshot.processes[1].window.total(), 0);
+        assert_eq!(snapshot.processes[1].sent, 1000);
+    }
+
+    /// ADR 0013 第二刀：窗口口径守恒——窗口内四通道之和恰为窗口内记录字节，
+    /// 滑出窗口后衰减为 0，累计口径不受影响。
+    #[test]
+    fn attribution_window_summary_tracks_recent_bytes_only() {
+        let mut stats = Stats::default();
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 1], 100),
+            None,
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+        );
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 2], 40),
+            Some(ObservedProcess {
+                pid: 7,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:04:00Z".parse().unwrap(),
+        );
+        let snapshot = stats.snapshot(10);
+        let window = snapshot.attribution_window;
+        assert_eq!(window.unattributed.recv, 100);
+        assert_eq!(window.exclusive.recv, 40);
+        assert_eq!(window.total(), 140);
+        assert_eq!(snapshot.attribution.unattributed.recv, 100);
+        assert_eq!(snapshot.attribution.exclusive.recv, 40);
+
+        // 推进到 08:10：前两笔全部滑出窗口。
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 3], 1),
+            Some(ObservedProcess {
+                pid: 9,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:10:00Z".parse().unwrap(),
+        );
+        let snapshot = stats.snapshot(10);
+        let window = snapshot.attribution_window;
+        assert_eq!(window.total(), 1);
+        assert_eq!(window.unattributed.recv, 0);
+        assert_eq!(window.exclusive.recv, 1);
     }
 
     #[test]

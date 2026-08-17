@@ -590,7 +590,7 @@ impl PendingAttributor {
         let Some(socket) = socket else {
             proc_table::record_no_local_socket(proc_table);
             // 无本地套接字 = 系统流量（ADR 0013），不再混入未归属。
-            stats.record_system(direction, bytes);
+            stats.record_system(direction, bytes, observed_at);
             return;
         };
         let Some(peer_port) = peer_port else {

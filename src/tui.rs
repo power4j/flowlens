@@ -1597,11 +1597,12 @@ fn process_rows(
         .map(|process| {
             let name = Cell::from(process_name_span(process, 40));
             // ADR 0013：A 列单字母，S = single，M = mixed；构成明细在详情页。
+            // Recv/Sent/Total 为窗口口径（5 分钟滚动）；累计字节在详情页与报表。
             let attr = if process.is_mixed() { "M" } else { "S" };
             if compact {
                 Row::new(vec![
                     name,
-                    Cell::from(human_bytes(process.total()))
+                    Cell::from(human_bytes(process.window.total()))
                         .style(Style::default().fg(palette::strong())),
                     Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
@@ -1615,11 +1616,11 @@ fn process_rows(
                             .map(|pid| pid.to_string())
                             .unwrap_or_else(|| "-".to_string()),
                     ),
-                    Cell::from(human_bytes(process.recv))
+                    Cell::from(human_bytes(process.window.recv))
                         .style(Style::default().fg(palette::inbound())),
-                    Cell::from(human_bytes(process.sent))
+                    Cell::from(human_bytes(process.window.sent))
                         .style(Style::default().fg(palette::outbound())),
-                    Cell::from(human_bytes(process.total()))
+                    Cell::from(human_bytes(process.window.total()))
                         .style(Style::default().fg(palette::strong())),
                     Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
@@ -1705,7 +1706,8 @@ fn draw_processes(
 /// ADR 0013 记录层守恒摘要（已结算口径）：总计 = 独占 + 共享 + 系统 + 未归属。
 /// 宽屏三行（守恒行 + System + Unattributed）；紧凑两行（System 并入守恒行）。
 fn attribution_summary_lines(snapshot: &TrafficSnapshot, compact: bool) -> Vec<Line<'static>> {
-    let attribution = &snapshot.attribution;
+    // ADR 0013 第二刀：摘要与表格同窗口口径（5 分钟滚动）。
+    let attribution = &snapshot.attribution_window;
     let muted = Style::default().fg(palette::muted());
     let mut lines = vec![Line::from(vec![
         Span::styled("Total ", muted),
@@ -1836,6 +1838,11 @@ fn draw_process_detail(
         Line::from(format!(
             "  Total (incl. shared): {}",
             human_bytes(process.total())
+        )),
+        Line::from(format!(
+            "  Window (5m): Recv {}  Sent {}",
+            human_bytes(process.window.recv),
+            human_bytes(process.window.sent)
         )),
     ];
     if !process.attribution.shared_with.is_empty() {
@@ -3391,14 +3398,18 @@ mod tests {
         let snapshot = TrafficSnapshot {
             in_bytes: 40,
             out_bytes: 60,
-            processes: vec![ProcessSnapshot::attributed(
-                7,
-                Some(Arc::from("curl --silent")),
-                None,
-                observed_at,
-                40,
-                60,
-            )]
+            processes: vec![{
+                let mut process = ProcessSnapshot::attributed(
+                    7,
+                    Some(Arc::from("curl --silent")),
+                    None,
+                    observed_at,
+                    40,
+                    60,
+                );
+                process.window = crate::stats::ProcTraffic { recv: 40, sent: 60 };
+                process
+            }]
             .into(),
             ..TrafficSnapshot::default()
         };
@@ -3589,27 +3600,41 @@ mod tests {
                 system: crate::stats::ProcTraffic { recv: 20, sent: 10 },
                 unattributed: crate::stats::ProcTraffic { recv: 40, sent: 60 },
             },
+            attribution_window: crate::stats::AttributionSummary {
+                exclusive: crate::stats::ProcTraffic { recv: 90, sent: 80 },
+                shared: crate::stats::ProcTraffic { recv: 10, sent: 5 },
+                system: crate::stats::ProcTraffic { recv: 2, sent: 1 },
+                unattributed: crate::stats::ProcTraffic { recv: 4, sent: 6 },
+            },
             processes: vec![
-                ProcessSnapshot::attributed(
-                    7,
-                    Some(Arc::from("solo")),
-                    None,
-                    chrono::Utc::now(),
-                    900,
-                    800,
-                ),
-                ProcessSnapshot::attributed_with_shared(
-                    8,
-                    Some(Arc::from("mix")),
-                    None,
-                    chrono::Utc::now(),
-                    crate::stats::ProcTraffic::default(),
-                    crate::stats::ProcTraffic {
-                        recv: 100,
-                        sent: 50,
-                    },
-                    vec![Arc::from("solo")],
-                ),
+                {
+                    let mut process = ProcessSnapshot::attributed(
+                        7,
+                        Some(Arc::from("solo")),
+                        None,
+                        chrono::Utc::now(),
+                        900,
+                        800,
+                    );
+                    process.window = crate::stats::ProcTraffic { recv: 90, sent: 80 };
+                    process
+                },
+                {
+                    let mut process = ProcessSnapshot::attributed_with_shared(
+                        8,
+                        Some(Arc::from("mix")),
+                        None,
+                        chrono::Utc::now(),
+                        crate::stats::ProcTraffic::default(),
+                        crate::stats::ProcTraffic {
+                            recv: 100,
+                            sent: 50,
+                        },
+                        vec![Arc::from("solo")],
+                    );
+                    process.window = crate::stats::ProcTraffic { recv: 10, sent: 5 };
+                    process
+                },
             ]
             .into(),
             ..TrafficSnapshot::default()
@@ -3639,6 +3664,7 @@ mod tests {
     fn overview_page_renders_from_snapshot() {
         let snapshot = TrafficSnapshot {
             attribution: Default::default(),
+            attribution_window: Default::default(),
             in_bytes: 1024,
             out_bytes: 2048,
             pending_attribution_bytes: 0,

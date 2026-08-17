@@ -92,7 +92,7 @@ fn plain_snapshot(
     ));
 
     out.push_str(&format!("Top Processes ({top_n})\n"));
-    out.push_str("Process\tPID\tRecv\tSent\tTotal\tAttr\tLast Seen\tPath\n");
+    out.push_str("Process\tPID\tRecv\tSent\tTotal\tWin\tAttr\tLast Seen\tPath\n");
     for process in snapshot.processes.iter() {
         let name = process.display_name();
         let pid = process
@@ -106,29 +106,41 @@ fn plain_snapshot(
         } else {
             "single"
         };
+        // ADR 0013 第二刀：累计列 + 窗口列（5 分钟滚动）并列。
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             name,
             pid,
             human_bytes(process.recv),
             human_bytes(process.sent),
             human_bytes(process.total()),
+            human_bytes(process.window.total()),
             attr,
             process.last_seen().to_rfc3339(),
             path
         ));
     }
     let attribution = &snapshot.attribution;
-    for (label, traffic) in [
-        ("<system traffic (no socket)>", attribution.system),
-        ("<unattributed traffic>", attribution.unattributed),
+    let attribution_window = &snapshot.attribution_window;
+    for (label, traffic, window) in [
+        (
+            "<system traffic (no socket)>",
+            attribution.system,
+            attribution_window.system,
+        ),
+        (
+            "<unattributed traffic>",
+            attribution.unattributed,
+            attribution_window.unattributed,
+        ),
     ] {
         out.push_str(&format!(
-            "{}\t-\t{}\t{}\t{}\t-\t-\t-\n",
+            "{}\t-\t{}\t{}\t{}\t{}\t-\t-\t-\n",
             label,
             human_bytes(traffic.recv),
             human_bytes(traffic.sent),
             human_bytes(traffic.total()),
+            human_bytes(window.total()),
         ));
     }
 
@@ -181,6 +193,7 @@ struct JsonFrame<'a> {
     uptime_secs: u64,
     totals: JsonTotals,
     attribution: JsonAttributionSummary,
+    attribution_window: JsonAttributionSummary,
     top_processes: Vec<JsonProc>,
     top_hosts: Vec<JsonHost>,
     top_inbound_ips: Vec<JsonIp>,
@@ -216,6 +229,9 @@ struct JsonProc {
     sent: u64,
     total: u64,
     attribution: JsonProcAttribution,
+    window_recv: u64,
+    window_sent: u64,
+    window_total: u64,
 }
 
 /// ADR 0013：进程归属构成。inclusive 口径：进程 recv/sent = exclusive + shared 之和。
@@ -278,6 +294,9 @@ fn build_json_frame<'a>(
                     .map(|name| name.to_string())
                     .collect(),
             },
+            window_recv: process.window.recv,
+            window_sent: process.window.sent,
+            window_total: process.window.total(),
         })
         .collect();
 
@@ -336,6 +355,16 @@ fn build_json_frame<'a>(
             out_bytes: snapshot.out_bytes,
         },
         attribution,
+        attribution_window: JsonAttributionSummary {
+            exclusive_recv: snapshot.attribution_window.exclusive.recv,
+            exclusive_sent: snapshot.attribution_window.exclusive.sent,
+            shared_recv: snapshot.attribution_window.shared.recv,
+            shared_sent: snapshot.attribution_window.shared.sent,
+            system_recv: snapshot.attribution_window.system.recv,
+            system_sent: snapshot.attribution_window.system.sent,
+            unattributed_recv: snapshot.attribution_window.unattributed.recv,
+            unattributed_sent: snapshot.attribution_window.unattributed.sent,
+        },
         top_processes,
         top_hosts,
         top_inbound_ips,
@@ -395,9 +424,9 @@ mod tests {
 
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
-        assert!(rendered.contains("Process\tPID\tRecv\tSent\tTotal\tAttr\tLast Seen\tPath"));
+        assert!(rendered.contains("Process\tPID\tRecv\tSent\tTotal\tWin\tAttr\tLast Seen\tPath"));
         assert!(rendered.contains(
-            "curl\t7\t40 B\t0 B\t40 B\tsingle\t2026-07-15T08:00:00+00:00\t/usr/bin/curl"
+            "curl\t7\t40 B\t0 B\t40 B\t40 B\tsingle\t2026-07-15T08:00:00+00:00\t/usr/bin/curl"
         ));
     }
 
@@ -411,8 +440,8 @@ mod tests {
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
         // ADR 0013：未归属从排名表移出，作为固定行渲染，无 Attr/时间列。
-        assert!(rendered.contains("<unattributed traffic>\t-\t40 B\t60 B\t100 B\t-\t-\t-"));
-        assert!(rendered.contains("<system traffic (no socket)>\t-\t0 B\t0 B\t0 B\t-\t-\t-"));
+        assert!(rendered.contains("<unattributed traffic>\t-\t40 B\t60 B\t100 B\t100 B\t-\t-\t-"));
+        assert!(rendered.contains("<system traffic (no socket)>\t-\t0 B\t0 B\t0 B\t0 B\t-\t-\t-"));
     }
 
     #[test]
@@ -466,7 +495,9 @@ mod tests {
         );
 
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
-        assert!(rendered.contains("?\t7\t40 B\t0 B\t40 B\tsingle\t2026-07-15T08:03:00+00:00\t-"));
+        assert!(
+            rendered.contains("?\t7\t40 B\t0 B\t40 B\t40 B\tsingle\t2026-07-15T08:03:00+00:00\t-")
+        );
 
         let frame = build_json_frame("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
         let value = serde_json::to_value(frame).unwrap();
