@@ -133,6 +133,41 @@ pub struct ProcTraffic {
     pub sent: u64,
 }
 
+impl ProcTraffic {
+    pub fn total(&self) -> u64 {
+        self.recv.saturating_add(self.sent)
+    }
+}
+
+/// 归属通道汇总（记录层口径，ADR 0013）：每字节恰好计入一个通道一次。
+/// 守恒等式：total = exclusive + shared + system + unattributed（已结算，不含在途 pending）。
+#[derive(Clone, Copy, Default)]
+pub struct AttributionSummary {
+    pub exclusive: ProcTraffic,
+    pub shared: ProcTraffic,
+    pub system: ProcTraffic,
+    pub unattributed: ProcTraffic,
+}
+
+impl AttributionSummary {
+    pub fn total(&self) -> u64 {
+        self.exclusive
+            .total()
+            .saturating_add(self.shared.total())
+            .saturating_add(self.system.total())
+            .saturating_add(self.unattributed.total())
+    }
+}
+
+/// 进程归属构成（ADR 0013）：exclusive 与 shared 双通道；进程行的 recv/sent 是两者之和（inclusive）。
+#[derive(Clone, Default)]
+pub struct ProcessAttribution {
+    pub exclusive: ProcTraffic,
+    pub shared: ProcTraffic,
+    /// 共享伙伴的进程显示名。
+    pub shared_with: Vec<Arc<str>>,
+}
+
 #[derive(Clone)]
 pub struct ObservedProcess {
     pub pid: u32,
@@ -152,6 +187,8 @@ pub struct TrafficSnapshot {
     pub out_bytes: u64,
     pub process_data_fresh: bool,
     pub pending_attribution_bytes: u64,
+    /// 记录层守恒汇总（ADR 0013）：总计 = 独占 + 共享 + 系统 + 未归属。
+    pub attribution: AttributionSummary,
     pub processes: Arc<[ProcessSnapshot]>,
     pub inbound_ips: Arc<[IpSnapshot]>,
     pub outbound_ips: Arc<[IpSnapshot]>,
@@ -246,8 +283,10 @@ pub struct DiagnosticsMissSample {
 #[derive(Clone)]
 pub struct ProcessSnapshot {
     identity: ProcessIdentity,
+    /// Inclusive 口径总量（exclusive + shared），topN 排序键（ADR 0013）。
     pub recv: u64,
     pub sent: u64,
+    pub attribution: ProcessAttribution,
     last_seen: DateTime<Utc>,
 }
 
@@ -272,8 +311,35 @@ impl ProcessSnapshot {
     ) -> Self {
         Self {
             identity: ProcessIdentity::Attributed { pid, name, path },
+            attribution: ProcessAttribution {
+                exclusive: ProcTraffic { recv, sent },
+                shared: ProcTraffic::default(),
+                shared_with: Vec::new(),
+            },
             recv,
             sent,
+            last_seen,
+        }
+    }
+
+    pub(crate) fn attributed_with_shared(
+        pid: u32,
+        name: Option<Arc<str>>,
+        path: Option<Arc<str>>,
+        last_seen: DateTime<Utc>,
+        exclusive: ProcTraffic,
+        shared: ProcTraffic,
+        shared_with: Vec<Arc<str>>,
+    ) -> Self {
+        Self {
+            identity: ProcessIdentity::Attributed { pid, name, path },
+            recv: exclusive.recv + shared.recv,
+            sent: exclusive.sent + shared.sent,
+            attribution: ProcessAttribution {
+                exclusive,
+                shared,
+                shared_with,
+            },
             last_seen,
         }
     }
@@ -281,6 +347,7 @@ impl ProcessSnapshot {
     pub(crate) fn unattributed(recv: u64, sent: u64, last_seen: DateTime<Utc>) -> Self {
         Self {
             identity: ProcessIdentity::Unattributed,
+            attribution: ProcessAttribution::default(),
             recv,
             sent,
             last_seen,
@@ -306,6 +373,11 @@ impl ProcessSnapshot {
             ProcessIdentity::Attributed { path, .. } => path.as_deref(),
             ProcessIdentity::Unattributed => None,
         }
+    }
+
+    /// 列表 `A` 列语义（ADR 0013）：false = single（全部独占），true = mixed（含共享字节）。
+    pub(crate) fn is_mixed(&self) -> bool {
+        self.attribution.shared.recv > 0 || self.attribution.shared.sent > 0
     }
 
     pub(crate) fn last_seen(&self) -> DateTime<Utc> {
@@ -431,6 +503,14 @@ pub struct Stats {
     proc_last_seen: HashMap<ProcessKey, DateTime<Utc>>,
     unattributed: ProcTraffic,
     unattributed_last_seen: Option<DateTime<Utc>>,
+    /// 共享归属通道（ADR 0013）：per-process inclusive 投影；记录层总量在 `shared_total`。
+    shared_by_proc: HashMap<ProcessKey, ProcTraffic>,
+    /// 记录层共享字节总量（每字节只计一次），守恒等式使用。
+    shared_total: ProcTraffic,
+    /// 共享伙伴（进程统计身份），详情页 shared_with 数据来源。
+    shared_partners: HashMap<ProcessKey, Vec<ProcessKey>>,
+    /// 系统流量（无本地套接字，ADR 0013），独立于未归属。
+    system: ProcTraffic,
     proc_names: HashMap<ProcessKey, Arc<str>>,
     by_domain: HashMap<Arc<str>, DomainTraffic>,
     domain_last_seen: HashMap<Arc<str>, DateTime<Utc>>,
@@ -688,19 +768,111 @@ impl Stats {
         }
     }
 
+    /// ADR 0013 共享归属：同一笔字节全额计入每个候选进程（inclusive 投影），
+    /// 记录层只在 shared_total 计一次；候选不足 2 个不构成共享，退回未归属。
+    pub(crate) fn record_shared(
+        &mut self,
+        candidates: &[ObservedProcess],
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+    ) {
+        if candidates.len() < 2 {
+            self.record_process(None, direction, bytes, observed_at);
+            return;
+        }
+        match direction {
+            Direction::Inbound => self.shared_total.recv += bytes,
+            Direction::Outbound => self.shared_total.sent += bytes,
+        }
+        let keys: Vec<ProcessKey> = candidates
+            .iter()
+            .map(|candidate| ProcessKey {
+                pid: candidate.pid,
+                path: candidate.path.clone(),
+            })
+            .collect();
+        for (candidate, key) in candidates.iter().zip(keys.iter()) {
+            let entry = self.shared_by_proc.entry(key.clone()).or_default();
+            match direction {
+                Direction::Inbound => entry.recv += bytes,
+                Direction::Outbound => entry.sent += bytes,
+            }
+            if let Some(name) = candidate.name.clone() {
+                self.proc_names.entry(key.clone()).or_insert(name);
+            }
+            let last_seen = self
+                .proc_last_seen
+                .entry(key.clone())
+                .or_insert(observed_at);
+            if *last_seen < observed_at {
+                *last_seen = observed_at;
+            }
+            let partners = self.shared_partners.entry(key.clone()).or_default();
+            for other in &keys {
+                if other != key && !partners.contains(other) {
+                    partners.push(other.clone());
+                }
+            }
+        }
+    }
+
+    /// ADR 0013 系统流量：无本地套接字的协议流量（ICMP 等），不参与进程归属。
+    pub(crate) fn record_system(&mut self, direction: Direction, bytes: u64) {
+        match direction {
+            Direction::Inbound => self.system.recv += bytes,
+            Direction::Outbound => self.system.sent += bytes,
+        }
+    }
+
+    /// 记录层守恒汇总：总计 = 独占 + 共享 + 系统 + 未归属（ADR 0013）。
+    pub(crate) fn attribution_summary(&self) -> AttributionSummary {
+        let mut exclusive = ProcTraffic::default();
+        for traffic in self.by_proc.values() {
+            exclusive.recv += traffic.recv;
+            exclusive.sent += traffic.sent;
+        }
+        AttributionSummary {
+            exclusive,
+            shared: self.shared_total,
+            system: self.system,
+            unattributed: self.unattributed,
+        }
+    }
+
     pub fn snapshot(&self, top_n: usize) -> TrafficSnapshot {
         let mut processes = self
             .top_procs(top_n)
             .into_iter()
             .map(|(key, traffic)| {
                 let last_seen = self.proc_last_seen[&key];
-                ProcessSnapshot::attributed(
+                let exclusive = self.by_proc.get(&key).copied().unwrap_or_default();
+                let shared = self.shared_by_proc.get(&key).copied().unwrap_or_default();
+                debug_assert_eq!(traffic.recv, exclusive.recv + shared.recv);
+                debug_assert_eq!(traffic.sent, exclusive.sent + shared.sent);
+                let shared_with = self
+                    .shared_partners
+                    .get(&key)
+                    .map(|partners| {
+                        partners
+                            .iter()
+                            .map(|partner| {
+                                self.proc_names
+                                    .get(partner)
+                                    .cloned()
+                                    .unwrap_or_else(|| Arc::from("?"))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                ProcessSnapshot::attributed_with_shared(
                     key.pid,
                     self.proc_names.get(&key).cloned(),
                     key.path,
                     last_seen,
-                    traffic.recv,
-                    traffic.sent,
+                    exclusive,
+                    shared,
+                    shared_with,
                 )
             })
             .collect::<Vec<_>>();
@@ -737,6 +909,7 @@ impl Stats {
             .into();
 
         TrafficSnapshot {
+            attribution: self.attribution_summary(),
             in_bytes: self.in_bytes,
             out_bytes: self.out_bytes,
             process_data_fresh: false,
@@ -758,11 +931,14 @@ impl Stats {
     }
 
     fn top_procs(&self, n: usize) -> Vec<(ProcessKey, ProcTraffic)> {
-        let mut entries: Vec<(ProcessKey, ProcTraffic)> = self
-            .by_proc
-            .iter()
-            .map(|(key, traffic)| (key.clone(), *traffic))
-            .collect();
+        // Inclusive 口径（独占 + 共享）参与排序（ADR 0013）。
+        let mut combined: HashMap<ProcessKey, ProcTraffic> = self.by_proc.clone();
+        for (key, shared) in &self.shared_by_proc {
+            let entry = combined.entry(key.clone()).or_default();
+            entry.recv += shared.recv;
+            entry.sent += shared.sent;
+        }
+        let mut entries: Vec<(ProcessKey, ProcTraffic)> = combined.into_iter().collect();
         entries.sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.recv + t.sent));
         entries.truncate(n);
         entries

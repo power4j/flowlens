@@ -3520,6 +3520,7 @@ mod tests {
     #[test]
     fn overview_page_renders_from_snapshot() {
         let snapshot = TrafficSnapshot {
+            attribution: Default::default(),
             in_bytes: 1024,
             out_bytes: 2048,
             pending_attribution_bytes: 0,
