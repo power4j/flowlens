@@ -1072,8 +1072,8 @@ mod tests {
 
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.out_bytes, 40);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.snapshot().pending_expired_bytes, 40);
     }
 
@@ -1148,7 +1148,6 @@ mod tests {
         // 记录层 shared 只计 40 B 一次，未归属为 0（ADR 0013）。
         assert_eq!(snapshot.processes.len(), 2);
         for process in snapshot.processes.iter() {
-            assert!(!process.is_unattributed());
             assert_eq!(process.attribution.shared.sent, 40);
             assert_eq!(process.attribution.exclusive.sent, 0);
             assert_eq!(process.sent, 40);
@@ -1292,8 +1291,8 @@ mod tests {
         );
 
         let snapshot = stats.snapshot(10);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
     }
 
     #[test]
@@ -1321,7 +1320,7 @@ mod tests {
 
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.out_bytes, 100);
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.pending_bytes(), 60);
         assert_eq!(attributor.snapshot().pending_capacity_bytes, 40);
         attributor.advance(
@@ -1329,7 +1328,7 @@ mod tests {
             &proc_table,
             started + Duration::from_secs(1) + Duration::from_millis(1),
         );
-        assert_eq!(stats.snapshot(10).processes[0].sent, 100);
+        assert_eq!(stats.snapshot(10).attribution.unattributed.sent, 100);
     }
 
     #[test]
@@ -1386,8 +1385,8 @@ mod tests {
 
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.out_bytes, 100);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.pending_bytes(), 60);
     }
 }

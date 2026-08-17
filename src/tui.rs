@@ -1491,21 +1491,7 @@ fn panel_block(
 }
 
 fn process_name_span(process: &ProcessSnapshot, max_chars: usize) -> Span<'static> {
-    let name = if process.is_unattributed() {
-        process.display_name().to_string()
-    } else {
-        truncate(process.display_name(), max_chars)
-    };
-    if process.is_unattributed() {
-        Span::styled(
-            name,
-            Style::default()
-                .fg(palette::warn())
-                .add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Span::raw(name)
-    }
+    Span::raw(truncate(process.display_name(), max_chars))
 }
 
 fn draw_process_preview(
@@ -1537,16 +1523,18 @@ fn process_table(
     let compact = mode == LayoutMode::Compact;
     let rows = process_rows(snapshot, compact, now);
     let header_style = Style::default().fg(palette::muted());
+    // ADR 0013：A 列极简——S = single（全部独占），M = mixed（含共享字节）。
     let table = if compact {
         Table::new(
             rows,
             [
                 Constraint::Min(18),
                 Constraint::Length(12),
+                Constraint::Length(1),
                 Constraint::Length(12),
             ],
         )
-        .header(Row::new(vec!["Process", "Total", "Last seen"]).style(header_style))
+        .header(Row::new(vec!["Process", "Total", "A", "Last seen"]).style(header_style))
     } else {
         Table::new(
             rows,
@@ -1556,12 +1544,21 @@ fn process_table(
                 Constraint::Length(9),
                 Constraint::Length(9),
                 Constraint::Length(10),
+                Constraint::Length(1),
                 Constraint::Length(11),
             ],
         )
         .header(
-            Row::new(vec!["Process", "PID", "Recv", "Sent", "Total", "Last seen"])
-                .style(header_style),
+            Row::new(vec![
+                "Process",
+                "PID",
+                "Recv",
+                "Sent",
+                "Total",
+                "A",
+                "Last seen",
+            ])
+            .style(header_style),
         )
     };
     table.column_spacing(1).block(block)
@@ -1578,10 +1575,12 @@ fn process_rows(
                 Cell::from("No traffic observed"),
                 Cell::from(""),
                 Cell::from(""),
+                Cell::from(""),
             ]
         } else {
             vec![
                 Cell::from("No traffic observed"),
+                Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
@@ -1597,11 +1596,14 @@ fn process_rows(
         .iter()
         .map(|process| {
             let name = Cell::from(process_name_span(process, 40));
+            // ADR 0013：A 列单字母，S = single，M = mixed；构成明细在详情页。
+            let attr = if process.is_mixed() { "M" } else { "S" };
             if compact {
                 Row::new(vec![
                     name,
                     Cell::from(human_bytes(process.total()))
                         .style(Style::default().fg(palette::strong())),
+                    Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
                 ])
             } else {
@@ -1619,6 +1621,7 @@ fn process_rows(
                         .style(Style::default().fg(palette::outbound())),
                     Cell::from(human_bytes(process.total()))
                         .style(Style::default().fg(palette::strong())),
+                    Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
                 ])
             }
@@ -1650,7 +1653,11 @@ fn draw_processes(
     mode: LayoutMode,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    let view_h = area.height.saturating_sub(3) as usize;
+    let compact = matches!(mode, LayoutMode::Compact);
+    // ADR 0013：top 式布局——守恒摘要固定在上，主表独立滚动。
+    let summary_lines = attribution_summary_lines(snapshot, compact);
+    let summary_height = summary_lines.len() as u16 + 1;
+    let view_h = area.height.saturating_sub(3 + summary_height) as usize;
     state.proc_view_height = view_h.max(1);
     state.proc_scroll = state
         .proc_scroll
@@ -1669,7 +1676,18 @@ fn draw_processes(
         snapshot.pending_attribution_bytes,
         area.width,
     ));
-    let table = process_table(snapshot, mode, block, now)
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let [summary_area, table_area] = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Length(summary_height),
+        ratatui::layout::Constraint::Min(0),
+    ])
+    .areas(inner);
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(summary_lines),
+        summary_area,
+    );
+    let table = process_table(snapshot, mode, Block::default(), now)
         .row_highlight_style(
             Style::default()
                 .patch(palette::selection_style())
@@ -1679,9 +1697,54 @@ fn draw_processes(
 
     f.render_stateful_widget(
         table,
-        area,
+        table_area,
         &mut ratatui_state(snapshot.processes.len(), state.proc_scroll),
     );
+}
+
+/// ADR 0013 记录层守恒摘要（已结算口径）：总计 = 独占 + 共享 + 系统 + 未归属。
+/// 宽屏三行（守恒行 + System + Unattributed）；紧凑两行（System 并入守恒行）。
+fn attribution_summary_lines(snapshot: &TrafficSnapshot, compact: bool) -> Vec<Line<'static>> {
+    let attribution = &snapshot.attribution;
+    let muted = Style::default().fg(palette::muted());
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Total ", muted),
+        Span::raw(human_bytes(attribution.total())),
+        Span::styled(" = Exclusive ", muted),
+        Span::raw(human_bytes(attribution.exclusive.total())),
+        Span::styled(" + Shared ", muted),
+        Span::raw(human_bytes(attribution.shared.total())),
+        Span::styled(" + System ", muted),
+        Span::raw(human_bytes(attribution.system.total())),
+        Span::styled(" + Unattributed ", muted),
+        Span::raw(human_bytes(attribution.unattributed.total())),
+    ])];
+    if !compact {
+        lines.push(channel_summary_line("System", &attribution.system));
+    }
+    lines.push(channel_summary_line(
+        "Unattributed",
+        &attribution.unattributed,
+    ));
+    lines
+}
+
+fn channel_summary_line(label: &str, traffic: &crate::stats::ProcTraffic) -> Line<'static> {
+    let muted = Style::default().fg(palette::muted());
+    let label_style = if traffic.total() > 0 {
+        Style::default().fg(palette::warn())
+    } else {
+        muted
+    };
+    Line::from(vec![
+        Span::styled(format!("{label:<12}"), label_style),
+        Span::styled("Recv ", muted),
+        Span::raw(human_bytes(traffic.recv)),
+        Span::styled("  Sent ", muted),
+        Span::raw(human_bytes(traffic.sent)),
+        Span::styled("  Total ", muted),
+        Span::raw(human_bytes(traffic.total())),
+    ])
 }
 
 fn pending_status_title(bytes: u64, area_width: u16) -> Line<'static> {
@@ -1753,11 +1816,38 @@ fn draw_process_detail(
         Line::from(format!("Recv: {}", human_bytes(process.recv))),
         Line::from(format!("Sent: {}", human_bytes(process.sent))),
         Line::from(format!("Total: {}", human_bytes(process.total()))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Attribution",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(format!(
-            "Last seen: {}",
-            relative_last_seen(process.last_seen(), now)
+            "  Exclusive: Recv {}  Sent {}",
+            human_bytes(process.attribution.exclusive.recv),
+            human_bytes(process.attribution.exclusive.sent)
+        )),
+        Line::from(format!(
+            "  Shared:    Recv {}  Sent {}",
+            human_bytes(process.attribution.shared.recv),
+            human_bytes(process.attribution.shared.sent)
+        )),
+        Line::from(format!(
+            "  Total (incl. shared): {}",
+            human_bytes(process.total())
         )),
     ];
+    if !process.attribution.shared_with.is_empty() {
+        lines.push(Line::from(format!(
+            "  Shared with: {}",
+            process.attribution.shared_with.join(", ")
+        )));
+    }
+    lines.push(Line::from(format!(
+        "Last seen: {}",
+        relative_last_seen(process.last_seen(), now)
+    )));
     if detail.paused.is_some() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -2956,20 +3046,6 @@ mod tests {
         assert_eq!(indicator.fg, expected);
     }
 
-    fn assert_unattributed_style(terminal: &Terminal<TestBackend>) {
-        let rendered = rendered_lines(terminal).join("\n");
-        assert!(rendered.contains("<unattributed traffic>"));
-        let first_label_cell = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .find(|cell| cell.symbol() == "<")
-            .expect("unattributed label cell");
-        assert_eq!(first_label_cell.fg, Color::Yellow);
-        assert!(first_label_cell.modifier.contains(Modifier::ITALIC));
-    }
-
     #[test]
     fn top_navigation_renders_page_tabs_with_the_active_page_selected() {
         let snapshot = TrafficSnapshot::default();
@@ -3499,14 +3575,48 @@ mod tests {
     }
 
     #[test]
-    fn unattributed_process_row_uses_special_label_and_style() {
+    fn processes_page_renders_attribution_summary_and_a_column() {
         let snapshot = TrafficSnapshot {
-            processes: vec![ProcessSnapshot::unattributed(40, 60, chrono::Utc::now())].into(),
+            attribution: crate::stats::AttributionSummary {
+                exclusive: crate::stats::ProcTraffic {
+                    recv: 900,
+                    sent: 800,
+                },
+                shared: crate::stats::ProcTraffic {
+                    recv: 100,
+                    sent: 50,
+                },
+                system: crate::stats::ProcTraffic { recv: 20, sent: 10 },
+                unattributed: crate::stats::ProcTraffic { recv: 40, sent: 60 },
+            },
+            processes: vec![
+                ProcessSnapshot::attributed(
+                    7,
+                    Some(Arc::from("solo")),
+                    None,
+                    chrono::Utc::now(),
+                    900,
+                    800,
+                ),
+                ProcessSnapshot::attributed_with_shared(
+                    8,
+                    Some(Arc::from("mix")),
+                    None,
+                    chrono::Utc::now(),
+                    crate::stats::ProcTraffic::default(),
+                    crate::stats::ProcTraffic {
+                        recv: 100,
+                        sent: 50,
+                    },
+                    vec![Arc::from("solo")],
+                ),
+            ]
+            .into(),
             ..TrafficSnapshot::default()
         };
         let mut state = AppState::new();
         state.page = Page::Processes;
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
         terminal
             .draw(|frame| {
@@ -3514,7 +3624,15 @@ mod tests {
             })
             .unwrap();
 
-        assert_unattributed_style(&terminal);
+        let rendered = rendered_lines(&terminal).join("\n");
+        // 守恒摘要（ADR 0013）
+        assert!(rendered.contains("Exclusive"));
+        assert!(rendered.contains("Shared"));
+        assert!(rendered.contains("System"));
+        assert!(rendered.contains("Unattributed"));
+        // A 列单字母
+        assert!(rendered.contains(" S "));
+        assert!(rendered.contains(" M "));
     }
 
     #[test]
@@ -3605,26 +3723,6 @@ mod tests {
             .find(|line| line.contains("curl"))
             .expect("process row");
         assert!(!process_line.contains("> "));
-    }
-
-    #[test]
-    fn overview_uses_special_style_for_unattributed_traffic() {
-        let snapshot = TrafficSnapshot {
-            processes: vec![ProcessSnapshot::unattributed(40, 60, chrono::Utc::now())].into(),
-            ..TrafficSnapshot::default()
-        };
-        let mut state = AppState::new();
-        // Use a 120-wide terminal so the half-width preview columns still have
-        // enough room to render the `<unattributed traffic>` label in full.
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-
-        terminal
-            .draw(|frame| {
-                draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now());
-            })
-            .unwrap();
-
-        assert_unattributed_style(&terminal);
     }
 
     #[test]
@@ -4383,48 +4481,6 @@ mod tests {
         assert_eq!(detail.paused, None);
         assert_eq!(detail.pause_notice, None);
         assert_eq!((detail.process.recv, detail.process.sent), (140, 160));
-    }
-
-    #[test]
-    fn unattributed_traffic_details_keep_missing_fields_and_special_style() {
-        let snapshot = TrafficSnapshot {
-            process_data_fresh: true,
-            processes: vec![ProcessSnapshot::unattributed(
-                40,
-                60,
-                "2026-07-15T08:00:00Z".parse().unwrap(),
-            )]
-            .into(),
-            ..TrafficSnapshot::default()
-        };
-        let mut state = AppState::new();
-        state.page = Page::Processes;
-        handle_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &snapshot,
-        );
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-
-        terminal
-            .draw(|frame| {
-                draw_at(
-                    frame,
-                    &mut state,
-                    &snapshot,
-                    "eth0",
-                    "host",
-                    Instant::now(),
-                    "2026-07-15T08:01:00Z".parse().unwrap(),
-                );
-            })
-            .unwrap();
-
-        let rendered = rendered_lines(&terminal).join("\n");
-        assert!(rendered.contains("Name: <unattributed traffic>"));
-        assert!(rendered.contains("PID: -"));
-        assert!(rendered.contains("Path: -"));
-        assert_unattributed_style(&terminal);
     }
 
     // --- settings overlay ---

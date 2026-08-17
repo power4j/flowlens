@@ -297,10 +297,10 @@ enum ProcessIdentity {
         name: Option<Arc<str>>,
         path: Option<Arc<str>>,
     },
-    Unattributed,
 }
 
 impl ProcessSnapshot {
+    #[cfg(test)]
     pub(crate) fn attributed(
         pid: u32,
         name: Option<Arc<str>>,
@@ -344,34 +344,21 @@ impl ProcessSnapshot {
         }
     }
 
-    pub(crate) fn unattributed(recv: u64, sent: u64, last_seen: DateTime<Utc>) -> Self {
-        Self {
-            identity: ProcessIdentity::Unattributed,
-            attribution: ProcessAttribution::default(),
-            recv,
-            sent,
-            last_seen,
-        }
-    }
-
     pub(crate) fn pid(&self) -> Option<u32> {
         match self.identity {
             ProcessIdentity::Attributed { pid, .. } => Some(pid),
-            ProcessIdentity::Unattributed => None,
         }
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
         match &self.identity {
             ProcessIdentity::Attributed { name, .. } => name.as_deref(),
-            ProcessIdentity::Unattributed => None,
         }
     }
 
     pub(crate) fn path(&self) -> Option<&str> {
         match &self.identity {
             ProcessIdentity::Attributed { path, .. } => path.as_deref(),
-            ProcessIdentity::Unattributed => None,
         }
     }
 
@@ -384,14 +371,9 @@ impl ProcessSnapshot {
         self.last_seen
     }
 
-    pub(crate) fn is_unattributed(&self) -> bool {
-        matches!(self.identity, ProcessIdentity::Unattributed)
-    }
-
     pub(crate) fn display_name(&self) -> &str {
         match &self.identity {
             ProcessIdentity::Attributed { name, .. } => name.as_deref().unwrap_or("?"),
-            ProcessIdentity::Unattributed => "<unattributed traffic>",
         }
     }
 
@@ -401,7 +383,6 @@ impl ProcessSnapshot {
 
     pub(crate) fn same_identity_as(&self, other: &Self) -> bool {
         match (&self.identity, &other.identity) {
-            (ProcessIdentity::Unattributed, ProcessIdentity::Unattributed) => true,
             (
                 ProcessIdentity::Attributed {
                     pid: left_pid,
@@ -414,7 +395,6 @@ impl ProcessSnapshot {
                     ..
                 },
             ) => left_pid == right_pid && left_path == right_path,
-            _ => false,
         }
     }
 }
@@ -876,14 +856,6 @@ impl Stats {
                 )
             })
             .collect::<Vec<_>>();
-        if self.unattributed.recv > 0 || self.unattributed.sent > 0 {
-            processes.push(ProcessSnapshot::unattributed(
-                self.unattributed.recv,
-                self.unattributed.sent,
-                self.unattributed_last_seen
-                    .expect("unattributed traffic has an observation time"),
-            ));
-        }
         processes.sort_unstable_by_key(|process| std::cmp::Reverse(process.total()));
         processes.truncate(top_n);
         let inbound_ips = self
@@ -1235,28 +1207,23 @@ mod tests {
     use crate::capture::Flow;
 
     #[test]
-    fn unattributed_flow_appears_in_snapshot() {
+    fn unattributed_flow_appears_in_attribution_summary() {
         let mut stats = Stats::default();
-        let observed_at = "2026-07-15T07:59:00Z".parse().unwrap();
-
         stats.record_flow_at(
             flow(Direction::Inbound, [10, 0, 0, 1], 40),
             None,
-            observed_at,
+            "2026-07-15T07:59:00Z".parse().unwrap(),
         );
         let snapshot = stats.snapshot(10);
 
-        assert_eq!(snapshot.processes.len(), 1);
-        assert_eq!(snapshot.processes[0].pid(), None);
-        assert!(snapshot.processes[0].name().is_none());
-        assert!(snapshot.processes[0].path().is_none());
-        assert_eq!(snapshot.processes[0].last_seen(), observed_at);
-        assert_eq!(snapshot.processes[0].recv, 40);
-        assert_eq!(snapshot.processes[0].sent, 0);
+        // ADR 0013：未归属不再作为进程行，只进守恒摘要。
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.recv, 40);
+        assert_eq!(snapshot.attribution.unattributed.sent, 0);
     }
 
     #[test]
-    fn unattributed_flow_competes_for_top_n() {
+    fn unattributed_flow_does_not_compete_for_top_n() {
         let mut stats = Stats::default();
         stats.record_flow(
             flow(Direction::Inbound, [10, 0, 0, 1], 10),
@@ -1270,9 +1237,11 @@ mod tests {
 
         let snapshot = stats.snapshot(1);
 
+        // ADR 0013：未归属移出排名，topN 只含已归属进程。
         assert_eq!(snapshot.processes.len(), 1);
-        assert_eq!(snapshot.processes[0].pid(), None);
-        assert_eq!(snapshot.processes[0].recv, 100);
+        assert_eq!(snapshot.processes[0].pid(), Some(7));
+        assert_eq!(snapshot.processes[0].recv, 10);
+        assert_eq!(snapshot.attribution.unattributed.recv, 100);
     }
 
     #[test]
@@ -1588,13 +1557,16 @@ mod tests {
         stats.record_flow(flow(Direction::Outbound, [10, 0, 0, 4], 20), None);
 
         let snapshot = stats.snapshot(10);
-        let process_in: u64 = snapshot.processes.iter().map(|process| process.recv).sum();
-        let process_out: u64 = snapshot.processes.iter().map(|process| process.sent).sum();
+        let summary = snapshot.attribution;
 
+        // ADR 0013：通道划分取代"进程行求和=接口字节"的旧不变量。
         assert_eq!(snapshot.in_bytes, 70);
         assert_eq!(snapshot.out_bytes, 30);
-        assert_eq!(process_in, snapshot.in_bytes);
-        assert_eq!(process_out, snapshot.out_bytes);
+        assert_eq!(summary.exclusive.recv, 40);
+        assert_eq!(summary.exclusive.sent, 10);
+        assert_eq!(summary.unattributed.recv, 30);
+        assert_eq!(summary.unattributed.sent, 20);
+        assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
     }
 
     #[test]
