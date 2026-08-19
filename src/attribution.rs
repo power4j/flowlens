@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::capture::{Flow, LocalSocket};
-use crate::proc_table::{self, LookupOutcome, SharedProcTable};
+use crate::history::AttributionHistory;
+use crate::proc_table::{self, LookupMissReason, LookupOutcome, SharedProcTable};
 use crate::process_probe::{
     ConnectionMatch, ProbeProcess, ProbeRequestId, ProbeRequestOutcome, ProbeResult, ProcessProbe,
 };
-use crate::stats::{Direction, ObservedProcess, Stats};
+use crate::stats::{Direction, Evidence, ObservedProcess, Stats};
 
 pub(crate) const PENDING_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(1);
 pub(crate) const PENDING_ATTRIBUTION_CAPACITY: usize = 1_024;
@@ -52,6 +53,8 @@ struct PendingAttribution {
     direction: Direction,
     bytes: u64,
     observed_at: DateTime<Utc>,
+    /// 歧义候选（ADR 0013 共享归属）：push 时从歧义 lookup 捕获；终结时 >= 2 即共享归属。
+    candidates: Vec<ObservedProcess>,
     pending_since: Instant,
 }
 
@@ -78,6 +81,8 @@ pub(crate) struct PendingAttributor {
     window: Duration,
     capacity: usize,
     last_generation: Option<u64>,
+    /// socket→PID 区间日志（ADR 0013 第三刀），追回已消失连接的归属。
+    history: AttributionHistory,
     probe: Option<ProcessProbe>,
     probe_state: HashMap<LocalSocket, ProbeState>,
     probe_request_queued: u64,
@@ -108,6 +113,7 @@ impl PendingAttributor {
             window,
             capacity,
             last_generation: None,
+            history: AttributionHistory::default(),
             probe: None,
             probe_state: HashMap::new(),
             probe_request_queued: 0,
@@ -231,11 +237,12 @@ impl PendingAttributor {
                 if accept_results {
                     while let Some(pending) = self.pending.pop_front() {
                         if pending.socket == socket {
-                            stats.record_process(
-                                Some(ObservedProcess::from(process.clone())),
+                            stats.record_process_evidence(
+                                ObservedProcess::from(process.clone()),
                                 pending.direction,
                                 pending.bytes,
                                 pending.observed_at,
+                                Evidence::PROBE,
                             );
                         } else {
                             retained.push_back(pending);
@@ -273,11 +280,12 @@ impl PendingAttributor {
                     if pending.socket == socket
                         && let Some(process) = connection_process(&pending, &matches)
                     {
-                        stats.record_process(
-                            Some(ObservedProcess::from(process)),
+                        stats.record_process_evidence(
+                            ObservedProcess::from(process),
                             pending.direction,
                             pending.bytes,
                             pending.observed_at,
+                            Evidence::PROBE,
                         );
                         continue;
                     }
@@ -466,19 +474,28 @@ impl PendingAttributor {
             return;
         }
         self.last_generation = generation;
+        // ADR 0013 第三刀：每代刷新先落区间日志，再解析 pending。
+        if let Ok(table) = proc_table.read() {
+            self.history.update(Utc::now(), table.iter_entries());
+        }
 
         let mut retained = VecDeque::new();
-        while let Some(pending) = self.pending.pop_front() {
+        while let Some(mut pending) = self.pending.pop_front() {
             match lookup_process(proc_table, pending.socket, None, false, pending.bytes) {
-                Some(process) => {
-                    stats.record_process(
-                        Some(process),
+                Some(LookupResolved::Exclusive(process)) => {
+                    stats.record_process_evidence(
+                        process,
                         pending.direction,
                         pending.bytes,
                         pending.observed_at,
+                        Evidence::SNAPSHOT,
                     );
                 }
-                None => retained.push_back(pending),
+                Some(LookupResolved::Ambiguous(candidates)) => {
+                    merge_candidates(&mut pending.candidates, candidates);
+                    retained.push_back(pending);
+                }
+                Some(LookupResolved::Miss) | None => retained.push_back(pending),
             }
         }
         self.pending = retained;
@@ -583,7 +600,8 @@ impl PendingAttributor {
         } = observation;
         let Some(socket) = socket else {
             proc_table::record_no_local_socket(proc_table);
-            stats.record_process(None, direction, bytes, observed_at);
+            // 无本地套接字 = 系统流量（ADR 0013），不再混入未归属。
+            stats.record_system(direction, bytes, observed_at);
             return;
         };
         let Some(peer_port) = peer_port else {
@@ -591,11 +609,20 @@ impl PendingAttributor {
             return;
         };
 
-        if let Some(process) =
-            lookup_process(proc_table, socket, Some((peer_ip, peer_port)), true, bytes)
-        {
-            stats.record_process(Some(process), direction, bytes, observed_at);
-            return;
+        let mut candidates = Vec::new();
+        match lookup_process(proc_table, socket, Some((peer_ip, peer_port)), true, bytes) {
+            Some(LookupResolved::Exclusive(process)) => {
+                stats.record_process_evidence(
+                    process,
+                    direction,
+                    bytes,
+                    observed_at,
+                    Evidence::SNAPSHOT,
+                );
+                return;
+            }
+            Some(LookupResolved::Ambiguous(found)) => candidates = found,
+            Some(LookupResolved::Miss) | None => {}
         }
 
         if self.push_pending(
@@ -611,6 +638,7 @@ impl PendingAttributor {
                 direction,
                 bytes,
                 observed_at,
+                candidates,
                 pending_since: now,
             },
         ) {
@@ -646,6 +674,7 @@ impl PendingAttributor {
         {
             existing.bytes += pending.bytes;
             existing.observed_at = pending.observed_at;
+            merge_candidates(&mut existing.candidates, pending.candidates);
             return true;
         }
         if self.pending.len() == self.capacity {
@@ -656,14 +685,49 @@ impl PendingAttributor {
     }
 
     fn finalize_oldest(&mut self, stats: &mut Stats, capacity: bool) {
-        if let Some(pending) = self.pending.pop_front() {
+        if let Some(mut pending) = self.pending.pop_front() {
             let socket = pending.socket;
             if capacity {
                 self.pending_capacity_bytes += pending.bytes;
             } else {
                 self.pending_expired_bytes += pending.bytes;
             }
-            stats.record_process(None, pending.direction, pending.bytes, pending.observed_at);
+            // ADR 0013 第三刀：候选不足时先做历史追回（含 PID 启动时间硬门槛）；
+            // 唯一命中 → 独占（evidence=history），多候选 → 共享，追不回 → 未归属。
+            let mut candidates = std::mem::take(&mut pending.candidates);
+            if candidates.len() < 2 {
+                candidates = self
+                    .history
+                    .lookup_verified(pending.socket, pending.observed_at);
+            }
+            match candidates.len() {
+                0 => {
+                    stats.record_process(
+                        None,
+                        pending.direction,
+                        pending.bytes,
+                        pending.observed_at,
+                    );
+                }
+                1 => {
+                    let process = candidates.pop().expect("single candidate checked by match");
+                    stats.record_process_evidence(
+                        process,
+                        pending.direction,
+                        pending.bytes,
+                        pending.observed_at,
+                        Evidence::HISTORY,
+                    );
+                }
+                _ => {
+                    stats.record_shared(
+                        &candidates,
+                        pending.direction,
+                        pending.bytes,
+                        pending.observed_at,
+                    );
+                }
+            }
             if !self.pending.iter().any(|pending| pending.socket == socket)
                 && let Some(state) = self.probe_state.get_mut(&socket)
             {
@@ -683,13 +747,32 @@ impl From<ProbeProcess> for ObservedProcess {
     }
 }
 
+/// lookup 三态（ADR 0013）：唯一命中 / 歧义候选集 / 未命中。
+enum LookupResolved {
+    Exclusive(ObservedProcess),
+    Ambiguous(Vec<ObservedProcess>),
+    Miss,
+}
+
+/// 按 (pid, path) 去重合并歧义候选。
+fn merge_candidates(current: &mut Vec<ObservedProcess>, extra: Vec<ObservedProcess>) {
+    for candidate in extra {
+        if !current
+            .iter()
+            .any(|existing| existing.pid == candidate.pid && existing.path == candidate.path)
+        {
+            current.push(candidate);
+        }
+    }
+}
+
 fn lookup_process(
     proc_table: &SharedProcTable,
     socket: LocalSocket,
     peer: Option<(IpAddr, u16)>,
     request_refresh: bool,
     bytes: u64,
-) -> Option<ObservedProcess> {
+) -> Option<LookupResolved> {
     let table = proc_table.read().ok()?;
     match table.lookup_outcome(socket.ip, socket.port, socket.protocol) {
         LookupOutcome::Hit { process, v4_mapped } => {
@@ -697,11 +780,36 @@ fn lookup_process(
             if v4_mapped {
                 table.record_v4_mapped_lookup_hit();
             }
-            Some(ObservedProcess {
+            Some(LookupResolved::Exclusive(ObservedProcess {
                 pid: process.pid,
                 name: process.name.clone(),
                 path: process.path.clone(),
-            })
+            }))
+        }
+        LookupOutcome::Ambiguous { processes } => {
+            // 先把借用收紧为 owned，再 drop(table)（candidates 借用自 table）。
+            let candidates = processes
+                .iter()
+                .map(|process| ObservedProcess {
+                    pid: process.pid,
+                    name: process.name.clone(),
+                    path: process.path.clone(),
+                })
+                .collect::<Vec<_>>();
+            table.record_lookup_miss_bytes(LookupMissReason::Ambiguous, bytes);
+            if let Some((peer_ip, peer_port)) = peer {
+                table.record_lookup_miss_sample(
+                    LookupMissReason::Ambiguous,
+                    socket,
+                    peer_ip,
+                    peer_port,
+                );
+            }
+            drop(table);
+            if request_refresh {
+                proc_table::request_refresh(proc_table);
+            }
+            Some(LookupResolved::Ambiguous(candidates))
         }
         LookupOutcome::Miss(reason) => {
             table.record_lookup_miss_bytes(reason, bytes);
@@ -712,7 +820,7 @@ fn lookup_process(
             if request_refresh {
                 proc_table::request_refresh(proc_table);
             }
-            None
+            Some(LookupResolved::Miss)
         }
     }
 }
@@ -738,6 +846,7 @@ mod tests {
     use super::*;
     use crate::capture::TransportProtocol;
     use crate::proc_table::ProcTable;
+    use crate::stats::ProcessSnapshot;
 
     fn socket_flow(local_ip: IpAddr, local_port: u16, peer_port: u16, bytes: u64) -> Flow {
         Flow {
@@ -880,6 +989,7 @@ mod tests {
         attributor.probe = Some(probe);
         for (peer, bytes) in [(first_peer, 40), (second_peer, 60)] {
             attributor.pending.push_back(PendingAttribution {
+                candidates: Vec::new(),
                 connection: ConnectionKey {
                     local_socket: socket,
                     peer_ip: peer.ip(),
@@ -1004,8 +1114,8 @@ mod tests {
 
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.out_bytes, 40);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.snapshot().pending_expired_bytes, 40);
     }
 
@@ -1044,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_same_port_is_unattributed_when_pending_expires() {
+    fn ambiguous_same_port_becomes_shared_when_pending_expires() {
         let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
         let mut table = ProcTable::default();
         for (pid, name) in [(7, "server-a"), (8, "server-b")] {
@@ -1076,8 +1186,211 @@ mod tests {
         );
 
         let snapshot = stats.snapshot(10);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        // 终局歧义 → 共享归属：两个候选各全额计入 40 B（inclusive 投影），
+        // 记录层 shared 只计 40 B 一次，未归属为 0（ADR 0013）。
+        assert_eq!(snapshot.processes.len(), 2);
+        for process in snapshot.processes.iter() {
+            assert_eq!(process.attribution.shared.sent, 40);
+            assert_eq!(process.attribution.exclusive.sent, 0);
+            assert_eq!(process.sent, 40);
+            assert!(process.is_mixed());
+            assert_eq!(process.attribution.shared_with.len(), 1);
+        }
+        let summary = snapshot.attribution;
+        assert_eq!(summary.shared.sent, 40);
+        assert_eq!(summary.unattributed.total(), 0);
+        assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
+    }
+
+    /// ADR 0013 第三刀：上一代曾观测到的 socket 消失后，pending 终结时由
+    /// 区间日志追回，独占归属且 evidence = history。
+    #[test]
+    fn vanished_socket_is_recovered_from_history() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        // 用当前测试进程的 PID：存活且启动早于流观测时间，过启动时间硬门槛。
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            std::process::id(),
+            Arc::from("flowlens-test"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        // 上一代灌入区间日志，随后 socket 从当前代表中消失。
+        attributor
+            .history
+            .update(Utc::now(), proc_table.read().unwrap().iter_entries());
+        *proc_table.write().unwrap() = ProcTable::default();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            started,
+            Utc::now(),
+        );
+        attributor.advance(
+            &mut stats,
+            &proc_table,
+            started + PENDING_ATTRIBUTION_WINDOW,
+        );
+
+        let snapshot = stats.snapshot(10);
+        assert_eq!(snapshot.processes.len(), 1);
+        let process = &snapshot.processes[0];
+        assert_eq!(process.pid(), Some(std::process::id()));
+        assert_eq!(process.attribution.exclusive.sent, 40);
+        assert_eq!(process.attribution.evidence.labels(), vec!["history"]);
+        assert_eq!(snapshot.attribution.unattributed.total(), 0);
+        assert_eq!(
+            snapshot.attribution.total(),
+            snapshot.in_bytes + snapshot.out_bytes
+        );
+    }
+
+    /// ADR 0013 硬门槛：区间命中的 PID 无法验证启动时间 → 降级未归属，绝不归属。
+    #[test]
+    fn history_candidate_with_unverifiable_pid_is_refused() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            u32::MAX,
+            Arc::from("ghost"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        attributor
+            .history
+            .update(Utc::now(), proc_table.read().unwrap().iter_entries());
+        *proc_table.write().unwrap() = ProcTable::default();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            started,
+            Utc::now(),
+        );
+        attributor.advance(
+            &mut stats,
+            &proc_table,
+            started + PENDING_ATTRIBUTION_WINDOW,
+        );
+
+        let snapshot = stats.snapshot(10);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
+    }
+
+    /// ADR 0013 记录层守恒：总计 = 独占 + 共享 + 系统 + 未归属（非环回流量，
+    /// 每条 flow 恰好一个 endpoint 记录，通道总和不重不漏）。
+    #[test]
+    fn conservation_identity_holds_across_all_channels() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            8443,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("solo"),
+            None,
+        );
+        for (pid, name) in [(9, "alpha"), (10, "beta")] {
+            table.insert_for_test(
+                local_ip,
+                9443,
+                TransportProtocol::Tcp,
+                pid,
+                Arc::from(name),
+                None,
+            );
+        }
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        // 独占：唯一命中。
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 8443, 5001, 100),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        // 共享：歧义候选，窗口耗尽后共享归属。
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 9443, 5002, 40),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        // 系统：无本地套接字（ICMP 类）。
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)),
+                peer_port: None,
+                bytes: 10,
+                local_socket: None,
+                peer_local_socket: None,
+                domain: None,
+            },
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        // 未归属：无候选且超时。
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 10443, 5003, 5),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        attributor.advance(
+            &mut stats,
+            &proc_table,
+            started + PENDING_ATTRIBUTION_WINDOW,
+        );
+
+        let snapshot = stats.snapshot(10);
+        let summary = snapshot.attribution;
+        assert_eq!(summary.exclusive.sent, 100);
+        assert_eq!(summary.shared.sent, 40);
+        assert_eq!(summary.system.sent, 10);
+        assert_eq!(summary.unattributed.sent, 5);
+        // 守恒：四通道记录层总和 == 接口字节（无环回双 endpoint）。
+        assert_eq!(summary.total(), 155);
+        assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
+        // 共享字节投影：两个候选各 +40，但记录层只计 40 一次。
+        let shared_procs: Vec<&ProcessSnapshot> = snapshot
+            .processes
+            .iter()
+            .filter(|process| process.is_mixed())
+            .collect();
+        assert_eq!(shared_procs.len(), 2);
+        assert!(
+            shared_procs
+                .iter()
+                .all(|process| process.attribution.shared.sent == 40)
+        );
     }
 
     #[test]
@@ -1113,8 +1426,8 @@ mod tests {
         );
 
         let snapshot = stats.snapshot(10);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
     }
 
     #[test]
@@ -1142,7 +1455,7 @@ mod tests {
 
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.out_bytes, 100);
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.pending_bytes(), 60);
         assert_eq!(attributor.snapshot().pending_capacity_bytes, 40);
         attributor.advance(
@@ -1150,7 +1463,7 @@ mod tests {
             &proc_table,
             started + Duration::from_secs(1) + Duration::from_millis(1),
         );
-        assert_eq!(stats.snapshot(10).processes[0].sent, 100);
+        assert_eq!(stats.snapshot(10).attribution.unattributed.sent, 100);
     }
 
     #[test]
@@ -1207,8 +1520,8 @@ mod tests {
 
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.out_bytes, 100);
-        assert!(snapshot.processes[0].is_unattributed());
-        assert_eq!(snapshot.processes[0].sent, 40);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.pending_bytes(), 60);
     }
 }

@@ -42,7 +42,7 @@ struct IpBucket {
     bytes: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct IpWindowState {
     buckets: [IpBucket; IP_WINDOW_BUCKETS],
     last_bucket_epoch: i64,
@@ -124,6 +124,30 @@ struct IpDiagnosticsCounters {
     evictions_observation: u64,
 }
 
+/// 双向滚动窗口（ADR 0013 第二刀）：复用 IP 维度 epoch bucket 机制，
+/// 60s 桶 × `IP_WINDOW_BUCKETS` = 5 分钟滚动窗口，按方向拆分。
+#[derive(Clone, Copy, Debug, Default)]
+struct DirectionalWindows {
+    inbound: IpWindowState,
+    outbound: IpWindowState,
+}
+
+impl DirectionalWindows {
+    fn record(&mut self, direction: Direction, epoch: i64, bytes: u64) {
+        match direction {
+            Direction::Inbound => self.inbound.record(epoch, bytes),
+            Direction::Outbound => self.outbound.record(epoch, bytes),
+        }
+    }
+
+    fn window(&self, epoch: i64) -> ProcTraffic {
+        ProcTraffic {
+            recv: self.inbound.window_bytes(epoch),
+            sent: self.outbound.window_bytes(epoch),
+        }
+    }
+}
+
 /// Proc traffic with recv/sent breakdown.
 #[derive(Default, Clone, Copy)]
 pub struct ProcTraffic {
@@ -131,6 +155,72 @@ pub struct ProcTraffic {
     pub recv: u64,
     /// Sent (outbound) bytes.
     pub sent: u64,
+}
+
+impl ProcTraffic {
+    pub fn total(&self) -> u64 {
+        self.recv.saturating_add(self.sent)
+    }
+}
+
+/// 归属通道汇总（记录层口径，ADR 0013）：每字节恰好计入一个通道一次。
+/// 守恒等式：total = exclusive + shared + system + unattributed（已结算，不含在途 pending）。
+#[derive(Clone, Copy, Default)]
+pub struct AttributionSummary {
+    pub exclusive: ProcTraffic,
+    pub shared: ProcTraffic,
+    pub system: ProcTraffic,
+    pub unattributed: ProcTraffic,
+}
+
+impl AttributionSummary {
+    pub fn total(&self) -> u64 {
+        self.exclusive
+            .total()
+            .saturating_add(self.shared.total())
+            .saturating_add(self.system.total())
+            .saturating_add(self.unattributed.total())
+    }
+}
+
+/// 进程归属构成（ADR 0013）：exclusive 与 shared 双通道；进程行的 recv/sent 是两者之和（inclusive）。
+#[derive(Clone, Default)]
+pub struct ProcessAttribution {
+    pub exclusive: ProcTraffic,
+    pub shared: ProcTraffic,
+    /// 共享伙伴的进程显示名。
+    pub shared_with: Vec<Arc<str>>,
+    /// 独占通道的证据来源集合（ADR 0013 第三刀）；共享通道证据不单独追踪。
+    pub evidence: Evidence,
+}
+
+/// 归属证据来源（ADR 0013）：位标志，进程维度按出现顺序累积。
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Evidence(u8);
+
+impl Evidence {
+    pub(crate) const SNAPSHOT: Evidence = Evidence(1 << 0);
+    pub(crate) const PROBE: Evidence = Evidence(1 << 1);
+    pub(crate) const HISTORY: Evidence = Evidence(1 << 2);
+
+    pub(crate) fn merge(self, other: Evidence) -> Evidence {
+        Evidence(self.0 | other.0)
+    }
+
+    /// JSON `attribution.evidence` 的输出值。
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        if self.0 & Self::SNAPSHOT.0 != 0 {
+            labels.push("snapshot");
+        }
+        if self.0 & Self::PROBE.0 != 0 {
+            labels.push("probe");
+        }
+        if self.0 & Self::HISTORY.0 != 0 {
+            labels.push("history");
+        }
+        labels
+    }
 }
 
 #[derive(Clone)]
@@ -152,6 +242,10 @@ pub struct TrafficSnapshot {
     pub out_bytes: u64,
     pub process_data_fresh: bool,
     pub pending_attribution_bytes: u64,
+    /// 记录层守恒汇总（ADR 0013）：总计 = 独占 + 共享 + 系统 + 未归属。
+    pub attribution: AttributionSummary,
+    /// 守恒汇总的窗口口径（5 分钟滚动，ADR 0013 第二刀）。
+    pub attribution_window: AttributionSummary,
     pub processes: Arc<[ProcessSnapshot]>,
     pub inbound_ips: Arc<[IpSnapshot]>,
     pub outbound_ips: Arc<[IpSnapshot]>,
@@ -246,8 +340,12 @@ pub struct DiagnosticsMissSample {
 #[derive(Clone)]
 pub struct ProcessSnapshot {
     identity: ProcessIdentity,
+    /// Inclusive 口径总量（exclusive + shared），topN 排序键（ADR 0013）。
     pub recv: u64,
     pub sent: u64,
+    pub attribution: ProcessAttribution,
+    /// 5 分钟滚动窗口内的 inclusive 字节（ADR 0013 第二刀）；表格主口径。
+    pub window: ProcTraffic,
     last_seen: DateTime<Utc>,
 }
 
@@ -258,10 +356,10 @@ enum ProcessIdentity {
         name: Option<Arc<str>>,
         path: Option<Arc<str>>,
     },
-    Unattributed,
 }
 
 impl ProcessSnapshot {
+    #[cfg(test)]
     pub(crate) fn attributed(
         pid: u32,
         name: Option<Arc<str>>,
@@ -272,17 +370,39 @@ impl ProcessSnapshot {
     ) -> Self {
         Self {
             identity: ProcessIdentity::Attributed { pid, name, path },
+            attribution: ProcessAttribution {
+                exclusive: ProcTraffic { recv, sent },
+                shared: ProcTraffic::default(),
+                shared_with: Vec::new(),
+                evidence: Evidence::default(),
+            },
+            window: ProcTraffic::default(),
             recv,
             sent,
             last_seen,
         }
     }
 
-    pub(crate) fn unattributed(recv: u64, sent: u64, last_seen: DateTime<Utc>) -> Self {
+    pub(crate) fn attributed_with_shared(
+        pid: u32,
+        name: Option<Arc<str>>,
+        path: Option<Arc<str>>,
+        last_seen: DateTime<Utc>,
+        exclusive: ProcTraffic,
+        shared: ProcTraffic,
+        shared_with: Vec<Arc<str>>,
+    ) -> Self {
         Self {
-            identity: ProcessIdentity::Unattributed,
-            recv,
-            sent,
+            identity: ProcessIdentity::Attributed { pid, name, path },
+            recv: exclusive.recv + shared.recv,
+            sent: exclusive.sent + shared.sent,
+            attribution: ProcessAttribution {
+                exclusive,
+                shared,
+                shared_with,
+                evidence: Evidence::default(),
+            },
+            window: ProcTraffic::default(),
             last_seen,
         }
     }
@@ -290,36 +410,33 @@ impl ProcessSnapshot {
     pub(crate) fn pid(&self) -> Option<u32> {
         match self.identity {
             ProcessIdentity::Attributed { pid, .. } => Some(pid),
-            ProcessIdentity::Unattributed => None,
         }
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
         match &self.identity {
             ProcessIdentity::Attributed { name, .. } => name.as_deref(),
-            ProcessIdentity::Unattributed => None,
         }
     }
 
     pub(crate) fn path(&self) -> Option<&str> {
         match &self.identity {
             ProcessIdentity::Attributed { path, .. } => path.as_deref(),
-            ProcessIdentity::Unattributed => None,
         }
+    }
+
+    /// 列表 Attr 列语义（ADR 0013）：false = E（全部独占），true = M（含共享字节）。
+    pub(crate) fn is_mixed(&self) -> bool {
+        self.attribution.shared.recv > 0 || self.attribution.shared.sent > 0
     }
 
     pub(crate) fn last_seen(&self) -> DateTime<Utc> {
         self.last_seen
     }
 
-    pub(crate) fn is_unattributed(&self) -> bool {
-        matches!(self.identity, ProcessIdentity::Unattributed)
-    }
-
     pub(crate) fn display_name(&self) -> &str {
         match &self.identity {
             ProcessIdentity::Attributed { name, .. } => name.as_deref().unwrap_or("?"),
-            ProcessIdentity::Unattributed => "<unattributed traffic>",
         }
     }
 
@@ -329,7 +446,6 @@ impl ProcessSnapshot {
 
     pub(crate) fn same_identity_as(&self, other: &Self) -> bool {
         match (&self.identity, &other.identity) {
-            (ProcessIdentity::Unattributed, ProcessIdentity::Unattributed) => true,
             (
                 ProcessIdentity::Attributed {
                     pid: left_pid,
@@ -342,7 +458,6 @@ impl ProcessSnapshot {
                     ..
                 },
             ) => left_pid == right_pid && left_path == right_path,
-            _ => false,
         }
     }
 }
@@ -431,6 +546,25 @@ pub struct Stats {
     proc_last_seen: HashMap<ProcessKey, DateTime<Utc>>,
     unattributed: ProcTraffic,
     unattributed_last_seen: Option<DateTime<Utc>>,
+    /// 共享归属通道（ADR 0013）：per-process inclusive 投影；记录层总量在 `shared_total`。
+    shared_by_proc: HashMap<ProcessKey, ProcTraffic>,
+    /// 记录层共享字节总量（每字节只计一次），守恒等式使用。
+    shared_total: ProcTraffic,
+    /// 共享伙伴（进程统计身份），详情页 shared_with 数据来源。
+    shared_partners: HashMap<ProcessKey, Vec<ProcessKey>>,
+    /// 独占通道证据来源（ADR 0013 第三刀）。
+    evidence_by_proc: HashMap<ProcessKey, Evidence>,
+    /// 系统流量（无本地套接字，ADR 0013），独立于未归属。
+    system: ProcTraffic,
+    /// 进程维度滚动窗口（ADR 0013 第二刀）：per-process inclusive 字节。
+    proc_windows: HashMap<ProcessKey, DirectionalWindows>,
+    /// 记录层四通道滚动窗口（守恒摘要的窗口口径）。
+    exclusive_window: DirectionalWindows,
+    shared_window: DirectionalWindows,
+    system_window: DirectionalWindows,
+    unattributed_window: DirectionalWindows,
+    /// 进程窗口参考 epoch（最近一次记录的 bucket epoch）。
+    proc_window_epoch: Option<i64>,
     proc_names: HashMap<ProcessKey, Arc<str>>,
     by_domain: HashMap<Arc<str>, DomainTraffic>,
     domain_last_seen: HashMap<Arc<str>, DateTime<Utc>>,
@@ -565,6 +699,12 @@ impl Stats {
             pid: process.pid,
             path: process.path,
         };
+        let epoch = self.advance_proc_window_epoch(observed_at);
+        self.proc_windows
+            .entry(key.clone())
+            .or_default()
+            .record(direction, epoch, bytes);
+        self.exclusive_window.record(direction, epoch, bytes);
         let entry = self.by_proc.entry(key.clone()).or_default();
         match direction {
             Direction::Inbound => entry.recv += bytes,
@@ -644,6 +784,29 @@ impl Stats {
         self.add_process_or_unattributed(process, direction, bytes, observed_at);
     }
 
+    /// ADR 0013 第三刀：带证据来源的归属记录（snapshot / probe / history）。
+    pub(crate) fn record_process_evidence(
+        &mut self,
+        process: ObservedProcess,
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+        evidence: Evidence,
+    ) {
+        let key = ProcessKey {
+            pid: process.pid,
+            path: process.path.clone(),
+        };
+        let merged = self
+            .evidence_by_proc
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+            .merge(evidence);
+        self.evidence_by_proc.insert(key, merged);
+        self.record_process(Some(process), direction, bytes, observed_at);
+    }
+
     /// 按 spec Q8 / Q10：已识别连接（domain=Some）的双向流量按方向累计到该域名，
     /// 并更新该域名的 last_seen；未识别（domain=None）不进维度。
     ///
@@ -679,6 +842,8 @@ impl Stats {
                 self.add_proc(process, direction, bytes, observed_at);
             }
             None => {
+                let epoch = self.advance_proc_window_epoch(observed_at);
+                self.unattributed_window.record(direction, epoch, bytes);
                 match direction {
                     Direction::Inbound => self.unattributed.recv += bytes,
                     Direction::Outbound => self.unattributed.sent += bytes,
@@ -688,32 +853,157 @@ impl Stats {
         }
     }
 
+    /// ADR 0013 共享归属：同一笔字节全额计入每个候选进程（inclusive 投影），
+    /// 记录层只在 shared_total 计一次；候选不足 2 个不构成共享，退回未归属。
+    pub(crate) fn record_shared(
+        &mut self,
+        candidates: &[ObservedProcess],
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+    ) {
+        if candidates.len() < 2 {
+            self.record_process(None, direction, bytes, observed_at);
+            return;
+        }
+        let epoch = self.advance_proc_window_epoch(observed_at);
+        self.shared_window.record(direction, epoch, bytes);
+        match direction {
+            Direction::Inbound => self.shared_total.recv += bytes,
+            Direction::Outbound => self.shared_total.sent += bytes,
+        }
+        let keys: Vec<ProcessKey> = candidates
+            .iter()
+            .map(|candidate| ProcessKey {
+                pid: candidate.pid,
+                path: candidate.path.clone(),
+            })
+            .collect();
+        for (candidate, key) in candidates.iter().zip(keys.iter()) {
+            self.proc_windows
+                .entry(key.clone())
+                .or_default()
+                .record(direction, epoch, bytes);
+            let entry = self.shared_by_proc.entry(key.clone()).or_default();
+            match direction {
+                Direction::Inbound => entry.recv += bytes,
+                Direction::Outbound => entry.sent += bytes,
+            }
+            if let Some(name) = candidate.name.clone() {
+                self.proc_names.entry(key.clone()).or_insert(name);
+            }
+            let last_seen = self
+                .proc_last_seen
+                .entry(key.clone())
+                .or_insert(observed_at);
+            if *last_seen < observed_at {
+                *last_seen = observed_at;
+            }
+            let partners = self.shared_partners.entry(key.clone()).or_default();
+            for other in &keys {
+                if other != key && !partners.contains(other) {
+                    partners.push(other.clone());
+                }
+            }
+        }
+    }
+
+    /// ADR 0013 系统流量：无本地套接字的协议流量（ICMP 等），不参与进程归属。
+    pub(crate) fn record_system(
+        &mut self,
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+    ) {
+        let epoch = self.advance_proc_window_epoch(observed_at);
+        self.system_window.record(direction, epoch, bytes);
+        match direction {
+            Direction::Inbound => self.system.recv += bytes,
+            Direction::Outbound => self.system.sent += bytes,
+        }
+    }
+
+    /// 推进进程窗口参考 epoch（单调取最近），返回该 epoch 供各窗口记账。
+    fn advance_proc_window_epoch(&mut self, observed_at: DateTime<Utc>) -> i64 {
+        let epoch = bucket_epoch(observed_at);
+        self.proc_window_epoch = Some(self.proc_window_epoch.map_or(epoch, |prev| prev.max(epoch)));
+        epoch
+    }
+
+    /// 守恒汇总的窗口口径（5 分钟滚动，ADR 0013 第二刀）。
+    pub(crate) fn attribution_window_summary(&self) -> AttributionSummary {
+        let epoch = self.proc_window_epoch.unwrap_or(0);
+        AttributionSummary {
+            exclusive: self.exclusive_window.window(epoch),
+            shared: self.shared_window.window(epoch),
+            system: self.system_window.window(epoch),
+            unattributed: self.unattributed_window.window(epoch),
+        }
+    }
+
+    /// 记录层守恒汇总：总计 = 独占 + 共享 + 系统 + 未归属（ADR 0013）。
+    pub(crate) fn attribution_summary(&self) -> AttributionSummary {
+        let mut exclusive = ProcTraffic::default();
+        for traffic in self.by_proc.values() {
+            exclusive.recv += traffic.recv;
+            exclusive.sent += traffic.sent;
+        }
+        AttributionSummary {
+            exclusive,
+            shared: self.shared_total,
+            system: self.system,
+            unattributed: self.unattributed,
+        }
+    }
+
     pub fn snapshot(&self, top_n: usize) -> TrafficSnapshot {
-        let mut processes = self
+        let proc_epoch = self.proc_window_epoch.unwrap_or(0);
+        let processes = self
             .top_procs(top_n)
             .into_iter()
             .map(|(key, traffic)| {
                 let last_seen = self.proc_last_seen[&key];
-                ProcessSnapshot::attributed(
+                let exclusive = self.by_proc.get(&key).copied().unwrap_or_default();
+                let shared = self.shared_by_proc.get(&key).copied().unwrap_or_default();
+                debug_assert_eq!(traffic.recv, exclusive.recv + shared.recv);
+                debug_assert_eq!(traffic.sent, exclusive.sent + shared.sent);
+                let shared_with = self
+                    .shared_partners
+                    .get(&key)
+                    .map(|partners| {
+                        partners
+                            .iter()
+                            .map(|partner| {
+                                self.proc_names
+                                    .get(partner)
+                                    .cloned()
+                                    .unwrap_or_else(|| Arc::from("?"))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let evidence = self.evidence_by_proc.get(&key).copied();
+                let window = self
+                    .proc_windows
+                    .get(&key)
+                    .map_or_else(ProcTraffic::default, |windows| windows.window(proc_epoch));
+                let mut process = ProcessSnapshot::attributed_with_shared(
                     key.pid,
                     self.proc_names.get(&key).cloned(),
                     key.path,
                     last_seen,
-                    traffic.recv,
-                    traffic.sent,
-                )
+                    exclusive,
+                    shared,
+                    shared_with,
+                );
+                if let Some(evidence) = evidence {
+                    process.attribution.evidence = evidence;
+                }
+                process.window = window;
+                process
             })
             .collect::<Vec<_>>();
-        if self.unattributed.recv > 0 || self.unattributed.sent > 0 {
-            processes.push(ProcessSnapshot::unattributed(
-                self.unattributed.recv,
-                self.unattributed.sent,
-                self.unattributed_last_seen
-                    .expect("unattributed traffic has an observation time"),
-            ));
-        }
-        processes.sort_unstable_by_key(|process| std::cmp::Reverse(process.total()));
-        processes.truncate(top_n);
+        // top_procs 已按窗口口径排序并截断（ADR 0013 第二刀），此处不再按累计重排。
         let inbound_ips = self
             .top_in(top_n)
             .into_iter()
@@ -737,6 +1027,8 @@ impl Stats {
             .into();
 
         TrafficSnapshot {
+            attribution: self.attribution_summary(),
+            attribution_window: self.attribution_window_summary(),
             in_bytes: self.in_bytes,
             out_bytes: self.out_bytes,
             process_data_fresh: false,
@@ -758,12 +1050,24 @@ impl Stats {
     }
 
     fn top_procs(&self, n: usize) -> Vec<(ProcessKey, ProcTraffic)> {
-        let mut entries: Vec<(ProcessKey, ProcTraffic)> = self
-            .by_proc
-            .iter()
-            .map(|(key, traffic)| (key.clone(), *traffic))
-            .collect();
-        entries.sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.recv + t.sent));
+        // Inclusive 口径（独占 + 共享）参与排序（ADR 0013）。
+        let mut combined: HashMap<ProcessKey, ProcTraffic> = self.by_proc.clone();
+        for (key, shared) in &self.shared_by_proc {
+            let entry = combined.entry(key.clone()).or_default();
+            entry.recv += shared.recv;
+            entry.sent += shared.sent;
+        }
+        let mut entries: Vec<(ProcessKey, ProcTraffic)> = combined.into_iter().collect();
+        // 窗口口径优先（ADR 0013 第二刀）：活跃流量排前，累计字节只作同窗决胜，
+        // 消除历史大户对 top-N 的长期占位。
+        let epoch = self.proc_window_epoch.unwrap_or(0);
+        entries.sort_unstable_by_key(|(key, lifetime)| {
+            let window = self
+                .proc_windows
+                .get(key)
+                .map_or(0u64, |windows| windows.window(epoch).total());
+            std::cmp::Reverse((window, lifetime.recv + lifetime.sent))
+        });
         entries.truncate(n);
         entries
     }
@@ -1059,28 +1363,23 @@ mod tests {
     use crate::capture::Flow;
 
     #[test]
-    fn unattributed_flow_appears_in_snapshot() {
+    fn unattributed_flow_appears_in_attribution_summary() {
         let mut stats = Stats::default();
-        let observed_at = "2026-07-15T07:59:00Z".parse().unwrap();
-
         stats.record_flow_at(
             flow(Direction::Inbound, [10, 0, 0, 1], 40),
             None,
-            observed_at,
+            "2026-07-15T07:59:00Z".parse().unwrap(),
         );
         let snapshot = stats.snapshot(10);
 
-        assert_eq!(snapshot.processes.len(), 1);
-        assert_eq!(snapshot.processes[0].pid(), None);
-        assert!(snapshot.processes[0].name().is_none());
-        assert!(snapshot.processes[0].path().is_none());
-        assert_eq!(snapshot.processes[0].last_seen(), observed_at);
-        assert_eq!(snapshot.processes[0].recv, 40);
-        assert_eq!(snapshot.processes[0].sent, 0);
+        // ADR 0013：未归属不再作为进程行，只进守恒摘要。
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.recv, 40);
+        assert_eq!(snapshot.attribution.unattributed.sent, 0);
     }
 
     #[test]
-    fn unattributed_flow_competes_for_top_n() {
+    fn unattributed_flow_does_not_compete_for_top_n() {
         let mut stats = Stats::default();
         stats.record_flow(
             flow(Direction::Inbound, [10, 0, 0, 1], 10),
@@ -1094,9 +1393,11 @@ mod tests {
 
         let snapshot = stats.snapshot(1);
 
+        // ADR 0013：未归属移出排名，topN 只含已归属进程。
         assert_eq!(snapshot.processes.len(), 1);
-        assert_eq!(snapshot.processes[0].pid(), None);
-        assert_eq!(snapshot.processes[0].recv, 100);
+        assert_eq!(snapshot.processes[0].pid(), Some(7));
+        assert_eq!(snapshot.processes[0].recv, 10);
+        assert_eq!(snapshot.attribution.unattributed.recv, 100);
     }
 
     #[test]
@@ -1412,13 +1713,93 @@ mod tests {
         stats.record_flow(flow(Direction::Outbound, [10, 0, 0, 4], 20), None);
 
         let snapshot = stats.snapshot(10);
-        let process_in: u64 = snapshot.processes.iter().map(|process| process.recv).sum();
-        let process_out: u64 = snapshot.processes.iter().map(|process| process.sent).sum();
+        let summary = snapshot.attribution;
 
+        // ADR 0013：通道划分取代"进程行求和=接口字节"的旧不变量。
         assert_eq!(snapshot.in_bytes, 70);
         assert_eq!(snapshot.out_bytes, 30);
-        assert_eq!(process_in, snapshot.in_bytes);
-        assert_eq!(process_out, snapshot.out_bytes);
+        assert_eq!(summary.exclusive.recv, 40);
+        assert_eq!(summary.exclusive.sent, 10);
+        assert_eq!(summary.unattributed.recv, 30);
+        assert_eq!(summary.unattributed.sent, 20);
+        assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
+    }
+
+    /// ADR 0013 第二刀：top-N 按窗口口径排序，历史大户不再长期占位。
+    #[test]
+    fn top_n_ranks_by_window_before_lifetime() {
+        let mut stats = Stats::default();
+        // 旧大户 1000 B（窗口外），新进程 10 B（窗口内）。
+        stats.record_flow_at(
+            flow(Direction::Outbound, [10, 0, 0, 1], 1000),
+            Some(ObservedProcess {
+                pid: 7,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+        );
+        stats.record_flow_at(
+            flow(Direction::Outbound, [10, 0, 0, 2], 10),
+            Some(ObservedProcess {
+                pid: 8,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:09:00Z".parse().unwrap(),
+        );
+
+        let snapshot = stats.snapshot(10);
+        assert_eq!(snapshot.processes[0].pid(), Some(8));
+        assert_eq!(snapshot.processes[0].window.sent, 10);
+        assert_eq!(snapshot.processes[1].pid(), Some(7));
+        // 1000 B 已滑出 5 分钟窗口，只保留累计值。
+        assert_eq!(snapshot.processes[1].window.total(), 0);
+        assert_eq!(snapshot.processes[1].sent, 1000);
+    }
+
+    /// ADR 0013 第二刀：窗口口径守恒——窗口内四通道之和恰为窗口内记录字节，
+    /// 滑出窗口后衰减为 0，累计口径不受影响。
+    #[test]
+    fn attribution_window_summary_tracks_recent_bytes_only() {
+        let mut stats = Stats::default();
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 1], 100),
+            None,
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+        );
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 2], 40),
+            Some(ObservedProcess {
+                pid: 7,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:04:00Z".parse().unwrap(),
+        );
+        let snapshot = stats.snapshot(10);
+        let window = snapshot.attribution_window;
+        assert_eq!(window.unattributed.recv, 100);
+        assert_eq!(window.exclusive.recv, 40);
+        assert_eq!(window.total(), 140);
+        assert_eq!(snapshot.attribution.unattributed.recv, 100);
+        assert_eq!(snapshot.attribution.exclusive.recv, 40);
+
+        // 推进到 08:10：前两笔全部滑出窗口。
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 3], 1),
+            Some(ObservedProcess {
+                pid: 9,
+                name: None,
+                path: None,
+            }),
+            "2026-07-15T08:10:00Z".parse().unwrap(),
+        );
+        let snapshot = stats.snapshot(10);
+        let window = snapshot.attribution_window;
+        assert_eq!(window.total(), 1);
+        assert_eq!(window.unattributed.recv, 0);
+        assert_eq!(window.exclusive.recv, 1);
     }
 
     #[test]

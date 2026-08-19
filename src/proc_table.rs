@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::capture::{LocalSocket, TransportProtocol};
 
-type SocketKey = (IpAddr, u16, TransportProtocol);
+pub(crate) type SocketKey = (IpAddr, u16, TransportProtocol);
 const LOOKUP_MISS_SAMPLE_LIMIT: usize = 8;
 
 /// Process association table rebuilt periodically by a background thread.
@@ -116,6 +116,10 @@ pub(crate) enum LookupOutcome<'a> {
         process: &'a ProcInfo,
         v4_mapped: bool,
     },
+    /// 同一 (ip, port, protocol) 存在多个候选进程；候选集供共享归属使用（ADR 0013）。
+    Ambiguous {
+        processes: Vec<&'a ProcInfo>,
+    },
     Miss(LookupMissReason),
 }
 
@@ -143,6 +147,13 @@ impl ProcTable {
         self.generation
     }
 
+    /// 历史区间日志的数据源（ADR 0013 第三刀）：当前代全部 socket→PID 映射。
+    pub(crate) fn iter_entries(&self) -> impl Iterator<Item = (SocketKey, &ProcInfo)> {
+        self.entries
+            .iter()
+            .flat_map(|(socket, by_pid)| by_pid.values().map(move |info| (*socket, info)))
+    }
+
     #[cfg(test)]
     fn lookup_at(
         &self,
@@ -153,7 +164,7 @@ impl ProcTable {
     ) -> Option<&ProcInfo> {
         match self.lookup_outcome_at(ip, port, protocol, now) {
             LookupOutcome::Hit { process, .. } => Some(process),
-            LookupOutcome::Miss(_) => None,
+            LookupOutcome::Ambiguous { .. } | LookupOutcome::Miss(_) => None,
         }
     }
 
@@ -191,7 +202,9 @@ impl ProcTable {
             return LookupOutcome::Miss(LookupMissReason::NoCandidate);
         };
         if candidates.len() != 1 {
-            return LookupOutcome::Miss(LookupMissReason::Ambiguous);
+            return LookupOutcome::Ambiguous {
+                processes: candidates.values().collect(),
+            };
         }
         let process = candidates
             .values()
@@ -1103,6 +1116,7 @@ mod tests {
                 assert_eq!(process.pid, 2027468);
                 assert!(v4_mapped);
             }
+            LookupOutcome::Ambiguous { .. } => panic!("expected hit, got ambiguous"),
             LookupOutcome::Miss(reason) => panic!("expected hit, got {reason:?}"),
         }
         table.record_lookup_hit();
@@ -1123,6 +1137,7 @@ mod tests {
 
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
             LookupOutcome::Miss(reason) => table.record_lookup_miss_bytes(reason, 10),
+            LookupOutcome::Ambiguous { .. } => panic!("empty table should not be ambiguous"),
             LookupOutcome::Hit { .. } => panic!("empty table should not match"),
         }
 
@@ -1137,12 +1152,19 @@ mod tests {
             )
             .unwrap();
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
+            // 歧义现在是独立 variant（ADR 0013），计数口径与 attribution.rs 一致。
+            LookupOutcome::Ambiguous { .. } => {
+                table.record_lookup_miss_bytes(LookupMissReason::Ambiguous, 20)
+            }
             LookupOutcome::Miss(reason) => table.record_lookup_miss_bytes(reason, 20),
             LookupOutcome::Hit { .. } => panic!("ambiguous table should not match"),
         }
 
         table.expire_for_test();
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
+            LookupOutcome::Ambiguous { .. } => {
+                panic!("expired table should be stale, not ambiguous")
+            }
             LookupOutcome::Miss(reason) => table.record_lookup_miss_bytes(reason, 30),
             LookupOutcome::Hit { .. } => panic!("stale table should not match"),
         }
