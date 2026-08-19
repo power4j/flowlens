@@ -1596,9 +1596,10 @@ fn process_rows(
         .iter()
         .map(|process| {
             let name = Cell::from(process_name_span(process, 40));
-            // ADR 0013：Attr 列值单字母，S = single，M = mixed；构成明细在详情页。
+            // ADR 0013（2026-08-19 修订）：Attr 列值单字母，E = exclusive-only（全部独占），
+            // M = mixed（含共享字节）；构成明细与图例在详情页。
             // Recv/Sent/Total 为窗口口径（5 分钟滚动）；累计字节在详情页与报表。
-            let attr = if process.is_mixed() { "M" } else { "S" };
+            let attr = if process.is_mixed() { "M" } else { "E" };
             if compact {
                 Row::new(vec![
                     name,
@@ -1870,6 +1871,11 @@ fn draw_process_detail(
             process.attribution.shared_with.join(", ")
         )));
     }
+    // ADR 0013：列表 Attr 列图例（承诺落在详情页 Attribution 区域）。
+    lines.push(Line::from(Span::styled(
+        "  Attr: E = exclusive only, M = mixed (includes shared)",
+        Style::default().fg(palette::muted()),
+    )));
     lines.push(Line::from(format!(
         "Last seen: {}",
         relative_last_seen(process.last_seen(), now)
@@ -3674,9 +3680,9 @@ mod tests {
         assert!(rendered.contains("Shared"));
         assert!(rendered.contains("System"));
         assert!(rendered.contains("Unattributed"));
-        // Attr 列：表头用词，值单字母
+        // Attr 列：表头用词，值单字母（E = exclusive-only，M = mixed）
         assert!(rendered.contains("Attr"));
-        assert!(rendered.contains(" S "));
+        assert!(rendered.contains(" E "));
         assert!(rendered.contains(" M "));
     }
 

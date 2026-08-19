@@ -425,7 +425,7 @@ impl ProcessSnapshot {
         }
     }
 
-    /// 列表 `A` 列语义（ADR 0013）：false = single（全部独占），true = mixed（含共享字节）。
+    /// 列表 Attr 列语义（ADR 0013）：false = E（全部独占），true = M（含共享字节）。
     pub(crate) fn is_mixed(&self) -> bool {
         self.attribution.shared.recv > 0 || self.attribution.shared.sent > 0
     }
