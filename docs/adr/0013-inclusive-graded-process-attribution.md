@@ -59,9 +59,9 @@
 ```
 
 - 摘要行不设时间列（聚合行 last-seen 无信息量）。
-- 摘要区是标签行而非表格列，守恒行与分区行使用完整单词（Exclusive/Shared/System/Unattributed），可读性优先；极简约束仅适用于表格列的列头与列值。
+- 摘要区是标签行而非表格列，守恒行与分区行使用完整单词（Exclusive/Shared/System/Unattributed），可读性优先；分区行（System/Unattributed）的 Recv/Sent/Total 数值列纵向对齐，标签列比最长标签宽 2 空隙。
 - 紧凑模式摘要压缩为两行：守恒行 + Unattributed 行（System 数值已在守恒行内）。
-- 新增列极简：列头单字母 `A`（Attribution 首字母压缩），值 `S` = single（该行全部字节独占）、`M` = mixed（含共享字节，含纯共享行）。列表页不出现完整单词；`S`/`M` 仅作引导，图例与构成明细在进程详情页 `Attribution` 区域说明。
+- 新增列：列头 `Attr`（2026-08-19 修订：表头与其他列头一致用词，原设计单字母 `A`），值 `S` = single（该行全部字节独占）、`M` = mixed（含共享字节，含纯共享行）。`S`/`M` 仅作引导，图例与构成明细在进程详情页 `Attribution` 区域说明。
 - 进程详情页顶部新增 `Attribution` 区域：Exclusive / Shared（列出 shared_with 伙伴，按进程统计身份 pid+path）/ Total (incl. shared)。
 
 ### 6. 报表 schema（加法变更，不破坏兼容）

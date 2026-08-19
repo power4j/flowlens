@@ -1523,28 +1523,28 @@ fn process_table(
     let compact = mode == LayoutMode::Compact;
     let rows = process_rows(snapshot, compact, now);
     let header_style = Style::default().fg(palette::muted());
-    // ADR 0013：A 列极简——S = single（全部独占），M = mixed（含共享字节）。
+    // ADR 0013（2026-08-19 修订）：Attr 列——列头与其他列头一致用词，值仍单字母。
     let table = if compact {
         Table::new(
             rows,
             [
                 Constraint::Min(18),
                 Constraint::Length(12),
-                Constraint::Length(1),
+                Constraint::Length(4),
                 Constraint::Length(12),
             ],
         )
-        .header(Row::new(vec!["Process", "Total", "A", "Last seen"]).style(header_style))
+        .header(Row::new(vec!["Process", "Total", "Attr", "Last seen"]).style(header_style))
     } else {
         Table::new(
             rows,
             [
-                Constraint::Min(22),
+                Constraint::Min(19),
                 Constraint::Length(8),
                 Constraint::Length(9),
                 Constraint::Length(9),
                 Constraint::Length(10),
-                Constraint::Length(1),
+                Constraint::Length(4),
                 Constraint::Length(11),
             ],
         )
@@ -1555,7 +1555,7 @@ fn process_table(
                 "Recv",
                 "Sent",
                 "Total",
-                "A",
+                "Attr",
                 "Last seen",
             ])
             .style(header_style),
@@ -1596,7 +1596,7 @@ fn process_rows(
         .iter()
         .map(|process| {
             let name = Cell::from(process_name_span(process, 40));
-            // ADR 0013：A 列单字母，S = single，M = mixed；构成明细在详情页。
+            // ADR 0013：Attr 列值单字母，S = single，M = mixed；构成明细在详情页。
             // Recv/Sent/Total 为窗口口径（5 分钟滚动）；累计字节在详情页与报表。
             let attr = if process.is_mixed() { "M" } else { "S" };
             if compact {
@@ -1721,31 +1721,50 @@ fn attribution_summary_lines(snapshot: &TrafficSnapshot, compact: bool) -> Vec<L
         Span::styled(" + Unattributed ", muted),
         Span::raw(human_bytes(attribution.unattributed.total())),
     ])];
-    if !compact {
-        lines.push(channel_summary_line("System", &attribution.system));
-    }
-    lines.push(channel_summary_line(
-        "Unattributed",
-        &attribution.unattributed,
-    ));
+    let channels: Vec<(&str, &crate::stats::ProcTraffic)> = if compact {
+        vec![("Unattributed", &attribution.unattributed)]
+    } else {
+        vec![
+            ("System", &attribution.system),
+            ("Unattributed", &attribution.unattributed),
+        ]
+    };
+    // 数值列取各行最大宽度，保证 System/Unattributed 行的列纵向对齐。
+    let value_width = channels
+        .iter()
+        .flat_map(|(_, traffic)| [traffic.recv, traffic.sent, traffic.total()])
+        .map(|bytes| human_bytes(bytes).chars().count())
+        .max()
+        .unwrap_or(0);
+    lines.extend(
+        channels
+            .into_iter()
+            .map(|(label, traffic)| channel_summary_line(label, traffic, value_width)),
+    );
     lines
 }
 
-fn channel_summary_line(label: &str, traffic: &crate::stats::ProcTraffic) -> Line<'static> {
+fn channel_summary_line(
+    label: &str,
+    traffic: &crate::stats::ProcTraffic,
+    value_width: usize,
+) -> Line<'static> {
     let muted = Style::default().fg(palette::muted());
     let label_style = if traffic.total() > 0 {
         Style::default().fg(palette::warn())
     } else {
         muted
     };
+    let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
     Line::from(vec![
-        Span::styled(format!("{label:<12}"), label_style),
+        // 标签列宽按最长标签（Unattributed）+ 2 空隙，避免零间距贴住数值列。
+        Span::styled(format!("{label:<14}"), label_style),
         Span::styled("Recv ", muted),
-        Span::raw(human_bytes(traffic.recv)),
+        Span::raw(value(traffic.recv)),
         Span::styled("  Sent ", muted),
-        Span::raw(human_bytes(traffic.sent)),
+        Span::raw(value(traffic.sent)),
         Span::styled("  Total ", muted),
-        Span::raw(human_bytes(traffic.total())),
+        Span::raw(value(traffic.total())),
     ])
 }
 
@@ -3586,7 +3605,7 @@ mod tests {
     }
 
     #[test]
-    fn processes_page_renders_attribution_summary_and_a_column() {
+    fn processes_page_renders_attribution_summary_and_attr_column() {
         let snapshot = TrafficSnapshot {
             attribution: crate::stats::AttributionSummary {
                 exclusive: crate::stats::ProcTraffic {
@@ -3655,7 +3674,8 @@ mod tests {
         assert!(rendered.contains("Shared"));
         assert!(rendered.contains("System"));
         assert!(rendered.contains("Unattributed"));
-        // A 列单字母
+        // Attr 列：表头用词，值单字母
+        assert!(rendered.contains("Attr"));
         assert!(rendered.contains(" S "));
         assert!(rendered.contains(" M "));
     }
