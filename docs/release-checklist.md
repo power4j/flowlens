@@ -31,6 +31,7 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 ## After publishing
 
 - [ ] `flowlens --version` and `flowlens.exe --version` report `X.Y.Z`.
+- [ ] Optional: run `install.sh --version vX.Y.Z` in a temporary directory, then uninstall. This check does not block publishing.
 - [ ] The GitHub Release, tag, Cargo metadata, and Release Notes use the same version.
 - [ ] The `[Unreleased]` entry in `CHANGELOG.md` is renamed to `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] A new empty `[Unreleased]` section is added to `CHANGELOG.md`.

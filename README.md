@@ -19,6 +19,28 @@ Windows `x86_64`/`aarch64` and Linux `x86_64`/`aarch64` are supported release pl
 
 ## Install
 
+Linux `x86_64` and `aarch64` can use the installer script. The default command installs the latest stable Release into `~/.local/bin` and updates the current Bash or Zsh PATH when needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash
+```
+
+Pin a reviewed script and an exact version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
+less install.sh
+bash install.sh --version v0.3.0
+```
+
+Pipe additional installer arguments with `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash -s -- --version v0.3.0
+```
+
+The installer requires Bash 3.2+, `curl`, `tar`, and `sha256sum` or `shasum`. It does not install `libpcap`. macOS is recognized, but current Releases have no macOS archives, so the installer fails until those assets exist. Windows continues to use the zip archives below.
+
 Download the archive for the target operating system and CPU architecture from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
 
 ### Linux

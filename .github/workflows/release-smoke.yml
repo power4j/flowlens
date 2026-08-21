@@ -1,0 +1,60 @@
+name: Release smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag, for example v0.3.0
+        required: true
+      platform:
+        description: linux or macos
+        required: true
+        default: linux
+      architecture:
+        description: x86_64 or aarch64
+        required: true
+        default: x86_64
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    if: github.event.inputs.platform == 'linux'
+    runs-on: ${{ github.event.inputs.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install libpcap
+        run: sudo apt-get update && sudo apt-get install --yes libpcap0.8
+      - name: Install from GitHub Release
+        env:
+          HOME: ${{ runner.temp }}/flowlens-home
+        run: |
+          mkdir -p "$HOME"
+          bash install.sh --version "${{ github.event.inputs.version }}" --install-dir "${{ runner.temp }}/flowlens-bin"
+          "${{ runner.temp }}/flowlens-bin/flowlens" --help
+          bash install.sh --uninstall --install-dir "${{ runner.temp }}/flowlens-bin"
+
+  macos:
+    if: github.event.inputs.platform == 'macos'
+    runs-on: ${{ github.event.inputs.architecture == 'x86_64' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Expect missing macOS assets until published
+        env:
+          HOME: ${{ runner.temp }}/flowlens-home
+        run: |
+          mkdir -p "$HOME"
+          set +e
+          /bin/bash install.sh --version "${{ github.event.inputs.version }}" --install-dir "${{ runner.temp }}/flowlens-bin"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            "${{ runner.temp }}/flowlens-bin/flowlens" --help
+            /bin/bash install.sh --uninstall --install-dir "${{ runner.temp }}/flowlens-bin"
+          else
+            echo "installer failed as expected until macOS assets exist, status=$status"
+            [ "$status" -ne 0 ]
+          fi
