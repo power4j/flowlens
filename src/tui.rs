@@ -1840,27 +1840,32 @@ fn draw_process_detail(
         Line::from(format!("Total: {}", human_bytes(process.total()))),
         Line::from(""),
         Line::from(Span::styled(
-            "Attribution",
+            "Attribution (lifetime)",
             Style::default()
                 .fg(palette::strong())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(format!(
-            "  Exclusive: Recv {}  Sent {}",
+            "  Exclusive: {}  Recv {}  Sent {}",
+            human_bytes(process.attribution.exclusive.total()),
             human_bytes(process.attribution.exclusive.recv),
             human_bytes(process.attribution.exclusive.sent)
         )),
         Line::from(format!(
-            "  Shared:    Recv {}  Sent {}",
+            "  Shared:    {}  Recv {}  Sent {}",
+            human_bytes(process.attribution.shared.total()),
             human_bytes(process.attribution.shared.recv),
             human_bytes(process.attribution.shared.sent)
         )),
         Line::from(format!(
-            "  Total (incl. shared): {}",
-            human_bytes(process.total())
+            "  Total: {} = Exclusive {} + Shared {}",
+            human_bytes(process.total()),
+            human_bytes(process.attribution.exclusive.total()),
+            human_bytes(process.attribution.shared.total())
         )),
         Line::from(format!(
-            "  Window (5m): Recv {}  Sent {}",
+            "Window (5m): {}  Recv {}  Sent {}",
+            human_bytes(process.window.total()),
             human_bytes(process.window.recv),
             human_bytes(process.window.sent)
         )),
@@ -1871,6 +1876,9 @@ fn draw_process_detail(
             process.attribution.shared_with.join(", ")
         )));
     }
+    lines.push(Line::from(
+        "Shared traffic is included in Total and may appear in multiple processes.",
+    ));
     // ADR 0013：列表 Attr 列图例（承诺落在详情页 Attribution 区域）。
     lines.push(Line::from(Span::styled(
         "  Attr: E = exclusive only, M = mixed (includes shared)",
@@ -4118,17 +4126,28 @@ mod tests {
     #[test]
     fn process_details_render_all_fields_at_eighty_columns() {
         let path = "/opt/services/payments/releases/2026-07-15/production/workers/payment-processing/payment-worker";
+        let mut process = ProcessSnapshot::attributed_with_shared(
+            7,
+            Some(Arc::from("payment-worker")),
+            Some(Arc::from(path)),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+            crate::stats::ProcTraffic {
+                recv: 1024,
+                sent: 2048,
+            },
+            crate::stats::ProcTraffic {
+                recv: 512,
+                sent: 1024,
+            },
+            Vec::new(),
+        );
+        process.window = crate::stats::ProcTraffic {
+            recv: 256,
+            sent: 512,
+        };
         let snapshot = TrafficSnapshot {
             process_data_fresh: true,
-            processes: vec![ProcessSnapshot::attributed(
-                7,
-                Some(Arc::from("payment-worker")),
-                Some(Arc::from(path)),
-                "2026-07-15T08:00:00Z".parse().unwrap(),
-                1024,
-                2048,
-            )]
-            .into(),
+            processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
         let mut state = AppState::new();
@@ -4159,9 +4178,19 @@ mod tests {
         assert!(rendered.contains("Process Details"));
         assert!(rendered.contains("Name: payment-worker"));
         assert!(rendered.contains("PID: 7"));
-        assert!(rendered.contains("Recv: 1.00 KB"));
-        assert!(rendered.contains("Sent: 2.00 KB"));
-        assert!(rendered.contains("Total: 3.00 KB"));
+        assert!(rendered.contains("Recv: 1.50 KB"));
+        assert!(rendered.contains("Sent: 3.00 KB"));
+        assert!(rendered.contains("Total: 4.50 KB"));
+        assert!(rendered.contains("Attribution (lifetime)"));
+        assert!(rendered.contains("Exclusive: 3.00 KB  Recv 1.00 KB  Sent 2.00 KB"));
+        assert!(rendered.contains("Shared:    1.50 KB  Recv 512 B  Sent 1.00 KB"));
+        assert!(rendered.contains("Total: 4.50 KB = Exclusive 3.00 KB + Shared 1.50 KB"));
+        assert!(rendered.contains("Window (5m): 768 B  Recv 256 B  Sent 512 B"));
+        assert!(
+            rendered.contains(
+                "Shared traffic is included in Total and may appear in multiple processes."
+            )
+        );
         assert!(rendered.contains("Last seen: 2m ago"));
         assert!(rendered.contains("Esc:back"));
         let inner_lines = lines
