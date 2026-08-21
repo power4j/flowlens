@@ -19,6 +19,28 @@ Windows `x86_64`/`aarch64` 以及 Linux `x86_64`/`aarch64` 属于支持平台。
 
 ## 安装
 
+Linux `x86_64` 和 `aarch64` 可以使用安装脚本。默认命令安装最新稳定版到 `~/.local/bin`，并在当前 Bash 或 Zsh 可识别时维护 PATH：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash
+```
+
+也可以先下载脚本审查，再安装指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
+less install.sh
+bash install.sh --version v0.3.0
+```
+
+管道传参示例：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash -s -- --version v0.3.0
+```
+
+安装器需要 Bash 3.2+、`curl`、`tar`，以及 `sha256sum` 或 `shasum`。它不会自动安装 `libpcap`。安装器可以识别 macOS，但当前 Release 没有 macOS 资产，因此会明确失败。Windows 仍使用下面的 zip 压缩包。
+
 从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应操作系统和 CPU 架构的压缩包，解压其中唯一的可执行文件即可。
 
 ### Linux

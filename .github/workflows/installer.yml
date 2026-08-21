@@ -1,0 +1,47 @@
+name: Installer
+
+on:
+  pull_request:
+    paths:
+      - install.sh
+      - install-json.awk
+      - tests/install/**
+      - .github/workflows/installer.yml
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - install-json.awk
+      - tests/install/**
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux-fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - name: ShellCheck
+        run: shellcheck --shell=bash install.sh tests/install/test-install.sh
+      - name: Bash syntax
+        run: bash -n install.sh && bash -n tests/install/test-install.sh
+      - name: Fixture tests
+        run: bash tests/install/test-install.sh
+
+  macos:
+    name: macos-bash32
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Bash 3.2 syntax
+        run: /bin/bash -n install.sh && /bin/bash -n tests/install/test-install.sh
+      - name: Fixture tests
+        run: /bin/bash tests/install/test-install.sh
