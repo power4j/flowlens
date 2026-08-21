@@ -83,6 +83,8 @@ validate_component() {
   if [ "${#value}" -gt 10 ]; then
     return 1
   fi
+  # 10-digit values can overflow 32-bit [ -gt ]; compare equal-length digit strings.
+  # shellcheck disable=SC2071
   if [ "${#value}" -eq 10 ] && [ "${value}" \> "${MAX_COMPONENT}" ]; then
     return 1
   fi
@@ -101,9 +103,9 @@ is_valid_version() {
   esac
   major="${version#v}"
   major="${major%%.*}"
-  minor="${version#v${major}.}"
+  minor="${version#v"${major}".}"
   minor="${minor%%.*}"
-  patch="${version#v${major}.${minor}.}"
+  patch="${version#v"${major}"."${minor}".}"
   [ "${version}" = "v${major}.${minor}.${patch}" ] || return 1
   validate_component "${major}" || return 1
   validate_component "${minor}" || return 1
@@ -116,11 +118,11 @@ version_cmp() {
   local right="$2"
   local lmaj lmin lpat rmaj rmin rpat
   lmaj="${left#v}"; lmaj="${lmaj%%.*}"
-  lmin="${left#v${lmaj}.}"; lmin="${lmin%%.*}"
-  lpat="${left#v${lmaj}.${lmin}.}"
+  lmin="${left#v"${lmaj}".}"; lmin="${lmin%%.*}"
+  lpat="${left#v"${lmaj}"."${lmin}".}"
   rmaj="${right#v}"; rmaj="${rmaj%%.*}"
-  rmin="${right#v${rmaj}.}"; rmin="${rmin%%.*}"
-  rpat="${right#v${rmaj}.${rmin}.}"
+  rmin="${right#v"${rmaj}".}"; rmin="${rmin%%.*}"
+  rpat="${right#v"${rmaj}"."${rmin}".}"
   if [ "${lmaj}" -lt "${rmaj}" ]; then echo lt; return; fi
   if [ "${lmaj}" -gt "${rmaj}" ]; then echo gt; return; fi
   if [ "${lmin}" -lt "${rmin}" ]; then echo lt; return; fi
@@ -691,10 +693,12 @@ validate_manifest_file() {
     *) return 1 ;;
   esac
   MF_VERSION="${version}"
+  # shellcheck disable=SC2034
   MF_INSTALL_DIR="${install_dir}"
   MF_BINARY_PATH="${binary_path}"
   MF_DIGEST="${digest}"
   MF_PATH_FILE="${path_file}"
+  # shellcheck disable=SC2034
   MF_SETCAP="${setcap_val}"
   return 0
 }

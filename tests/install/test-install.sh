@@ -73,7 +73,7 @@ python_bin() {
     esac
   fi
   if [ -n "${USERPROFILE:-}" ]; then
-    base="$(printf '%s' "${USERPROFILE}" | tr '\\' '/')"
+    base="${USERPROFILE//\\//}"
     candidate="${base}/.pyenv/pyenv-win/versions/3.13.7/python.exe"
     if [ -f "${candidate}" ]; then
       printf '%s\n' "${candidate}"
@@ -105,6 +105,8 @@ run_installer() {
     cd "${WORKDIR}"
     HOME="${TEST_HOME}"
     export HOME
+    # PATH change is confined to this subshell.
+    # shellcheck disable=SC2030
     PATH="${WORKDIR}/bin:${PATH}"
     export PATH
     SHELL="${SHELL:-/bin/bash}"
@@ -123,21 +125,33 @@ start_server() {
   local mode="$1"
   local port_file="${WORKDIR}/port"
   local pid_file="${WORKDIR}/server.pid"
+  local waited=0
   rm -f "${port_file}" "${pid_file}"
   "${PYTHON}" -u "${ROOT}/tests/install/http_server.py" \
     --root "${WORKDIR}/www" --mode "${mode}" --port-file "${port_file}" --pid-file "${pid_file}" \
     >/dev/null 2>"${WORKDIR}/server.err" &
   SERVER_BASH_PID=$!
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  while [ "${waited}" -lt 15 ]; do
     if [ -s "${port_file}" ] && [ -s "${pid_file}" ]; then
       break
     fi
-    sleep 0.1
+    if ! kill -0 "${SERVER_BASH_PID}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
   done
-  SERVER_PORT="$(tr -d '[:space:]' < "${port_file}" 2>/dev/null || true)"
-  SERVER_PID="$(tr -d '[:space:]' < "${pid_file}" 2>/dev/null || true)"
+  SERVER_PORT=""
+  SERVER_PID=""
+  if [ -s "${port_file}" ]; then
+    SERVER_PORT="$(tr -d '[:space:]' < "${port_file}")"
+  fi
+  if [ -s "${pid_file}" ]; then
+    SERVER_PID="$(tr -d '[:space:]' < "${pid_file}")"
+  fi
   if [ -z "${SERVER_PORT}" ] || [ -z "${SERVER_PID}" ]; then
     fail "http fixture server started"
+    printf 'python=%s\n' "${PYTHON}"
     if [ -f "${WORKDIR}/server.err" ]; then
       cat "${WORKDIR}/server.err" || true
     fi
@@ -396,6 +410,7 @@ test_setcap_non_linux_exits_2() {
 
 test_setcap_missing_exits_2() {
   local out status saved
+  # shellcheck disable=SC2031
   saved="${PATH}"
   PATH="${WORKDIR}/bin:/usr/bin:/bin"
   export PATH

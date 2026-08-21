@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 from argparse import ArgumentParser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import TCPServer, ThreadingMixIn
+import os
+
+
+class ThreadingTCPServer(ThreadingMixIn, TCPServer):
+    # Use TCPServer instead of HTTPServer to avoid socket.getfqdn() during bind.
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 def main():
@@ -54,12 +62,12 @@ def main():
         def log_message(self, fmt, *log_args):
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = ThreadingTCPServer(("127.0.0.1", args.port), Handler)
     port = server.server_address[1]
     if args.port_file:
-        Path(args.port_file).write_text(str(port), encoding="utf-8")
+        Path(args.port_file).write_text(str(port) + "\n", encoding="utf-8")
     if args.pid_file:
-        Path(args.pid_file).write_text(str(__import__("os").getpid()), encoding="utf-8")
+        Path(args.pid_file).write_text(str(os.getpid()) + "\n", encoding="utf-8")
     print(port, flush=True)
     server.serve_forever()
 

@@ -9,6 +9,7 @@
 # Unix/Linux scripts use LF.
 *.sh text eol=lf
 *.awk text eol=lf
+*.py text eol=lf
 *.service text eol=lf
 
 # Windows command scripts use CRLF.
