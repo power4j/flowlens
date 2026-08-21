@@ -448,8 +448,57 @@ fail_http() {
 }
 
 cleanup() {
+  if [ -n "${TMP_BIN:-}" ] && [ -f "${TMP_BIN}" ]; then
+    rm -f "${TMP_BIN}"
+  fi
+  if [ -n "${TMP_MANIFEST:-}" ] && [ -f "${TMP_MANIFEST}" ]; then
+    rm -f "${TMP_MANIFEST}"
+  fi
+  if [ -n "${TMP_PATH_FILE:-}" ] && [ -f "${TMP_PATH_FILE}" ]; then
+    rm -f "${TMP_PATH_FILE}"
+  fi
   if [ -n "${TMP_DIR:-}" ] && [ -d "${TMP_DIR}" ]; then
     rm -rf "${TMP_DIR}"
+  fi
+}
+
+priv() {
+  if [ "${USE_SUDO:-0}" -eq 1 ]; then
+    sudo -n "$@"
+  else
+    "$@"
+  fi
+}
+
+prepare_privileges() {
+  USE_SUDO=0
+  if [ "${WANT_SYSTEM}" -ne 1 ]; then
+    return
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    return
+  fi
+  if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ]; then
+    return
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    die 6 "system install needs write access to ${INSTALL_DIR}"
+  fi
+  if ! sudo -n true >/dev/null 2>&1; then
+    die 6 "system install needs write access to ${INSTALL_DIR}; sudo -n failed"
+  fi
+  USE_SUDO=1
+}
+
+rollback_install() {
+  if [ -f "${TMP_DIR}/rollback-binary" ]; then
+    priv mv -f "${TMP_DIR}/rollback-binary" "${BINARY_PATH}" || true
+  fi
+  if [ -f "${TMP_DIR}/rollback-manifest" ]; then
+    priv mv -f "${TMP_DIR}/rollback-manifest" "${MANIFEST_PATH}" || true
+  fi
+  if [ -f "${TMP_DIR}/rollback-path" ] && [ -n "${PATH_FILE:-}" ]; then
+    priv mv -f "${TMP_DIR}/rollback-path" "${PATH_FILE}" || true
   fi
 }
 
@@ -770,10 +819,10 @@ preflight_install() {
     if [ "${WANT_DRY_RUN}" -eq 1 ]; then
       log "dry-run: would create ${INSTALL_DIR}"
     else
-      mkdir -p "${INSTALL_DIR}" || die 6 "install path is not writable: ${INSTALL_DIR}"
+      priv mkdir -p "${INSTALL_DIR}" || die 6 "install path is not writable: ${INSTALL_DIR}"
     fi
   fi
-  if [ "${WANT_DRY_RUN}" -eq 0 ] && [ ! -w "${INSTALL_DIR}" ]; then
+  if [ "${WANT_DRY_RUN}" -eq 0 ] && [ "${USE_SUDO:-0}" -eq 0 ] && [ ! -w "${INSTALL_DIR}" ]; then
     die 6 "install path is not writable: ${INSTALL_DIR}"
   fi
   if [ -e "${BINARY_PATH}" ]; then
@@ -795,9 +844,6 @@ preflight_install() {
       fi
     fi
   fi
-  if [ "${WANT_SETCAP}" -eq 1 ] && [ "${PLATFORM}" != "linux" ]; then
-    die 2 "--setcap is only supported on Linux"
-  fi
 }
 
 commit_install() {
@@ -808,21 +854,30 @@ commit_install() {
   if should_modify_path; then
     path_file_out="${PATH_FILE}"
   fi
+  if [ "${WANT_SETCAP}" -eq 1 ]; then
+    setcap_val="true"
+  fi
   if [ "${WANT_DRY_RUN}" -eq 1 ]; then
     log "dry-run: would install ${VERSION} to ${BINARY_PATH}"
+    if [ "${WANT_SETCAP}" -eq 1 ]; then
+      log "dry-run: would run setcap cap_net_raw+ep ${BINARY_PATH}"
+    fi
     if [ -n "${path_file_out}" ]; then
       log "dry-run: would update PATH in ${path_file_out}"
     fi
     return
   fi
-  mkdir -p "${MANIFEST_DIR}" || die 6 "manifest directory is not writable: ${MANIFEST_DIR}"
-  tmp_bin="${INSTALL_DIR}/flowlens.new.$$"
-  tmp_manifest="${MANIFEST_DIR}/install-manifest.new.$$"
-  cp "${TMP_DIR}/extract/flowlens" "${tmp_bin}"
-  chmod 0755 "${tmp_bin}"
+  priv mkdir -p "${MANIFEST_DIR}" || die 6 "manifest directory is not writable: ${MANIFEST_DIR}"
+  TMP_BIN="${INSTALL_DIR}/flowlens.new.$$"
+  TMP_MANIFEST="${MANIFEST_DIR}/install-manifest.new.$$"
+  tmp_bin="${TMP_BIN}"
+  tmp_manifest="${TMP_MANIFEST}"
+  priv cp "${TMP_DIR}/extract/flowlens" "${tmp_bin}"
+  priv chmod 0755 "${tmp_bin}"
   write_manifest_file "${tmp_manifest}" "${VERSION}" "${NEW_DIGEST}" "${path_file_out}" "${setcap_val}"
   if [ -n "${path_file_out}" ]; then
-    tmp_path="${path_file_out}.flowlens.new.$$"
+    TMP_PATH_FILE="${path_file_out}.flowlens.new.$$"
+    tmp_path="${TMP_PATH_FILE}"
     write_path_block "${tmp_path}" "${path_file_out}"
   else
     tmp_path=""
@@ -833,35 +888,47 @@ commit_install() {
   if [ -f "${MANIFEST_PATH}" ]; then
     cp "${MANIFEST_PATH}" "${TMP_DIR}/rollback-manifest" || die 1 "failed to snapshot existing manifest"
   fi
-  if ! mv -f "${tmp_bin}" "${BINARY_PATH}"; then
+  if [ -n "${path_file_out}" ] && [ -f "${path_file_out}" ]; then
+    cp "${path_file_out}" "${TMP_DIR}/rollback-path" || die 1 "failed to snapshot PATH file"
+  fi
+  if ! priv mv -f "${tmp_bin}" "${BINARY_PATH}"; then
     die 1 "failed to publish binary"
   fi
-  if ! mv -f "${tmp_manifest}" "${MANIFEST_PATH}"; then
-    if [ -f "${TMP_DIR}/rollback-binary" ]; then
-      mv -f "${TMP_DIR}/rollback-binary" "${BINARY_PATH}" || true
+  TMP_BIN=""
+  if [ "${WANT_SETCAP}" -eq 1 ]; then
+    if ! priv setcap cap_net_raw+ep "${BINARY_PATH}"; then
+      rollback_install
+      die 1 "failed to setcap ${BINARY_PATH}"
     fi
+  fi
+  if ! priv mv -f "${tmp_manifest}" "${MANIFEST_PATH}"; then
+    rollback_install
     die 1 "failed to publish manifest"
   fi
+  TMP_MANIFEST=""
   if [ -n "${tmp_path}" ]; then
-    if ! mv -f "${tmp_path}" "${path_file_out}"; then
-      if [ -f "${TMP_DIR}/rollback-binary" ]; then
-        mv -f "${TMP_DIR}/rollback-binary" "${BINARY_PATH}" || true
-      fi
-      if [ -f "${TMP_DIR}/rollback-manifest" ]; then
-        mv -f "${TMP_DIR}/rollback-manifest" "${MANIFEST_PATH}" || true
-      fi
+    if ! priv mv -f "${tmp_path}" "${path_file_out}"; then
+      rollback_install
       die 1 "failed to publish PATH file"
     fi
+    TMP_PATH_FILE=""
   fi
   log "installed FlowLens ${VERSION} to ${BINARY_PATH}"
 }
 
 do_install() {
   detect_platform
+  if [ "${WANT_SETCAP}" -eq 1 ] && [ "${PLATFORM}" != "linux" ]; then
+    die 2 "--setcap is only supported on Linux"
+  fi
+  if [ "${WANT_SETCAP}" -eq 1 ] && ! command -v setcap >/dev/null 2>&1; then
+    die 2 "--setcap requires the setcap command"
+  fi
   if [ "${PLATFORM}" = "macos" ]; then
     log "macOS is reserved; current Releases have no macOS assets"
   fi
   resolve_dirs
+  prepare_privileges
   fetch_version
   download_assets
   extract_asset
@@ -871,7 +938,6 @@ do_install() {
 
 do_uninstall() {
   local existing_digest tmp_path
-  resolve_dirs
   choose_path_file
   if [ ! -f "${MANIFEST_PATH}" ]; then
     if [ -e "${BINARY_PATH}" ]; then
@@ -882,17 +948,7 @@ do_uninstall() {
   fi
   validate_manifest_file "${MANIFEST_PATH}" || die 8 "existing manifest is invalid"
   if [ -f "${MF_BINARY_PATH}" ]; then
-    existing_digest=""
-    for _ in 1 2 3 4 5; do
-      existing_digest="$(sha256_file "${MF_BINARY_PATH}" 2>/dev/null || true)"
-      if [ -n "${existing_digest}" ]; then
-        break
-      fi
-      sleep 1
-    done
-    if [ -z "${existing_digest}" ]; then
-      die 8 "failed to read installed binary digest"
-    fi
+    existing_digest="$(sha256_file "${MF_BINARY_PATH}")"
     if [ "${existing_digest}" != "${MF_DIGEST}" ] && [ "${WANT_FORCE}" -eq 0 ]; then
       die 8 "binary digest does not match manifest; refusing to delete"
     fi
@@ -903,22 +959,14 @@ do_uninstall() {
     return
   fi
   if [ -f "${MF_BINARY_PATH}" ]; then
-    rm_ok=0
-    for _ in 1 2 3 4 5; do
-      if rm -f "${MF_BINARY_PATH}" 2>/dev/null; then
-        rm_ok=1
-        break
-      fi
-      sleep 1
-    done
-    [ "${rm_ok}" -eq 1 ] || die 8 "failed to remove ${MF_BINARY_PATH}"
+    priv rm -f "${MF_BINARY_PATH}" || die 8 "failed to remove ${MF_BINARY_PATH}"
   fi
   if [ -n "${MF_PATH_FILE}" ] && [ -f "${MF_PATH_FILE}" ]; then
     tmp_path="${MF_PATH_FILE}.flowlens.uninstall.$$"
     remove_path_block "${tmp_path}" "${MF_PATH_FILE}"
-    mv -f "${tmp_path}" "${MF_PATH_FILE}"
+    priv mv -f "${tmp_path}" "${MF_PATH_FILE}"
   fi
-  rm -f "${MANIFEST_PATH}" || die 8 "failed to remove manifest"
+  priv rm -f "${MANIFEST_PATH}" || die 8 "failed to remove manifest"
   log "uninstalled FlowLens"
 }
 
@@ -933,6 +981,8 @@ main() {
   TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/flowlens-install.XXXXXX")"
   trap cleanup EXIT
   if [ "${WANT_UNINSTALL}" -eq 1 ]; then
+    resolve_dirs
+    prepare_privileges
     do_uninstall
     exit 0
   fi

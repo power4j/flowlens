@@ -29,12 +29,13 @@ def main():
                 self.end_headers()
                 self.wfile.write(b"rate limited")
                 return
-            mapping = {
-                "/repos/power4j/flowlens/releases/latest": root / "latest.json",
-                "/power4j/flowlens/releases/download/v0.3.0/flowlens-v0.3.0-linux-x86_64.tar.gz": root / "flowlens-v0.3.0-linux-x86_64.tar.gz",
-                "/power4j/flowlens/releases/download/v0.3.0/SHA256SUMS": root / "SHA256SUMS",
-            }
-            target = mapping.get(path)
+            if path.endswith("/releases/latest"):
+                target = root / "latest.json"
+            elif "/releases/download/" in path:
+                parts = [part for part in path.split("/") if part]
+                target = root / parts[-2] / parts[-1]
+            else:
+                target = None
             if target is None or not target.is_file():
                 self._send(404, b"not found", "text/plain")
                 return

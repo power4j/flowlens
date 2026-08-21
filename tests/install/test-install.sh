@@ -11,9 +11,7 @@ FAIL=0
 SERVER_PID=""
 
 cleanup() {
-  if [ -n "${SERVER_PID}" ]; then
-    kill "${SERVER_PID}" >/dev/null 2>&1 || true
-  fi
+  stop_server
   rm -rf "${WORKDIR}"
 }
 trap cleanup EXIT
@@ -66,14 +64,23 @@ assert_not_file() {
 }
 
 python_bin() {
-  local launcher raw
-  if command -v python3 >/dev/null 2>&1; then
-    launcher="$(command -v python3)"
-  else
-    launcher="$(command -v python)"
+  local candidate base
+  candidate="$(command -v python3 2>/dev/null || true)"
+  if [ -n "${candidate}" ]; then
+    case "${candidate}" in
+      *shims*) ;;
+      *) printf '%s\n' "${candidate}"; return ;;
+    esac
   fi
-  raw="$("${launcher}" -c 'import sys; print(sys.executable)')"
-  printf '%s\n' "${raw}" | tr '\\' '/'
+  if [ -n "${USERPROFILE:-}" ]; then
+    base="$(printf '%s' "${USERPROFILE}" | tr '\\' '/')"
+    candidate="${base}/.pyenv/pyenv-win/versions/3.13.7/python.exe"
+    if [ -f "${candidate}" ]; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+  fi
+  command -v python3 || command -v python
 }
 
 install_fake_uname() {
@@ -117,7 +124,10 @@ start_server() {
   local port_file="${WORKDIR}/port"
   local pid_file="${WORKDIR}/server.pid"
   rm -f "${port_file}" "${pid_file}"
-  "${PYTHON}" -u "${ROOT}/tests/install/http_server.py"     --root "${WORKDIR}/www" --mode "${mode}" --port-file "${port_file}" --pid-file "${pid_file}"     >/dev/null 2>"${WORKDIR}/server.err" &
+  "${PYTHON}" -u "${ROOT}/tests/install/http_server.py" \
+    --root "${WORKDIR}/www" --mode "${mode}" --port-file "${port_file}" --pid-file "${pid_file}" \
+    >/dev/null 2>"${WORKDIR}/server.err" &
+  SERVER_BASH_PID=$!
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     if [ -s "${port_file}" ] && [ -s "${pid_file}" ]; then
       break
@@ -129,8 +139,7 @@ start_server() {
   if [ -z "${SERVER_PORT}" ] || [ -z "${SERVER_PID}" ]; then
     fail "http fixture server started"
     if [ -f "${WORKDIR}/server.err" ]; then
-      printf '%s
-' "$(cat "${WORKDIR}/server.err")"
+      cat "${WORKDIR}/server.err" || true
     fi
     return 1
   fi
@@ -138,10 +147,11 @@ start_server() {
 }
 
 stop_server() {
-  if [ -n "${SERVER_PID}" ]; then
-    taskkill //F //PID "${SERVER_PID}" >/dev/null 2>&1 || kill "${SERVER_PID}" >/dev/null 2>&1 || true
-    SERVER_PID=""
+  if [ -n "${SERVER_BASH_PID:-}" ]; then
+    kill "${SERVER_BASH_PID}" >/dev/null 2>&1 || true
+    SERVER_BASH_PID=""
   fi
+  SERVER_PID=""
 }
 
 make_test_installer() {
@@ -151,18 +161,18 @@ make_test_installer() {
 }
 
 prepare_assets() {
-  mkdir -p "${WORKDIR}/www" "${WORKDIR}/pack"
+  mkdir -p "${WORKDIR}/www/v0.3.0" "${WORKDIR}/pack"
   cp "${FIXTURES}/api/latest-pretty.json" "${WORKDIR}/www/latest.json"
   printf '%s\n' '#!/bin/sh' 'echo flowlens-fixture' > "${WORKDIR}/pack/flowlens"
   chmod 0755 "${WORKDIR}/pack/flowlens"
-  tar -C "${WORKDIR}/pack" -czf "${WORKDIR}/www/flowlens-v0.3.0-linux-x86_64.tar.gz" flowlens
+  tar -C "${WORKDIR}/pack" -czf "${WORKDIR}/www/v0.3.0/flowlens-v0.3.0-linux-x86_64.tar.gz" flowlens
   local digest
   if command -v sha256sum >/dev/null 2>&1; then
-    digest="$(sha256sum "${WORKDIR}/www/flowlens-v0.3.0-linux-x86_64.tar.gz" | awk '{print $1}')"
+    digest="$(sha256sum "${WORKDIR}/www/v0.3.0/flowlens-v0.3.0-linux-x86_64.tar.gz" | awk '{print $1}')"
   else
-    digest="$(shasum -a 256 "${WORKDIR}/www/flowlens-v0.3.0-linux-x86_64.tar.gz" | awk '{print $1}')"
+    digest="$(shasum -a 256 "${WORKDIR}/www/v0.3.0/flowlens-v0.3.0-linux-x86_64.tar.gz" | awk '{print $1}')"
   fi
-  printf '%s  %s\n' "${digest}" "flowlens-v0.3.0-linux-x86_64.tar.gz" > "${WORKDIR}/www/SHA256SUMS"
+  printf '%s  %s\n' "${digest}" "flowlens-v0.3.0-linux-x86_64.tar.gz" > "${WORKDIR}/www/v0.3.0/SHA256SUMS"
 }
 
 require_installer() {
@@ -309,6 +319,7 @@ test_install_and_uninstall() {
   assert_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "install writes manifest"
   assert_file "${TEST_HOME}/.bashrc" "default bash PATH file is created"
   assert_contains "$(cat "${TEST_HOME}/.bashrc")" "flowlens installer" "PATH marker is written"
+  chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
   out="${WORKDIR}/uninstall.out"
   status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall --install-dir "${WORKDIR}/opt/bin")"
   assert_eq "${status}" "0" "uninstall exits 0"
@@ -316,28 +327,215 @@ test_install_and_uninstall() {
   assert_not_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "uninstall removes manifest"
 }
 
+write_sums_for() {
+  local archive="$1"
+  local version="$2"
+  local digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum "${archive}" | awk '{print $1}')"
+  else
+    digest="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+  fi
+  printf '%s  %s\n' "${digest}" "flowlens-${version}-linux-x86_64.tar.gz" > "${WORKDIR}/www/${version}/SHA256SUMS"
+}
+
+install_fake_setcap() {
+  local exit_code="$1"
+  cat > "${WORKDIR}/bin/setcap" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" > "${WORKDIR}/setcap.args"
+exit ${exit_code}
+EOF
+  chmod +x "${WORKDIR}/bin/setcap"
+}
+
+test_sha256_mismatch_exits_5() {
+  local out status
+  mkdir -p "${WORKDIR}/www/v0.3.4"
+  cat "${WORKDIR}/www/v0.3.0/flowlens-v0.3.0-linux-x86_64.tar.gz" > "${WORKDIR}/www/v0.3.4/flowlens-v0.3.4-linux-x86_64.tar.gz"
+  printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  flowlens-v0.3.4-linux-x86_64.tar.gz\n' > "${WORKDIR}/www/v0.3.4/SHA256SUMS"
+  out="${WORKDIR}/bad-hash.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.4 --install-dir "${WORKDIR}/opt/bin")"
+  assert_eq "${status}" "5" "SHA-256 mismatch exits 5"
+  assert_not_file "${WORKDIR}/opt/bin/flowlens" "SHA-256 mismatch does not install binary"
+}
+
+test_archive_extra_file_exits_5() {
+  local out status
+  mkdir -p "${WORKDIR}/pack-extra" "${WORKDIR}/www/v0.3.1"
+  printf '%s\n' '#!/bin/sh' 'echo flowlens-fixture' > "${WORKDIR}/pack-extra/flowlens"
+  printf 'x\n' > "${WORKDIR}/pack-extra/extra.txt"
+  chmod 0755 "${WORKDIR}/pack-extra/flowlens"
+  tar -C "${WORKDIR}/pack-extra" -czf "${WORKDIR}/www/v0.3.1/flowlens-v0.3.1-linux-x86_64.tar.gz" flowlens extra.txt
+  write_sums_for "${WORKDIR}/www/v0.3.1/flowlens-v0.3.1-linux-x86_64.tar.gz" v0.3.1
+  out="${WORKDIR}/extra.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.1 --install-dir "${WORKDIR}/opt/bin")"
+  assert_eq "${status}" "5" "archive extra file exits 5"
+}
+
+test_archive_path_traversal_exits_5() {
+  local out status
+  mkdir -p "${WORKDIR}/pack-trav/sub" "${WORKDIR}/www/v0.3.2"
+  printf '%s\n' '#!/bin/sh' 'echo flowlens-fixture' > "${WORKDIR}/pack-trav/sub/flowlens"
+  chmod 0755 "${WORKDIR}/pack-trav/sub/flowlens"
+  tar -C "${WORKDIR}/pack-trav" -czf "${WORKDIR}/www/v0.3.2/flowlens-v0.3.2-linux-x86_64.tar.gz" sub/flowlens
+  write_sums_for "${WORKDIR}/www/v0.3.2/flowlens-v0.3.2-linux-x86_64.tar.gz" v0.3.2
+  out="${WORKDIR}/trav.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.2 --install-dir "${WORKDIR}/opt/bin")"
+  assert_eq "${status}" "5" "archive path traversal exits 5"
+}
+
+test_setcap_non_linux_exits_2() {
+  local out status
+  install_fake_uname Darwin x86_64
+  out="${WORKDIR}/setcap-darwin.out"
+  status="$(run_installer "${out}" "${INSTALL_SH}" --setcap --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  install_fake_uname Linux x86_64
+  assert_eq "${status}" "2" "--setcap on macOS exits 2"
+}
+
+test_setcap_missing_exits_2() {
+  local out status saved
+  saved="${PATH}"
+  PATH="${WORKDIR}/bin:/usr/bin:/bin"
+  export PATH
+  rm -f "${WORKDIR}/bin/setcap"
+  out="${WORKDIR}/setcap-missing.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --setcap --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  PATH="${saved}"
+  export PATH
+  assert_eq "${status}" "2" "--setcap without setcap exits 2"
+}
+
+test_setcap_failure_rolls_back() {
+  local out status old
+  rm -f "${WORKDIR}/bin/setcap"
+  out="${WORKDIR}/setcap-base.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  assert_eq "${status}" "0" "base install before setcap failure"
+  old="$(cat "${WORKDIR}/opt/bin/flowlens")"
+  chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
+  install_fake_setcap 1
+  out="${WORKDIR}/setcap-fail.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --setcap --force --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  rm -f "${WORKDIR}/bin/setcap"
+  assert_eq "${status}" "1" "setcap failure exits 1"
+  assert_eq "$(cat "${WORKDIR}/opt/bin/flowlens")" "${old}" "setcap failure keeps previous binary"
+}
+
+test_setcap_success_records_manifest() {
+  local out status
+  chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
+  install_fake_setcap 0
+  out="${WORKDIR}/setcap-ok.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --setcap --force --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  assert_eq "${status}" "0" "--setcap install exits 0"
+  assert_contains "$(cat "${TEST_HOME}/.local/share/flowlens/install-manifest")" "setcap=true" "manifest records setcap=true"
+  assert_file "${WORKDIR}/setcap.args" "setcap was invoked"
+  rm -f "${WORKDIR}/bin/setcap"
+}
+
+test_manifest_publish_failure_rolls_back() {
+  local out status old
+  assert_file "${WORKDIR}/opt/bin/flowlens" "rollback test has an installed binary"
+  old="$(cat "${WORKDIR}/opt/bin/flowlens")"
+  chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
+  cat > "${WORKDIR}/bin/mv" <<'EOF'
+#!/bin/sh
+dest="$1"
+for dest do :; done
+case "$dest" in
+  */install-manifest)
+    exit 1
+    ;;
+esac
+/usr/bin/mv "$@"
+EOF
+  chmod +x "${WORKDIR}/bin/mv"
+  out="${WORKDIR}/rb.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --force --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  rm -f "${WORKDIR}/bin/mv"
+  assert_eq "${status}" "1" "manifest publish failure exits 1"
+  assert_eq "$(cat "${WORKDIR}/opt/bin/flowlens")" "${old}" "manifest publish failure restores binary"
+}
+
+test_system_sudo_n_fails_closed() {
+  local out status
+  if [ -w /usr/local/bin ]; then
+    pass "--system sudo -n skipped because /usr/local/bin is writable"
+    return
+  fi
+  cat > "${WORKDIR}/bin/sudo" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-n" ]; then
+  exit 1
+fi
+sleep 30
+exit 1
+EOF
+  chmod +x "${WORKDIR}/bin/sudo"
+  out="${WORKDIR}/system.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --system --version v0.3.0)"
+  rm -f "${WORKDIR}/bin/sudo"
+  assert_eq "${status}" "6" "--system without sudo -n exits 6"
+}
+
 main() {
   printf 'FlowLens installer tests\n'
-  PYTHON="$(python_bin)"
   TEST_HOME="${WORKDIR}/home"
   mkdir -p "${TEST_HOME}"
   require_installer
-  test_json_fixtures
-  test_help_exits_zero
-  test_invalid_version_exits_2
-  test_old_version_exits_2
-  test_conflicting_dir_flags_exit_2
-  test_uninstall_rejects_version
-  test_unsupported_os_exits_3_before_network
-  prepare_assets
-  install_fake_uname Linux x86_64
-  start_server ok
-  make_test_installer
-  test_http_404
-  test_http_403_rate_limit
-  test_dry_run_install
-  test_install_and_uninstall
-  stop_server
+  slice="${FLOWLENS_TEST_SLICE:-all}"
+  if [ "${slice}" != "unit" ]; then
+    PYTHON="$(python_bin)"
+  fi
+  if [ "${slice}" = "all" ] || [ "${slice}" = "unit" ]; then
+    test_json_fixtures
+    test_help_exits_zero
+    test_invalid_version_exits_2
+    test_old_version_exits_2
+    test_conflicting_dir_flags_exit_2
+    test_uninstall_rejects_version
+    test_unsupported_os_exits_3_before_network
+  fi
+  if [ "${slice}" = "all" ] || [ "${slice}" = "http" ]; then
+    prepare_assets
+    install_fake_uname Linux x86_64
+    start_server ok
+    make_test_installer
+    test_http_404
+    test_http_403_rate_limit
+    test_dry_run_install
+  fi
+  if [ "${slice}" = "all" ] || [ "${slice}" = "fail" ]; then
+    if [ "${slice}" = "fail" ]; then
+      prepare_assets
+      install_fake_uname Linux x86_64
+      start_server ok
+      make_test_installer
+    fi
+    test_install_and_uninstall
+    test_sha256_mismatch_exits_5
+    test_archive_extra_file_exits_5
+    test_archive_path_traversal_exits_5
+    test_setcap_non_linux_exits_2
+    test_setcap_missing_exits_2
+  fi
+  if [ "${slice}" = "all" ] || [ "${slice}" = "setcap" ]; then
+    if [ "${slice}" = "setcap" ]; then
+      prepare_assets
+      install_fake_uname Linux x86_64
+      start_server ok
+      make_test_installer
+    fi
+    test_setcap_failure_rolls_back
+    test_setcap_success_records_manifest
+    test_manifest_publish_failure_rolls_back
+    test_system_sudo_n_fails_closed
+  fi
+  if [ "${slice}" = "all" ] || [ "${slice}" = "http" ] || [ "${slice}" = "fail" ] || [ "${slice}" = "setcap" ]; then
+    stop_server
+  fi
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
   if [ "${FAIL}" -ne 0 ]; then
     exit 1
