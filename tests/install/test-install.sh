@@ -47,6 +47,16 @@ assert_contains() {
   esac
 }
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local name="$3"
+  case "${haystack}" in
+    *"${needle}"*) fail "${name}: unexpected '${needle}'" ;;
+    *) pass "${name}" ;;
+  esac
+}
+
 assert_file() {
   if [ -f "$1" ]; then
     pass "$2"
@@ -322,6 +332,10 @@ test_dry_run_install() {
   assert_not_file "${WORKDIR}/opt/bin/flowlens" "dry-run does not write binary"
   assert_not_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "dry-run does not write manifest"
   assert_contains "$(cat "${out}")" "dry-run" "dry-run reports actions"
+  assert_contains "$(cat "${out}")" "glibc 2.28" "dry-run mentions glibc 2.28"
+  assert_contains "$(cat "${out}")" "libpcap" "dry-run mentions libpcap"
+  assert_contains "$(cat "${out}")" "CAP_NET_RAW" "dry-run mentions CAP_NET_RAW"
+  assert_contains "$(cat "${out}")" "--setcap" "dry-run mentions --setcap"
 }
 
 test_install_and_uninstall() {
@@ -333,12 +347,28 @@ test_install_and_uninstall() {
   assert_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "install writes manifest"
   assert_file "${TEST_HOME}/.bashrc" "default bash PATH file is created"
   assert_contains "$(cat "${TEST_HOME}/.bashrc")" "flowlens installer" "PATH marker is written"
+  assert_contains "$(cat "${out}")" "glibc 2.28" "install mentions glibc 2.28"
+  assert_contains "$(cat "${out}")" "libpcap" "install mentions libpcap"
+  assert_contains "$(cat "${out}")" "CAP_NET_RAW" "install mentions CAP_NET_RAW"
+  assert_contains "$(cat "${out}")" "--setcap" "install mentions --setcap"
   chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
   out="${WORKDIR}/uninstall.out"
   status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall --install-dir "${WORKDIR}/opt/bin")"
   assert_eq "${status}" "0" "uninstall exits 0"
   assert_not_file "${WORKDIR}/opt/bin/flowlens" "uninstall removes binary"
   assert_not_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "uninstall removes manifest"
+}
+
+test_no_modify_path_prints_hint() {
+  local out status
+  out="${WORKDIR}/no-path.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0 --install-dir "${WORKDIR}/opt/bin" --no-modify-path)"
+  assert_eq "${status}" "0" "--no-modify-path install exits 0"
+  assert_contains "$(cat "${out}")" "PATH was not modified" "--no-modify-path mentions PATH"
+  assert_contains "$(cat "${out}")" "${WORKDIR}/opt/bin" "--no-modify-path names install dir"
+  chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
+  status="$(run_installer "${WORKDIR}/no-path-uninstall.out" "${WORKDIR}/install.sh" --uninstall --install-dir "${WORKDIR}/opt/bin")"
+  assert_eq "${status}" "0" "--no-modify-path uninstall exits 0"
 }
 
 write_sums_for() {
@@ -447,6 +477,8 @@ test_setcap_success_records_manifest() {
   assert_eq "${status}" "0" "--setcap install exits 0"
   assert_contains "$(cat "${TEST_HOME}/.local/share/flowlens/install-manifest")" "setcap=true" "manifest records setcap=true"
   assert_file "${WORKDIR}/setcap.args" "setcap was invoked"
+  assert_contains "$(cat "${out}")" "CAP_NET_RAW" "--setcap install mentions CAP_NET_RAW"
+  assert_not_contains "$(cat "${out}")" "Re-run with --setcap" "--setcap install does not ask to re-run --setcap"
   rm -f "${WORKDIR}/bin/setcap"
 }
 
@@ -530,6 +562,7 @@ main() {
       make_test_installer
     fi
     test_install_and_uninstall
+    test_no_modify_path_prints_hint
     test_sha256_mismatch_exits_5
     test_archive_extra_file_exits_5
     test_archive_path_traversal_exits_5

@@ -850,13 +850,33 @@ preflight_install() {
   fi
 }
 
+print_post_install_notes() {
+  local path_updated="$1"
+  if [ "${PLATFORM}" = "linux" ]; then
+    log "Linux binaries require glibc 2.28 or newer."
+    log "libpcap is required at runtime; this installer does not install it."
+    if [ "${WANT_SETCAP}" -eq 1 ]; then
+      log "Capture requires root or CAP_NET_RAW."
+    else
+      log "Capture requires root or CAP_NET_RAW. Re-run with --setcap, or: sudo setcap cap_net_raw+ep ${BINARY_PATH}"
+    fi
+  fi
+  if [ "${WANT_NO_MODIFY_PATH}" -eq 1 ]; then
+    log "PATH was not modified. Add ${INSTALL_DIR} to PATH to run flowlens."
+  elif [ "${path_updated}" = "1" ]; then
+    log "Restart the shell, or source ${PATH_FILE}, to use the flowlens command."
+  fi
+}
+
 commit_install() {
-  local tmp_bin tmp_manifest tmp_path setcap_val path_file_out
+  local tmp_bin tmp_manifest tmp_path setcap_val path_file_out path_updated
   setcap_val="false"
   path_file_out=""
+  path_updated="0"
   choose_path_file
   if should_modify_path; then
     path_file_out="${PATH_FILE}"
+    path_updated="1"
   fi
   if [ "${WANT_SETCAP}" -eq 1 ]; then
     setcap_val="true"
@@ -869,6 +889,7 @@ commit_install() {
     if [ -n "${path_file_out}" ]; then
       log "dry-run: would update PATH in ${path_file_out}"
     fi
+    print_post_install_notes "${path_updated}"
     return
   fi
   priv mkdir -p "${MANIFEST_DIR}" || die 6 "manifest directory is not writable: ${MANIFEST_DIR}"
@@ -918,6 +939,7 @@ commit_install() {
     TMP_PATH_FILE=""
   fi
   log "installed FlowLens ${VERSION} to ${BINARY_PATH}"
+  print_post_install_notes "${path_updated}"
 }
 
 do_install() {
