@@ -1057,19 +1057,27 @@ impl Stats {
             entry.recv += shared.recv;
             entry.sent += shared.sent;
         }
-        let mut entries: Vec<(ProcessKey, ProcTraffic)> = combined.into_iter().collect();
         // 窗口口径优先（ADR 0013 第二刀）：活跃流量排前，累计字节只作同窗决胜，
         // 消除历史大户对 top-N 的长期占位。
         let epoch = self.proc_window_epoch.unwrap_or(0);
-        entries.sort_unstable_by_key(|(key, lifetime)| {
-            let window = self
-                .proc_windows
-                .get(key)
-                .map_or(0u64, |windows| windows.window(epoch).total());
-            std::cmp::Reverse((window, lifetime.recv + lifetime.sent))
+        let mut entries: Vec<(ProcessKey, ProcTraffic, u64)> = combined
+            .into_iter()
+            .filter_map(|(key, lifetime)| {
+                let window = self
+                    .proc_windows
+                    .get(&key)
+                    .map_or(0u64, |windows| windows.window(epoch).total());
+                (window > 0).then_some((key, lifetime, window))
+            })
+            .collect();
+        entries.sort_unstable_by_key(|(_, lifetime, window)| {
+            std::cmp::Reverse((*window, lifetime.recv + lifetime.sent))
         });
         entries.truncate(n);
         entries
+            .into_iter()
+            .map(|(key, lifetime, _)| (key, lifetime))
+            .collect()
     }
 
     fn top_domains(&self, n: usize) -> Vec<(Arc<str>, DomainTraffic)> {
@@ -1750,14 +1758,60 @@ mod tests {
         );
 
         let snapshot = stats.snapshot(10);
+        assert_eq!(snapshot.processes.len(), 1);
         assert_eq!(snapshot.processes[0].pid(), Some(8));
         assert_eq!(snapshot.processes[0].window.sent, 10);
-        assert_eq!(snapshot.processes[1].pid(), Some(7));
-        // 1000 B 已滑出 5 分钟窗口，只保留累计值。
-        assert_eq!(snapshot.processes[1].window.total(), 0);
-        assert_eq!(snapshot.processes[1].sent, 1000);
+        // 1000 B 已滑出 5 分钟窗口，历史进程不再占用 top-N 名额。
+        assert!(
+            !snapshot
+                .processes
+                .iter()
+                .any(|process| process.pid() == Some(7))
+        );
     }
 
+    #[test]
+    fn zero_window_shared_candidates_are_not_returned_as_top_processes() {
+        let mut stats = Stats::default();
+        let old_candidates = vec![
+            ObservedProcess {
+                pid: 101,
+                name: Some(Arc::from("sshd")),
+                path: None,
+            },
+            ObservedProcess {
+                pid: 102,
+                name: Some(Arc::from("sshd")),
+                path: None,
+            },
+        ];
+        stats.record_shared(
+            &old_candidates,
+            Direction::Inbound,
+            1000,
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+        );
+        stats.record_flow_at(
+            flow(Direction::Inbound, [10, 0, 0, 3], 10),
+            Some(ObservedProcess {
+                pid: 103,
+                name: Some(Arc::from("curl")),
+                path: None,
+            }),
+            "2026-07-15T08:09:00Z".parse().unwrap(),
+        );
+
+        let snapshot = stats.snapshot(50);
+
+        assert_eq!(snapshot.processes.len(), 1);
+        assert_eq!(snapshot.processes[0].pid(), Some(103));
+        assert!(
+            !snapshot
+                .processes
+                .iter()
+                .any(|process| matches!(process.pid(), Some(101 | 102)))
+        );
+    }
     /// ADR 0013 第二刀：窗口口径守恒——窗口内四通道之和恰为窗口内记录字节，
     /// 滑出窗口后衰减为 0，累计口径不受影响。
     #[test]
