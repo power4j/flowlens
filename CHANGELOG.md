@@ -16,6 +16,31 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Security
 
+## [0.4.0] - 2026-08-22
+
+### Added
+
+- Linux `x86_64`/`aarch64` one-click installer (`install.sh`) that fetches GitHub Releases, verifies `SHA256SUMS`, and supports dry-run, PATH updates, `--setcap`, and uninstall. After install it prints glibc `2.28+`, libpcap, and `CAP_NET_RAW` next steps. macOS is recognized but fails until Release assets exist.
+- Inclusive graded process attribution: exclusive, shared, system, and unattributed channels with a conservation summary. Shared bytes are counted in full on each candidate process and process-row totals can exceed interface totals.
+- Process TUI summary for Exclusive, Shared, System, and Unattributed traffic, an `Attr` column (`E` exclusive-only, `M` mixed), and a process-detail Attribution breakdown with shared-with partners.
+- Socket-to-PID history recovery with a PID start-time gate, so short-lived connections can be attributed without PID-reuse misattribution.
+- A 5-minute rolling window for process top-N ranking; lifetime totals remain in process details and reports. JSON and TSV include window fields.
+
+### Changed
+
+- Process top-N ranks by exclusive plus shared window totals. System and unattributed traffic stay in the summary and no longer occupy ranked rows.
+- Process-detail Attribution labels lifetime versus 5-minute window totals, and states that shared traffic is included in Total and may appear in multiple processes.
+
+### Fixed
+
+- Processes with no traffic in the current 5-minute window are excluded from the top list.
+
+### Removed
+
+### Deprecated
+
+### Security
+
 ## [0.3.0] - 2026-08-14
 
 ### Added
