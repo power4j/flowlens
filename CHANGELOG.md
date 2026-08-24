@@ -6,9 +6,17 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+- TUI quit confirmation: `q`, `Esc` (when it would leave the app), and `Ctrl+C` open a prompt; confirm with `q`/`y`/`Enter`, or cancel with `n`/`Esc`. Process details `Esc` still returns to the list.
+
 ### Changed
 
+- Process list, overview preview, conservation summary, and top-N ranking use start-of-capture lifetime totals. Historical heavy hitters stay visible. The 5-minute window remains on the process detail page and in JSON/TSV reports.
+- Process details show `Last seen` under `Path`.
+- Process-detail Attribution rows use equal-width Exclusive/Shared/Total labels and right-aligned Recv/Sent values.
+
 ### Fixed
+
+- The Attribution `Total` equation no longer inherits Recv/Sent padding, so values such as `Shared 0 B` are not stretched.
 
 ### Removed
 
