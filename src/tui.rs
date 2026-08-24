@@ -1855,8 +1855,8 @@ fn process_attribution_detail_lines(process: &ProcessSnapshot) -> Vec<Line<'stat
             "  {label:<label_width$} {total} = Exclusive {exclusive} + Shared {shared}",
             label = "Total:",
             total = value(process.total()),
-            exclusive = value(exclusive.total()),
-            shared = value(shared.total()),
+            exclusive = human_bytes(exclusive.total()),
+            shared = human_bytes(shared.total()),
         )),
     ]
 }
@@ -4154,6 +4154,42 @@ mod tests {
             ),
             KeyOutcome::Quit
         ));
+    }
+
+    #[test]
+    fn process_attribution_total_line_keeps_equation_values_tight() {
+        let process = ProcessSnapshot::attributed_with_shared(
+            7,
+            Some(Arc::from("app")),
+            None,
+            chrono::Utc::now(),
+            crate::stats::ProcTraffic {
+                recv: 556_564,
+                sent: 508_365,
+            },
+            crate::stats::ProcTraffic::default(),
+            Vec::new(),
+        );
+        let lines = process_attribution_detail_lines(&process);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text[2].contains("= Exclusive 1.02 MB + Shared 0 B"),
+            "total equation should not inherit Recv/Sent padding: {}",
+            text[2]
+        );
+        assert!(
+            !text[2].contains("Shared      0 B") && !text[2].contains("Shared       0 B"),
+            "shared addend should not be right-padded: {}",
+            text[2]
+        );
     }
 
     #[test]
