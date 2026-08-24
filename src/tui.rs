@@ -175,6 +175,8 @@ struct AppState {
     diagnostics_pending_path: Option<PathBuf>,
     /// Selected settings row (0 = Palette, 1 = Diagnostics).
     settings_selection: usize,
+    /// Waiting for a second confirmation before leaving the TUI.
+    quit_confirm: bool,
 }
 
 impl AppState {
@@ -201,6 +203,7 @@ impl AppState {
             diagnostics_file: None,
             diagnostics_pending_path: None,
             settings_selection: 0,
+            quit_confirm: false,
         }
     }
 
@@ -288,10 +291,11 @@ where
         return KeyOutcome::Ignored;
     }
 
-    if matches!(key.code, KeyCode::Char('q'))
-        || matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))
-    {
-        return KeyOutcome::Quit;
+    if state.quit_confirm {
+        return handle_quit_confirm_key(state, key);
+    }
+    if is_quit_request(key) {
+        return request_quit(state);
     }
 
     if let Some(selector) = state.interface_selector.as_mut() {
@@ -691,15 +695,47 @@ where
     Ok(false)
 }
 
+fn is_quit_request(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+        || matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn request_quit(state: &mut AppState) -> KeyOutcome {
+    state.quit_confirm = true;
+    KeyOutcome::Changed
+}
+
+fn handle_quit_confirm_key(state: &mut AppState, key: KeyEvent) -> KeyOutcome {
+    if is_quit_request(key)
+        || matches!(
+            key.code,
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+        )
+    {
+        return KeyOutcome::Quit;
+    }
+    if matches!(
+        key.code,
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
+    ) {
+        state.quit_confirm = false;
+        return KeyOutcome::Changed;
+    }
+    KeyOutcome::Ignored
+}
+
 fn handle_key(state: &mut AppState, key: KeyEvent, snapshot: &TrafficSnapshot) -> KeyOutcome {
+    if state.quit_confirm {
+        return handle_quit_confirm_key(state, key);
+    }
     match key.code {
-        KeyCode::Char('q') => KeyOutcome::Quit,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyOutcome::Quit,
+        KeyCode::Char('q') | KeyCode::Char('Q') => request_quit(state),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => request_quit(state),
         KeyCode::Esc if state.process_detail.is_some() => {
             state.process_detail = None;
             KeyOutcome::Changed
         }
-        KeyCode::Esc => KeyOutcome::Quit,
+        KeyCode::Esc => request_quit(state),
         KeyCode::Enter if state.page == Page::Processes && state.process_detail.is_none() => {
             let Some(process) = snapshot.processes.get(state.proc_scroll) else {
                 return KeyOutcome::Ignored;
@@ -983,11 +1019,17 @@ fn draw_with_interfaces_at(
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         draw_too_small(f, area);
+        if state.quit_confirm {
+            draw_quit_confirm(f, area);
+        }
         return;
     }
 
     if let Some(selector) = state.interface_selector.as_ref() {
         draw_interface_selector(f, area, selector, interfaces, interface);
+        if state.quit_confirm {
+            draw_quit_confirm(f, area);
+        }
         return;
     }
 
@@ -1029,6 +1071,9 @@ fn draw_with_interfaces_at(
 
     if state.settings_open {
         draw_settings(f, area, state);
+    }
+    if state.quit_confirm {
+        draw_quit_confirm(f, area);
     }
 }
 
@@ -2463,6 +2508,45 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_quit_confirm(f: &mut ratatui::Frame, area: Rect) {
+    let popup = centered_rect(area, 50, 7);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette::warn()))
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "Confirm",
+                Style::default()
+                    .fg(palette::warn())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]));
+    let inner = block.inner(popup);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "Quit FlowLens?",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "q/y/Enter quit   n/Esc cancel",
+            Style::default().fg(palette::muted()),
+        )),
+    ];
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Block::default().style(Style::default().bg(palette::bg())),
+        popup,
+    );
+    f.render_widget(block, popup);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 /// Center a rect of `width_pct`% of `area`'s width and `height` rows, vertically
 /// and horizontally. Used for overlay popups.
 fn centered_rect(area: Rect, width_pct: u16, height: u16) -> Rect {
@@ -2639,6 +2723,19 @@ mod tests {
             ),
             KeyOutcome::Ignored
         );
+        assert!(state.interface_selector.is_some());
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &mut Arc::new(TrafficSnapshot::default()),
+                &interfaces,
+                None,
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
         assert!(state.interface_selector.is_some());
         assert_eq!(
             handle_tui_key(
@@ -2951,6 +3048,18 @@ mod tests {
             handle_tui_key(
                 &mut state,
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &mut snapshot,
+                &interfaces,
+                Some("eth0"),
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
                 &mut snapshot,
                 &interfaces,
                 Some("eth0"),
@@ -4144,8 +4253,10 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
                 &snapshot,
             ),
-            KeyOutcome::Quit
+            KeyOutcome::Changed
         ));
+        assert!(state.quit_confirm);
+        assert!(state.process_detail.is_some());
         assert!(matches!(
             handle_key(
                 &mut state,
@@ -5445,8 +5556,57 @@ mod tests {
         );
         assert_eq!(state.page, Page::Overview);
 
-        // q still quits globally even with the overlay open.
+        // q still requests a global quit even with the overlay open.
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
+        assert!(state.settings_open);
         assert_eq!(send_key(&mut state, KeyCode::Char('q')), KeyOutcome::Quit);
+    }
+
+    #[test]
+    fn quit_requires_confirmation_and_can_be_cancelled() {
+        let mut state = AppState::new();
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('n')),
+            KeyOutcome::Changed
+        );
+        assert!(!state.quit_confirm);
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.quit_confirm);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Quit);
+    }
+
+    #[test]
+    fn quit_confirm_overlay_renders_prompt() {
+        let mut state = AppState::new();
+        state.quit_confirm = true;
+        let snapshot = TrafficSnapshot::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("Confirm"));
+        assert!(rendered.contains("Quit FlowLens?"));
+        assert!(rendered.contains("q/y/Enter quit"));
+        assert!(rendered.contains("n/Esc cancel"));
     }
 
     #[test]
