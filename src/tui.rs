@@ -1814,6 +1814,53 @@ fn pending_status_title(bytes: u64, area_width: u16) -> Line<'static> {
     .alignment(Alignment::Right)
 }
 
+fn process_attribution_detail_lines(process: &ProcessSnapshot) -> Vec<Line<'static>> {
+    let exclusive = &process.attribution.exclusive;
+    let shared = &process.attribution.shared;
+    let label_width = ["Exclusive:", "Shared:", "Total:"]
+        .into_iter()
+        .map(str::len)
+        .max()
+        .expect("attribution labels are not empty");
+    let value_width = [
+        exclusive.total(),
+        exclusive.recv,
+        exclusive.sent,
+        shared.total(),
+        shared.recv,
+        shared.sent,
+        process.total(),
+    ]
+    .into_iter()
+    .map(|bytes| human_bytes(bytes).chars().count())
+    .max()
+    .unwrap_or(0);
+    let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
+    vec![
+        Line::from(format!(
+            "  {label:<label_width$} {total}  Recv {recv}  Sent {sent}",
+            label = "Exclusive:",
+            total = value(exclusive.total()),
+            recv = value(exclusive.recv),
+            sent = value(exclusive.sent),
+        )),
+        Line::from(format!(
+            "  {label:<label_width$} {total}  Recv {recv}  Sent {sent}",
+            label = "Shared:",
+            total = value(shared.total()),
+            recv = value(shared.recv),
+            sent = value(shared.sent),
+        )),
+        Line::from(format!(
+            "  {label:<label_width$} {total} = Exclusive {exclusive} + Shared {shared}",
+            label = "Total:",
+            total = value(process.total()),
+            exclusive = value(exclusive.total()),
+            shared = value(shared.total()),
+        )),
+    ]
+}
+
 fn draw_process_detail(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1845,31 +1892,14 @@ fn draw_process_detail(
                 .fg(palette::strong())
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(format!(
-            "  Exclusive: {}  Recv {}  Sent {}",
-            human_bytes(process.attribution.exclusive.total()),
-            human_bytes(process.attribution.exclusive.recv),
-            human_bytes(process.attribution.exclusive.sent)
-        )),
-        Line::from(format!(
-            "  Shared:    {}  Recv {}  Sent {}",
-            human_bytes(process.attribution.shared.total()),
-            human_bytes(process.attribution.shared.recv),
-            human_bytes(process.attribution.shared.sent)
-        )),
-        Line::from(format!(
-            "  Total: {} = Exclusive {} + Shared {}",
-            human_bytes(process.total()),
-            human_bytes(process.attribution.exclusive.total()),
-            human_bytes(process.attribution.shared.total())
-        )),
-        Line::from(format!(
-            "Window (5m): {}  Recv {}  Sent {}",
-            human_bytes(process.window.total()),
-            human_bytes(process.window.recv),
-            human_bytes(process.window.sent)
-        )),
     ];
+    lines.extend(process_attribution_detail_lines(process));
+    lines.push(Line::from(format!(
+        "Window (5m): {}  Recv {}  Sent {}",
+        human_bytes(process.window.total()),
+        human_bytes(process.window.recv),
+        human_bytes(process.window.sent)
+    )));
     if !process.attribution.shared_with.is_empty() {
         lines.push(Line::from(format!(
             "  Shared with: {}",
@@ -4186,8 +4216,26 @@ mod tests {
         assert!(rendered.contains("Total: 4.50 KB"));
         assert!(rendered.contains("Attribution (lifetime)"));
         assert!(rendered.contains("Exclusive: 3.00 KB  Recv 1.00 KB  Sent 2.00 KB"));
-        assert!(rendered.contains("Shared:    1.50 KB  Recv 512 B  Sent 1.00 KB"));
-        assert!(rendered.contains("Total: 4.50 KB = Exclusive 3.00 KB + Shared 1.50 KB"));
+        assert!(rendered.contains("Shared:    1.50 KB  Recv   512 B  Sent 1.00 KB"));
+        assert!(rendered.contains("Total:     4.50 KB = Exclusive 3.00 KB + Shared 1.50 KB"));
+        let exclusive = lines
+            .iter()
+            .find(|line| line.contains("Exclusive:") && line.contains("Recv"))
+            .expect("exclusive attribution row");
+        let shared = lines
+            .iter()
+            .find(|line| line.contains("Shared:") && line.contains("Recv"))
+            .expect("shared attribution row");
+        let total = lines
+            .iter()
+            .find(|line| line.contains("Total:") && line.contains("= Exclusive"))
+            .expect("total attribution row");
+        let value_column = |line: &str| {
+            line.find(|ch: char| ch.is_ascii_digit())
+                .expect("attribution value")
+        };
+        assert_eq!(value_column(exclusive), value_column(shared));
+        assert_eq!(value_column(shared), value_column(total));
         assert!(rendered.contains("Window (5m): 768 B  Recv 256 B  Sent 512 B"));
         assert!(
             rendered.contains(
