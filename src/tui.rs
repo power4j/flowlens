@@ -1598,12 +1598,12 @@ fn process_rows(
             let name = Cell::from(process_name_span(process, 40));
             // ADR 0013（2026-08-19 修订）：Attr 列值单字母，E = exclusive-only（全部独占），
             // M = mixed（含共享字节）；构成明细与图例在详情页。
-            // Recv/Sent/Total 为窗口口径（5 分钟滚动）；累计字节在详情页与报表。
+            // Recv/Sent/Total 为启动以来累计口径；窗口字节仍在详情页。
             let attr = if process.is_mixed() { "M" } else { "E" };
             if compact {
                 Row::new(vec![
                     name,
-                    Cell::from(human_bytes(process.window.total()))
+                    Cell::from(human_bytes(process.total()))
                         .style(Style::default().fg(palette::strong())),
                     Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
@@ -1617,11 +1617,11 @@ fn process_rows(
                             .map(|pid| pid.to_string())
                             .unwrap_or_else(|| "-".to_string()),
                     ),
-                    Cell::from(human_bytes(process.window.recv))
+                    Cell::from(human_bytes(process.recv))
                         .style(Style::default().fg(palette::inbound())),
-                    Cell::from(human_bytes(process.window.sent))
+                    Cell::from(human_bytes(process.sent))
                         .style(Style::default().fg(palette::outbound())),
-                    Cell::from(human_bytes(process.window.total()))
+                    Cell::from(human_bytes(process.total()))
                         .style(Style::default().fg(palette::strong())),
                     Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
@@ -1707,8 +1707,8 @@ fn draw_processes(
 /// ADR 0013 记录层守恒摘要（已结算口径）：总计 = 独占 + 共享 + 系统 + 未归属。
 /// 宽屏三行（守恒行 + System + Unattributed）；紧凑两行（System 并入守恒行）。
 fn attribution_summary_lines(snapshot: &TrafficSnapshot, compact: bool) -> Vec<Line<'static>> {
-    // ADR 0013 第二刀：摘要与表格同窗口口径（5 分钟滚动）。
-    let attribution = &snapshot.attribution_window;
+    // 摘要与表格同用启动以来累计口径。
+    let attribution = &snapshot.attribution;
     let muted = Style::default().fg(palette::muted());
     let mut lines = vec![Line::from(vec![
         Span::styled("Total ", muted),
@@ -3683,11 +3683,14 @@ mod tests {
             .unwrap();
 
         let rendered = rendered_lines(&terminal).join("\n");
-        // 守恒摘要（ADR 0013）
-        assert!(rendered.contains("Exclusive"));
-        assert!(rendered.contains("Shared"));
-        assert!(rendered.contains("System"));
-        assert!(rendered.contains("Unattributed"));
+        // 守恒摘要使用 lifetime，而不是 5 分钟窗口。
+        assert!(rendered.contains("Total 1.93 KB"));
+        assert!(rendered.contains("Exclusive 1.66 KB"));
+        assert!(rendered.contains("Shared 150 B"));
+        assert!(rendered.contains("System 30 B"));
+        assert!(rendered.contains("Unattributed 100 B"));
+        assert!(rendered.contains("1.66 KB"));
+        assert!(rendered.contains("150 B"));
         // Attr 列：表头用词，值单字母（E = exclusive-only，M = mixed）
         assert!(rendered.contains("Attr"));
         assert!(rendered.contains(" E "));
