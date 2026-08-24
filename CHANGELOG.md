@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.5.0] - 2026-08-24
+
+### Added
+
 - TUI quit confirmation: `q`, `Esc` (when it would leave the app), and `Ctrl+C` open a prompt; confirm with `q`/`y`/`Enter`, or cancel with `n`/`Esc`. Process details `Esc` still returns to the list.
 
 ### Changed
