@@ -1881,6 +1881,10 @@ fn draw_process_detail(
                 .unwrap_or_else(|| "-".to_string())
         )),
         Line::from(format!("Path: {}", process.path().unwrap_or("-"))),
+        Line::from(format!(
+            "Last seen: {}",
+            relative_last_seen(process.last_seen(), now)
+        )),
         Line::from(""),
         Line::from(format!("Recv: {}", human_bytes(process.recv))),
         Line::from(format!("Sent: {}", human_bytes(process.sent))),
@@ -1913,10 +1917,6 @@ fn draw_process_detail(
     lines.push(Line::from(Span::styled(
         "  Attr: E = exclusive only, M = mixed (includes shared)",
         Style::default().fg(palette::muted()),
-    )));
-    lines.push(Line::from(format!(
-        "Last seen: {}",
-        relative_last_seen(process.last_seen(), now)
     )));
     if detail.paused.is_some() {
         lines.push(Line::from(""));
@@ -4295,12 +4295,18 @@ mod tests {
             .trim_start()
             .to_string();
         for continuation in &inner_lines[path_line + 1..] {
-            if continuation.trim().is_empty() {
+            if continuation.trim().is_empty() || continuation.trim_start().starts_with("Last seen:")
+            {
                 break;
             }
             displayed_path.push_str(continuation.trim_end());
         }
         assert_eq!(displayed_path, path);
+        let path_pos = rendered.find("Path:").expect("path field");
+        let last_seen_pos = rendered.find("Last seen:").expect("last seen field");
+        let recv_pos = rendered.find("Recv: ").expect("recv field");
+        assert!(path_pos < last_seen_pos, "Last seen should follow Path");
+        assert!(last_seen_pos < recv_pos, "Last seen should precede Recv");
         for line in lines {
             let field_count = [
                 "Name:",
