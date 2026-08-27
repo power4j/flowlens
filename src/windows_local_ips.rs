@@ -11,12 +11,12 @@ use windows::Win32::Networking::WinSock::{
 };
 
 const AF_UNSPEC: u32 = 0;
-const FLAGS: u32 = GAA_FLAG_SKIP_ANYCAST.0
+const NATIVE_IP_QUERY_FLAGS: u32 = GAA_FLAG_SKIP_ANYCAST.0
     | GAA_FLAG_SKIP_DNS_SERVER.0
     | GAA_FLAG_SKIP_FRIENDLY_NAME.0
     | GAA_FLAG_SKIP_MULTICAST.0;
 
-pub(crate) fn query() -> Result<Vec<IpAddr>, String> {
+pub(crate) fn query_native_local_ips() -> Result<Vec<IpAddr>, String> {
     let buffer = adapter_buffer()?;
     let mut addresses = Vec::new();
     let mut adapter = buffer.as_ptr().cast_mut().cast::<IP_ADAPTER_ADDRESSES_LH>();
@@ -45,7 +45,9 @@ fn adapter_buffer() -> Result<Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>, String>
     let status = unsafe {
         GetAdaptersAddresses(
             AF_UNSPEC,
-            windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS(FLAGS),
+            windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS(
+                NATIVE_IP_QUERY_FLAGS,
+            ),
             None,
             None,
             &raw mut size,
@@ -62,7 +64,9 @@ fn adapter_buffer() -> Result<Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>, String>
         let status = unsafe {
             GetAdaptersAddresses(
                 AF_UNSPEC,
-                windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS(FLAGS),
+                windows::Win32::NetworkManagement::IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS(
+                    NATIVE_IP_QUERY_FLAGS,
+                ),
                 None,
                 Some(buffer.as_mut_ptr().cast()),
                 &raw mut size,
@@ -158,7 +162,7 @@ mod tests {
     #[test]
     #[ignore = "requires the Windows network stack"]
     fn live_query_reads_windows_addresses() {
-        let addresses = query().unwrap();
+        let addresses = query_native_local_ips().unwrap();
         println!("native local addresses: {addresses:?}");
         assert!(!addresses.is_empty());
     }

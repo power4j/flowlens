@@ -435,7 +435,7 @@ fn collect_local_ips_with_native(
 
 #[cfg(windows)]
 fn native_local_ips() -> Vec<IpAddr> {
-    match crate::windows_local_ips::query() {
+    match crate::windows_local_ips::query_native_local_ips() {
         Ok(addresses) => addresses,
         Err(error) => {
             eprintln!("native local IP query failed: {error}");

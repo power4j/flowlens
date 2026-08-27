@@ -1,7 +1,7 @@
 # Tailscale 文件传输在 Red Hat VirtIO 网卡上严重少计流量
 
 Type: task
-Status: needs-info
+Status: resolved
 Branch: `fix/tailscale-virtio-capture-accounting`
 Reported: 2026-08-26
 
@@ -40,7 +40,6 @@ Reported: 2026-08-26
 
 在 30 秒窗口内执行 Tailscale 文件传输。预期当前版本返回非零退出码，并显示：
 
-- `refcap/adapter` 接近 1；
 - `flowlens/refcap-IP` 显著低于 0.9；
 - Npcap `dropped` 与 `if_dropped` 为 0 或接近 0。
 
@@ -79,7 +78,6 @@ Reported: 2026-08-26
 
 - 2026-08-26：复核发现显式 `\Device\NPF_Loopback` 不具备物理网卡 GUID；保留 Loopback 采集能力，但不再伪造 Windows 网卡计数器，计数器显示为不可用。
 
-- 2026-08-27：复核 `result-2`，确认 Red Hat VirtIO 设备的抓包层正常：`refcap/adapter = 98.5%`、Npcap 丢包为 0，但 FlowLens 仅记录 19,621 字节，红灯验证有效。
 
 - 2026-08-27：复核 `result-3`，FlowLens 已读取 237,550,079 字节，其中 237,468,353 字节（99.97%）被判定为非本地 IPv4；解析错误仅 44,492 字节。当前首要假设收敛为启动时 `local_ips` 快照不包含 VirtIO 上实际承载 Tailscale 外层报文的端点地址。
 
@@ -88,3 +86,5 @@ Reported: 2026-08-26
 - 2026-08-27：复核 `result-4`，确认 FlowLens 已读取 667,488 个数据包、625,757,801 字节，其中 667,245 个非本地 IPv4 数据包占 625,726,471 字节；端点样本主要为 `10.11.12.31 <-> 10.11.12.250`。其中 `10.11.12.31` 是测试机 VirtIO 地址；`capture.local_ips` 包含 Tailscale 地址 `100.127.185.26`，但不包含本机的 `10.11.12.31`。因此根因收敛为 Npcap `Device.addresses` 的本机地址列表不完整，而非抓包丢包或解析吞吐不足。
 
 - 2026-08-27：实施最小修复：Windows 启动时通过 `GetAdaptersAddresses` 读取系统所有已配置单播 IPv4/IPv6 地址，与 Npcap 设备地址集合合并；保留原有 Npcap 地址，避免改变接口选择和其他平台行为。新增 IPv4/IPv6 `SOCKET_ADDRESS` 解析测试，以及覆盖「Npcap 缺少 VirtIO 地址、原生地址补齐」的回归测试。开发机上的 Windows 原生查询已验证 API 可返回本机 IPv4；测试机应由该 API 补充 `10.11.12.31`。
+
+- 2026-08-27：复核 `temp/20260826-tailscale-issue/result-6`，在实际 Tailscale 文件传输场景下验证通过：`refcap/adapter = 100.0%`、`flowlens/refcap-IP = 93.3%`，`Capture layer OK`、`Pipeline layer OK` 和 `OVERALL` 均为 `True`；`capture.local_ips` 已包含 `10.11.12.31`，且主要流量已归属 `tailscaled.exe`。
