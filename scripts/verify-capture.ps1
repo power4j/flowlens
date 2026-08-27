@@ -25,6 +25,10 @@
 .EXAMPLE
     # Test whether a larger Npcap kernel buffer changes capture-side loss
     .\scripts\verify-capture.ps1 -IperfServer 192.168.1.10 -BufferSize 16777216 -Snaplen 65535
+
+.EXAMPLE
+    # Bind both capture and Windows counters to a specific adapter GUID
+    .\scripts\verify-capture.ps1 -ManualMode -Interface '\Device\NPF_{8A8121CE-B85E-4602-BB53-05412604BE26}'
 #>
 [CmdletBinding()]
 param(
@@ -68,7 +72,11 @@ if (-not $FlowLensPath) { $FlowLensPath = Join-Path $repoRoot 'target\release\fl
 if (-not $RefcapPath) { $RefcapPath = Join-Path $repoRoot 'target\release\refcap.exe' }
 if (-not $OutputDir) { $OutputDir = Join-Path $repoRoot ("temp\verify-capture-" + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 
-foreach ($tool in @($IperfPath, $FlowLensPath, $RefcapPath)) {
+$requiredTools = @($FlowLensPath, $RefcapPath)
+if ($IperfServer) {
+    $requiredTools += $IperfPath
+}
+foreach ($tool in $requiredTools) {
     if (-not (Test-Path -LiteralPath $tool)) {
         throw "Tool not found: $tool"
     }
@@ -90,6 +98,47 @@ function Convert-BandwidthBytesPerSec {
     [long][math]::Round($number * $factor / 8)
 }
 
+function Get-FlowLensArguments {
+    param(
+        [string]$DeviceName,
+        [string]$OutputPath,
+        [string]$DiagnosticsPath
+    )
+
+    @(
+        $DeviceName,
+        '--format', 'json',
+        '--output', $OutputPath,
+        '--top-n', '5',
+        '--diagnostics',
+        '--diagnostics-output', $DiagnosticsPath
+    )
+}
+
+function Get-LatestDiagnosticsSnapshot {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    $latest = $null
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        try {
+            $record = $line | ConvertFrom-Json
+            if ($record.kind -eq 'snapshot') {
+                $latest = $record
+            }
+        } catch {
+            Write-Warning "Ignoring malformed diagnostics line: $_"
+        }
+    }
+    $latest
+}
+
 function Get-RefcapDevices {
     param([string]$Exe)
     $raw = & $Exe --list 2>$null
@@ -108,8 +157,25 @@ function Get-RefcapDevices {
     $devices
 }
 
+function Get-NpcapInterfaceGuid {
+    param([string]$DeviceName)
+    if ([string]::IsNullOrWhiteSpace($DeviceName)) {
+        return $null
+    }
+
+    $match = [regex]::Match(
+        $DeviceName,
+        '^\\Device\\NPF_\{(?<guid>[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\}$'
+    )
+    if (-not $match.Success) {
+        return $null
+    }
+
+    ([guid]$match.Groups['guid'].Value).ToString('D')
+}
+
 function Select-RefcapDevice {
-    param([array]$Devices, [string]$Selector, [string]$AdapterDescription)
+    param([array]$Devices, [string]$Selector, [string]$AdapterGuid)
     if ($Selector) {
         if ($Selector -match '^\d+$') {
             $device = $Devices | Where-Object Index -eq ([int]$Selector) | Select-Object -First 1
@@ -120,15 +186,46 @@ function Select-RefcapDevice {
         if (-not $device) { throw "Interface name '$Selector' not found in refcap --list output." }
         return $device
     }
-    if ($AdapterDescription) {
-        $device = $Devices | Where-Object {
-            $_.Description -and ($_.Description -like "*$AdapterDescription*" -or $AdapterDescription -like "*$($_.Description)*")
-        } | Select-Object -First 1
-        if ($device) { return $device }
+
+    try {
+        $normalizedAdapterGuid = ([guid]$AdapterGuid).ToString('D')
+    } catch {
+        throw 'Cannot safely select an Npcap device because the Windows adapter GUID is unavailable. Specify -Interface explicitly.'
     }
-    $device = $Devices | Where-Object { $_.Description -notmatch 'Loopback' } | Select-Object -First 1
-    if (-not $device) { throw 'No capture device available.' }
-    $device
+
+    $matches = @($Devices | Where-Object {
+        (Get-NpcapInterfaceGuid -DeviceName $_.Name) -eq $normalizedAdapterGuid
+    })
+    if ($matches.Count -eq 0) {
+        throw "No Npcap device matches Windows adapter GUID '$normalizedAdapterGuid'. Specify -Interface explicitly."
+    }
+    if ($matches.Count -gt 1) {
+        throw "Multiple Npcap devices match Windows adapter GUID '$normalizedAdapterGuid'. Specify -Interface explicitly."
+    }
+    $matches[0]
+}
+
+function Select-WindowsAdapter {
+    param([array]$Adapters, [string]$DeviceName)
+    $deviceGuid = Get-NpcapInterfaceGuid -DeviceName $DeviceName
+    if (-not $deviceGuid) {
+        throw "Cannot extract an interface GUID from Npcap device '$DeviceName'."
+    }
+
+    $matches = @($Adapters | Where-Object {
+        try {
+            ([guid]$_.InterfaceGuid).ToString('D') -eq $deviceGuid
+        } catch {
+            $false
+        }
+    })
+    if ($matches.Count -eq 0) {
+        throw "No Windows adapter matches Npcap device GUID '$deviceGuid'."
+    }
+    if ($matches.Count -gt 1) {
+        throw "Multiple Windows adapters match Npcap device GUID '$deviceGuid'."
+    }
+    $matches[0]
 }
 
 function Get-AdapterSnapshot {
@@ -145,29 +242,31 @@ function Get-AdapterSnapshot {
 $devices = Get-RefcapDevices -Exe $RefcapPath
 if ($devices.Count -eq 0) { throw 'refcap --list returned no devices; is Npcap installed?' }
 
-$adapterName = $null
-$adapterDescription = $null
-try {
+if ($Interface) {
+    $device = Select-RefcapDevice -Devices $devices -Selector $Interface -AdapterGuid ''
+    $adapter = $null
+    if (Get-NpcapInterfaceGuid -DeviceName $device.Name) {
+        $adapter = Select-WindowsAdapter `
+            -Adapters @(Get-NetAdapter -ErrorAction Stop) `
+            -DeviceName $device.Name
+    } else {
+        Write-Warning "Npcap device '$($device.Name)' has no Windows adapter GUID; adapter counters are unavailable."
+    }
+} else {
     $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
         Sort-Object RouteMetric | Select-Object -First 1
-    if ($route.InterfaceAlias) {
-        $adapter = Get-NetAdapter -Name $route.InterfaceAlias -ErrorAction Stop
-        $adapterName = $adapter.Name
-        $adapterDescription = $adapter.Description
+    if (-not $route.InterfaceAlias) {
+        throw 'The default IPv4 route does not identify a Windows adapter.'
     }
-} catch {
-    Write-Warning "Could not resolve default-route adapter: $_"
+
+    $adapter = Get-NetAdapter -Name $route.InterfaceAlias -ErrorAction Stop
+    $device = Select-RefcapDevice `
+        -Devices $devices `
+        -Selector '' `
+        -AdapterGuid $adapter.InterfaceGuid
 }
 
-$device = Select-RefcapDevice -Devices $devices -Selector $Interface -AdapterDescription $adapterDescription
-
-# Try to map the chosen pcap device back to a Get-NetAdapter name for counters.
-$counterAdapterName = $adapterName
-if (-not $counterAdapterName -and $device.Description) {
-    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue |
-        Where-Object { $_.Description -eq $device.Description } | Select-Object -First 1
-    if ($adapter) { $counterAdapterName = $adapter.Name }
-}
+$counterAdapterName = if ($adapter) { $adapter.Name } else { $null }
 $adapterCountersAvailable = $false
 $adapterBefore = $null
 if ($counterAdapterName) {
@@ -189,6 +288,8 @@ $refcapLog = Join-Path $OutputDir 'refcap.jsonl'
 $refcapErr = Join-Path $OutputDir 'refcap.err.txt'
 $flowlensJson = Join-Path $OutputDir 'flowlens.json'
 $flowlensErr = Join-Path $OutputDir 'flowlens.err.txt'
+$flowlensDiagnostics = Join-Path $OutputDir 'flowlens-diagnostics.jsonl'
+Remove-Item -LiteralPath $flowlensDiagnostics -Force -ErrorAction SilentlyContinue
 
 $refcapSeconds = $DurationSec + 25
 $refcapArgs = @(
@@ -202,7 +303,10 @@ $refcapArgs = @(
 $refcap = Start-Process -FilePath $RefcapPath -ArgumentList $refcapArgs `
     -WindowStyle Hidden -RedirectStandardError $refcapErr -PassThru
 
-$flowlensArgs = @($device.Name, '--format', 'json', '--output', $flowlensJson, '--top-n', '5')
+$flowlensArgs = @(Get-FlowLensArguments `
+    -DeviceName $device.Name `
+    -OutputPath $flowlensJson `
+    -DiagnosticsPath $flowlensDiagnostics)
 $flowlens = Start-Process -FilePath $FlowLensPath -ArgumentList $flowlensArgs `
     -WindowStyle Hidden -RedirectStandardError $flowlensErr -PassThru
 
@@ -310,6 +414,32 @@ if (Test-Path -LiteralPath $refcapLog) {
     $refcapLines = Get-Content -LiteralPath $refcapLog | ForEach-Object { $_ | ConvertFrom-Json }
 }
 
+$flowlensDiagnosticsSnapshot = Get-LatestDiagnosticsSnapshot -Path $flowlensDiagnostics
+$flowlensCapture = if ($flowlensDiagnosticsSnapshot) {
+    $counters = $flowlensDiagnosticsSnapshot.counters
+    [ordered]@{
+        pcap_received                       = $counters.pcap_received
+        pcap_dropped                        = $counters.pcap_dropped
+        pcap_if_dropped                     = $counters.pcap_if_dropped
+        read_packets                        = $counters.capture_read_packets
+        read_bytes                          = $counters.capture_read_bytes
+        parse_error_packets                 = $counters.capture_parse_error_packets
+        parse_error_bytes                   = $counters.capture_parse_error_bytes
+        non_ip_packets                      = $counters.capture_non_ip_packets
+        non_ip_bytes                        = $counters.capture_non_ip_bytes
+        non_local_ipv4_packets              = $counters.capture_non_local_ipv4_packets
+        non_local_ipv4_bytes                = $counters.capture_non_local_ipv4_bytes
+        non_local_ipv6_packets              = $counters.capture_non_local_ipv6_packets
+        non_local_ipv6_bytes                = $counters.capture_non_local_ipv6_bytes
+        duplicate_outgoing_packets          = $counters.capture_duplicate_outgoing_packets
+        duplicate_outgoing_bytes            = $counters.capture_duplicate_outgoing_bytes
+        flow_created_packets                = $counters.capture_flow_created_packets
+        flow_created_bytes                  = $counters.capture_flow_created_bytes
+    }
+} else {
+    $null
+}
+
 # ---- Compute ratios and verdicts -----------------------------------------------
 
 function Sum-Field([array]$Lines, [string]$Field) {
@@ -317,6 +447,7 @@ function Sum-Field([array]$Lines, [string]$Field) {
 }
 
 $refcapWireBytes = [uint64](Sum-Field $refcapLines 'bytes_wire')
+$refcapCaplenBytes = [uint64](Sum-Field $refcapLines 'bytes_caplen')
 $refcapIpBytes = [uint64](Sum-Field $refcapLines 'bytes_ip')
 $refcapPackets = [uint64](Sum-Field $refcapLines 'packets')
 $refcapDropped = [uint64](Sum-Field $refcapLines 'dropped')
@@ -358,6 +489,7 @@ $report = [ordered]@{
     refcap             = [ordered]@{
         packets         = $refcapPackets
         bytes_wire      = $refcapWireBytes
+        bytes_caplen    = $refcapCaplenBytes
         bytes_ip        = $refcapIpBytes
         dropped         = $refcapDropped
         if_dropped      = $refcapIfDropped
@@ -366,6 +498,7 @@ $report = [ordered]@{
         ip_invalid      = $refcapInvalid
     }
     flowlens_bytes       = $flowlensBytes
+    flowlens_capture     = $flowlensCapture
     ratios             = [ordered]@{
         refcap_wire_over_adapter = [math]::Round($captureRatio, 4)
         flowlens_over_refcap_ip    = [math]::Round($pipelineRatio, 4)
@@ -394,11 +527,40 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("---------------------  ------------  -----------  -------")
 [void]$sb.AppendLine(("Windows adapter       {0,14:N0}" -f $adapterBytes))
 [void]$sb.AppendLine(("refcap wire           {0,14:N0}  {1,11:N0}  {2:P1}" -f $refcapWireBytes, $refcapPackets, $captureRatio))
+[void]$sb.AppendLine(("refcap caplen         {0,14:N0}" -f $refcapCaplenBytes))
 [void]$sb.AppendLine(("refcap IP             {0,14:N0}" -f $refcapIpBytes))
 [void]$sb.AppendLine(("FlowLens in+out         {0,14:N0}  {1,11}  {2:P1}" -f $flowlensBytes, 'n/a', $pipelineRatio))
 [void]$sb.AppendLine("")
 [void]$sb.AppendLine("Npcap dropped      : $refcapDropped packets, if_dropped: $refcapIfDropped")
 [void]$sb.AppendLine("Non-IP frames      : ARP $refcapArp, other $refcapOther, invalid IP $refcapInvalid")
+if ($flowlensCapture) {
+    [void]$sb.AppendLine(
+        "FlowLens pcap      : received $($flowlensCapture.pcap_received), dropped $($flowlensCapture.pcap_dropped), if_dropped $($flowlensCapture.pcap_if_dropped)"
+    )
+    [void]$sb.AppendLine(
+        "FlowLens read      : $($flowlensCapture.read_packets) packets, $($flowlensCapture.read_bytes) bytes"
+    )
+    [void]$sb.AppendLine(
+        "Parse errors       : $($flowlensCapture.parse_error_packets) packets, $($flowlensCapture.parse_error_bytes) bytes"
+    )
+    [void]$sb.AppendLine(
+        "Non-local IPv4     : $($flowlensCapture.non_local_ipv4_packets) packets, $($flowlensCapture.non_local_ipv4_bytes) bytes"
+    )
+    [void]$sb.AppendLine(
+        "Non-local IPv6     : $($flowlensCapture.non_local_ipv6_packets) packets, $($flowlensCapture.non_local_ipv6_bytes) bytes"
+    )
+    [void]$sb.AppendLine(
+        "Non-IP ignored     : $($flowlensCapture.non_ip_packets) packets, $($flowlensCapture.non_ip_bytes) bytes"
+    )
+    [void]$sb.AppendLine(
+        "Outgoing duplicate : $($flowlensCapture.duplicate_outgoing_packets) packets, $($flowlensCapture.duplicate_outgoing_bytes) bytes"
+    )
+    [void]$sb.AppendLine(
+        "Flow created       : $($flowlensCapture.flow_created_packets) packets, $($flowlensCapture.flow_created_bytes) bytes"
+    )
+} else {
+    [void]$sb.AppendLine("FlowLens diagnostics: unavailable")
+}
 [void]$sb.AppendLine("")
 [void]$sb.AppendLine("Traffic generated  : $trafficOk (adapter bytes >= $minAdapterBytes)")
 [void]$sb.AppendLine("Capture layer OK   : $captureOk (refcap/adapter >= $((1 - $AdapterTolerancePercent / 100).ToString('P0')))")

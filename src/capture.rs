@@ -3,8 +3,8 @@ use std::fmt::Write as _;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -16,6 +16,36 @@ use crate::domain_parse_composite::CompositeDomainParser;
 use crate::flow_table::{DEFAULT_FLOW_TABLE_CAPACITY, FlowEntry, FlowKey, FlowTable};
 use crate::stats::Direction;
 
+const NON_LOCAL_ENDPOINT_SAMPLE_LIMIT: usize = 8;
+const NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL: u64 = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NonLocalEndpointSample {
+    pub src: IpAddr,
+    pub dst: IpAddr,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CaptureDiagnosticsSnapshot {
+    pub local_ips: Vec<IpAddr>,
+    pub non_local_ipv4_samples: Vec<NonLocalEndpointSample>,
+    pub non_local_ipv6_samples: Vec<NonLocalEndpointSample>,
+}
+
+struct NonLocalEndpointSamples {
+    ipv4: Vec<NonLocalEndpointSample>,
+    ipv6: Vec<NonLocalEndpointSample>,
+}
+
+impl Default for NonLocalEndpointSamples {
+    fn default() -> Self {
+        Self {
+            ipv4: Vec::with_capacity(NON_LOCAL_ENDPOINT_SAMPLE_LIMIT),
+            ipv6: Vec::with_capacity(NON_LOCAL_ENDPOINT_SAMPLE_LIMIT),
+        }
+    }
+}
+
 /// 指定网卡的抓包源。
 /// pcap 层累计计数，由抓包线程周期采样，供诊断输出使用。
 #[derive(Default)]
@@ -23,6 +53,105 @@ pub struct CaptureCounters {
     pub received: AtomicU64,
     pub dropped: AtomicU64,
     pub if_dropped: AtomicU64,
+    pub packets_read: AtomicU64,
+    pub bytes_read: AtomicU64,
+    pub parse_error_packets: AtomicU64,
+    pub parse_error_bytes: AtomicU64,
+    pub non_ip_packets: AtomicU64,
+    pub non_ip_bytes: AtomicU64,
+    pub non_local_ipv4_packets: AtomicU64,
+    pub non_local_ipv4_bytes: AtomicU64,
+    pub non_local_ipv6_packets: AtomicU64,
+    pub non_local_ipv6_bytes: AtomicU64,
+    pub duplicate_outgoing_packets: AtomicU64,
+    pub duplicate_outgoing_bytes: AtomicU64,
+    pub flow_packets: AtomicU64,
+    pub flow_bytes: AtomicU64,
+    local_ips: Arc<[IpAddr]>,
+    non_local_samples: Mutex<NonLocalEndpointSamples>,
+    non_local_ipv4_packets_seen: AtomicU64,
+    non_local_ipv6_packets_seen: AtomicU64,
+}
+
+impl CaptureCounters {
+    fn with_local_ips(local_ips: &HashSet<IpAddr>) -> Self {
+        let mut local_ips = local_ips.iter().copied().collect::<Vec<_>>();
+        local_ips.sort_unstable();
+        Self {
+            local_ips: local_ips.into(),
+            ..Self::default()
+        }
+    }
+
+    fn record_packet(&self, captured_bytes: u64, outcome: &FlowParseOutcome) {
+        self.packets_read.fetch_add(1, Ordering::Relaxed);
+        self.bytes_read.fetch_add(captured_bytes, Ordering::Relaxed);
+
+        let (packets, bytes) = match outcome.disposition {
+            PacketDisposition::Accepted => (&self.flow_packets, &self.flow_bytes),
+            PacketDisposition::ParseError => (&self.parse_error_packets, &self.parse_error_bytes),
+            PacketDisposition::NonIp => (&self.non_ip_packets, &self.non_ip_bytes),
+            PacketDisposition::NonLocal { version, src, dst } => {
+                self.record_non_local_endpoint(version, src, dst);
+                match version {
+                    IpVersion::V4 => (&self.non_local_ipv4_packets, &self.non_local_ipv4_bytes),
+                    IpVersion::V6 => (&self.non_local_ipv6_packets, &self.non_local_ipv6_bytes),
+                }
+            }
+            PacketDisposition::DuplicateOutgoing => (
+                &self.duplicate_outgoing_packets,
+                &self.duplicate_outgoing_bytes,
+            ),
+        };
+        packets.fetch_add(1, Ordering::Relaxed);
+        bytes.fetch_add(captured_bytes, Ordering::Relaxed);
+    }
+
+    fn record_non_local_endpoint(&self, version: IpVersion, src: IpAddr, dst: IpAddr) {
+        let packets_seen = match version {
+            IpVersion::V4 => &self.non_local_ipv4_packets_seen,
+            IpVersion::V6 => &self.non_local_ipv6_packets_seen,
+        }
+        .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let replacement_index = if packets_seen <= NON_LOCAL_ENDPOINT_SAMPLE_LIMIT as u64 {
+            None
+        } else if packets_seen.is_multiple_of(NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL) {
+            Some(
+                ((packets_seen / NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL - 1)
+                    % NON_LOCAL_ENDPOINT_SAMPLE_LIMIT as u64) as usize,
+            )
+        } else {
+            return;
+        };
+
+        let mut samples = self
+            .non_local_samples
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let samples = match version {
+            IpVersion::V4 => &mut samples.ipv4,
+            IpVersion::V6 => &mut samples.ipv6,
+        };
+        let sample = NonLocalEndpointSample { src, dst };
+        if let Some(index) = replacement_index {
+            samples[index] = sample;
+        } else {
+            samples.push(sample);
+        }
+    }
+
+    pub(crate) fn diagnostics_snapshot(&self) -> CaptureDiagnosticsSnapshot {
+        let samples = self
+            .non_local_samples
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        CaptureDiagnosticsSnapshot {
+            local_ips: self.local_ips.to_vec(),
+            non_local_ipv4_samples: samples.ipv4.clone(),
+            non_local_ipv6_samples: samples.ipv6.clone(),
+        }
+    }
 }
 
 pub struct CaptureSource {
@@ -89,10 +218,65 @@ enum PacketFormat {
     LinuxSll2,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IpVersion {
     V4,
     V6,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PacketDisposition {
+    Accepted,
+    ParseError,
+    NonIp,
+    NonLocal {
+        version: IpVersion,
+        src: IpAddr,
+        dst: IpAddr,
+    },
+    DuplicateOutgoing,
+}
+
+struct PayloadParseOutcome<'a> {
+    disposition: PacketDisposition,
+    parsed: Option<(Flow, Option<&'a [u8]>)>,
+}
+
+impl<'a> PayloadParseOutcome<'a> {
+    fn discarded(disposition: PacketDisposition) -> Self {
+        Self {
+            disposition,
+            parsed: None,
+        }
+    }
+
+    fn accepted(flow: Flow, payload: Option<&'a [u8]>) -> Self {
+        Self {
+            disposition: PacketDisposition::Accepted,
+            parsed: Some((flow, payload)),
+        }
+    }
+}
+
+struct FlowParseOutcome {
+    disposition: PacketDisposition,
+    flow: Option<Flow>,
+}
+
+impl FlowParseOutcome {
+    fn discarded(disposition: PacketDisposition) -> Self {
+        Self {
+            disposition,
+            flow: None,
+        }
+    }
+
+    fn accepted(flow: Flow) -> Self {
+        Self {
+            disposition: PacketDisposition::Accepted,
+            flow: Some(flow),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -234,10 +418,35 @@ fn select_device(selector: &str, mut devices: Vec<Device>) -> Result<Device> {
 }
 
 fn collect_local_ips(devices: &[Device]) -> HashSet<IpAddr> {
-    devices
+    collect_local_ips_with_native(devices, native_local_ips())
+}
+
+fn collect_local_ips_with_native(
+    devices: &[Device],
+    native_ips: impl IntoIterator<Item = IpAddr>,
+) -> HashSet<IpAddr> {
+    let mut local_ips: HashSet<IpAddr> = devices
         .iter()
         .flat_map(|device| device.addresses.iter().map(|address| address.addr))
-        .collect()
+        .collect();
+    local_ips.extend(native_ips);
+    local_ips
+}
+
+#[cfg(windows)]
+fn native_local_ips() -> Vec<IpAddr> {
+    match crate::windows_local_ips::query() {
+        Ok(addresses) => addresses,
+        Err(error) => {
+            eprintln!("native local IP query failed: {error}");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn native_local_ips() -> Vec<IpAddr> {
+    Vec::new()
 }
 
 impl CaptureSource {
@@ -282,6 +491,7 @@ impl CaptureSource {
         }
         let link_type = cap.get_datalink();
         packet_format(link_type)?;
+        let pcap_counters = Arc::new(CaptureCounters::with_local_ips(&local_ips));
 
         Ok(Self {
             cap,
@@ -290,7 +500,7 @@ impl CaptureSource {
             local_ips,
             domain_parser,
             flow_table,
-            pcap_counters: Arc::new(CaptureCounters::default()),
+            pcap_counters,
             last_pcap_stats_sample: Instant::now(),
         })
     }
@@ -310,13 +520,28 @@ impl CaptureSource {
     /// 读取下一个包；无包（读超时）返回 Ok(None)。
     pub fn next(&mut self) -> Result<Option<Flow>> {
         let result = match self.cap.next_packet() {
-            Ok(packet) => parse_with_domain_parser(
-                self.link_type,
-                packet.data,
-                &self.local_ips,
-                self.domain_parser.as_ref(),
-                Some(self.flow_table.as_ref()),
-            ),
+            Ok(packet) => {
+                let captured_bytes = packet.data.len() as u64;
+                match parse_with_domain_parser_outcome(
+                    self.link_type,
+                    packet.data,
+                    &self.local_ips,
+                    self.domain_parser.as_ref(),
+                    Some(self.flow_table.as_ref()),
+                ) {
+                    Ok(outcome) => {
+                        self.pcap_counters.record_packet(captured_bytes, &outcome);
+                        Ok(outcome.flow)
+                    }
+                    Err(error) => {
+                        self.pcap_counters.record_packet(
+                            captured_bytes,
+                            &FlowParseOutcome::discarded(PacketDisposition::ParseError),
+                        );
+                        Err(error)
+                    }
+                }
+            }
             Err(pcap::Error::TimeoutExpired) => Ok(None),
             Err(e) => Err(anyhow::Error::from(e)),
         };
@@ -350,7 +575,7 @@ impl CaptureSource {
 
 /// 解析数据链路帧为单向流量记录；非 IP 或与本机无关返回 None。
 ///
-/// 仅在测试中使用：production 路径走 [`parse_with_domain_parser`]，
+/// 仅在测试中使用：production 路径走 [`parse_with_domain_parser_outcome`]，
 /// 老 test 调用此 pure-parsing 入口验证链路层/IP/TCP 解析本身。
 #[cfg(test)]
 fn parse(
@@ -358,7 +583,9 @@ fn parse(
     data: &[u8],
     local_ips: &HashSet<IpAddr>,
 ) -> Result<Option<Flow>> {
-    Ok(parse_with_payload(link_type, data, local_ips)?.map(|(flow, _)| flow))
+    Ok(parse_with_payload(link_type, data, local_ips)?
+        .parsed
+        .map(|(flow, _)| flow))
 }
 
 /// 与 [`parse`] 相同，并额外返回 TCP payload（仅当本包为 TCP 且 payload 非空）。
@@ -370,47 +597,64 @@ fn parse_with_payload<'a>(
     link_type: pcap::Linktype,
     data: &'a [u8],
     local_ips: &HashSet<IpAddr>,
-) -> Result<Option<(Flow, Option<&'a [u8]>)>> {
+) -> Result<PayloadParseOutcome<'a>> {
     let format = packet_format(link_type)?;
     let (headers, link_len, sll_packet_type) = match format {
-        PacketFormat::Ethernet => (PacketHeaders::from_ethernet_slice(data).ok(), 14, None),
+        PacketFormat::Ethernet => {
+            let headers = match PacketHeaders::from_ethernet_slice(data) {
+                Ok(headers) => headers,
+                Err(_) => {
+                    return Ok(PayloadParseOutcome::discarded(
+                        PacketDisposition::ParseError,
+                    ));
+                }
+            };
+            (headers, 14, None)
+        }
         format => {
             let payload = match ip_payload(format, data) {
                 Some(payload) => payload,
-                None => return Ok(None),
+                None => {
+                    return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp));
+                }
             };
             if payload
                 .expected_version
                 .is_some_and(|expected| ip_version(payload.packet) != Some(expected))
             {
-                return Ok(None);
+                return Ok(PayloadParseOutcome::discarded(
+                    PacketDisposition::ParseError,
+                ));
             }
-            (
-                PacketHeaders::from_ip_slice(payload.packet).ok(),
-                payload.link_len,
-                payload.sll_packet_type,
-            )
+            let headers = match PacketHeaders::from_ip_slice(payload.packet) {
+                Ok(headers) => headers,
+                Err(_) => {
+                    return Ok(PayloadParseOutcome::discarded(
+                        PacketDisposition::ParseError,
+                    ));
+                }
+            };
+            (headers, payload.link_len, payload.sll_packet_type)
         }
     };
 
-    let Some(headers) = headers else {
-        return Ok(None);
-    };
     let Some(net) = headers.net else {
-        return Ok(None);
+        return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp));
     };
-    let (src, dst, ip_bytes) = match net {
+    let (src, dst, ip_bytes, ip_version) = match net {
         NetHeaders::Ipv4(ip, _) => (
             IpAddr::V4(ip.source.into()),
             IpAddr::V4(ip.destination.into()),
             u64::from(ip.total_len),
+            IpVersion::V4,
         ),
         NetHeaders::Ipv6(ip, _) => (
             IpAddr::V6(ip.source.into()),
             IpAddr::V6(ip.destination.into()),
             u64::from(ip.payload_length) + 40,
+            IpVersion::V6,
         ),
-        _ => return Ok(None),
+        _ => return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp)),
     };
 
     let link_ext_len = if format == PacketFormat::Ethernet {
@@ -427,14 +671,22 @@ fn parse_with_payload<'a>(
     let src_local = local_ips.contains(&src);
     let dst_local = local_ips.contains(&dst);
     if src_local && dst_local && sll_packet_type == Some(SllPacketType::Outgoing) {
-        return Ok(None);
+        return Ok(PayloadParseOutcome::discarded(
+            PacketDisposition::DuplicateOutgoing,
+        ));
     }
     let (direction, local_ip, peer) = if src_local {
         (Direction::Outbound, src, dst)
     } else if dst_local {
         (Direction::Inbound, dst, src)
     } else {
-        return Ok(None);
+        return Ok(PayloadParseOutcome::discarded(
+            PacketDisposition::NonLocal {
+                version: ip_version,
+                src,
+                dst,
+            },
+        ));
     };
 
     let is_tcp = matches!(headers.transport, Some(TransportHeader::Tcp(_)));
@@ -495,7 +747,7 @@ fn parse_with_payload<'a>(
         None
     };
 
-    Ok(Some((
+    Ok(PayloadParseOutcome::accepted(
         Flow {
             direction,
             peer,
@@ -506,7 +758,7 @@ fn parse_with_payload<'a>(
             domain: None,
         },
         tcp_payload,
-    )))
+    ))
 }
 
 /// 在 [`parse`] 基础上调用 L7 域名解析 seam，并配合流表实现"首包解析一次"。
@@ -525,6 +777,7 @@ fn parse_with_payload<'a>(
 ///     `None` 写 [`FlowEntry::NoDomain`]。
 ///
 /// [`parse`]: parse
+#[cfg(test)]
 pub(crate) fn parse_with_domain_parser(
     link_type: pcap::Linktype,
     data: &[u8],
@@ -532,8 +785,19 @@ pub(crate) fn parse_with_domain_parser(
     parser: &dyn DomainParser,
     flow_table: Option<&FlowTable>,
 ) -> Result<Option<Flow>> {
-    let Some((mut flow, payload)) = parse_with_payload(link_type, data, local_ips)? else {
-        return Ok(None);
+    Ok(parse_with_domain_parser_outcome(link_type, data, local_ips, parser, flow_table)?.flow)
+}
+
+fn parse_with_domain_parser_outcome(
+    link_type: pcap::Linktype,
+    data: &[u8],
+    local_ips: &HashSet<IpAddr>,
+    parser: &dyn DomainParser,
+    flow_table: Option<&FlowTable>,
+) -> Result<FlowParseOutcome> {
+    let parsed = parse_with_payload(link_type, data, local_ips)?;
+    let Some((mut flow, payload)) = parsed.parsed else {
+        return Ok(FlowParseOutcome::discarded(parsed.disposition));
     };
     if flow.direction != Direction::Outbound {
         // Q8 双向统计：Inbound 回包不解析 payload（Q1 出站视角），但查流表补
@@ -544,24 +808,24 @@ pub(crate) fn parse_with_domain_parser(
         {
             flow.domain = Some(domain);
         }
-        return Ok(Some(flow));
+        return Ok(FlowParseOutcome::accepted(flow));
     }
     let Some(payload) = payload else {
-        return Ok(Some(flow));
+        return Ok(FlowParseOutcome::accepted(flow));
     };
 
-    // 尝试构造 5-tuple 键；非 TCP / 缺端口时退化为"不查表、直接解析"。
+    // 尝试构造 5-tuple 键；非 TCP / 缺端口时退化为“不查表、直接解析”。
     let key = flow_key_from(&flow);
 
     if let (Some(table), Some(key)) = (flow_table, key.as_ref()) {
         match table.lookup(key) {
             Some(FlowEntry::Resolved(domain)) => {
                 flow.domain = Some(domain);
-                return Ok(Some(flow));
+                return Ok(FlowParseOutcome::accepted(flow));
             }
             Some(FlowEntry::NoDomain) => {
-                // NoDomain 不重试：解析失败的连接后续包直接返回 None。
-                return Ok(Some(flow));
+                // NoDomain 不重试：解析失败的连接后续包直接返回 Flow。
+                return Ok(FlowParseOutcome::accepted(flow));
             }
             None => {} // 首包未解析过，落入下方解析。
         }
@@ -579,7 +843,7 @@ pub(crate) fn parse_with_domain_parser(
     if let Some(domain) = resolved {
         flow.domain = Some(domain);
     }
-    Ok(Some(flow))
+    Ok(FlowParseOutcome::accepted(flow))
 }
 
 /// 从 [`Flow`] 构造 [`FlowKey`]；非 TCP 或缺端口返回 None。
@@ -755,6 +1019,155 @@ mod tests {
         .expect("outbound ICMP flow");
 
         assert!(icmp.local_socket.is_none());
+    }
+
+    #[test]
+    fn parser_classifies_non_local_ipv4_and_malformed_frames() {
+        let selected_local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77))]);
+        let frame = outbound_tcp_ethernet_frame(b"");
+        let parser = RecordingParser::new(None);
+
+        let non_local = parse_with_domain_parser_outcome(
+            pcap::Linktype::ETHERNET,
+            &frame,
+            &selected_local_ips,
+            &parser,
+            None,
+        )
+        .expect("supported data link");
+        assert_eq!(
+            non_local.disposition,
+            PacketDisposition::NonLocal {
+                version: IpVersion::V4,
+                src: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                dst: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+            }
+        );
+        assert!(non_local.flow.is_none());
+
+        let malformed = parse_with_domain_parser_outcome(
+            pcap::Linktype::ETHERNET,
+            &[0; 8],
+            &selected_local_ips,
+            &parser,
+            None,
+        )
+        .expect("supported data link");
+        assert_eq!(malformed.disposition, PacketDisposition::ParseError);
+        assert!(malformed.flow.is_none());
+
+        let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
+        let accepted = parse_with_domain_parser_outcome(
+            pcap::Linktype::ETHERNET,
+            &frame,
+            &local_ips,
+            &parser,
+            None,
+        )
+        .expect("supported data link");
+        assert_eq!(accepted.disposition, PacketDisposition::Accepted);
+        assert!(accepted.flow.is_some());
+
+        let counters = CaptureCounters::default();
+        counters.record_packet(frame.len() as u64, &non_local);
+        counters.record_packet(8, &malformed);
+        counters.record_packet(frame.len() as u64, &accepted);
+
+        assert_eq!(counters.packets_read.load(Ordering::Relaxed), 3);
+        assert_eq!(counters.parse_error_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.non_local_ipv4_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.diagnostics_snapshot().non_local_ipv4_samples,
+            vec![NonLocalEndpointSample {
+                src: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                dst: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+            }]
+        );
+        assert_eq!(counters.flow_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.bytes_read.load(Ordering::Relaxed),
+            counters.parse_error_bytes.load(Ordering::Relaxed)
+                + counters.non_local_ipv4_bytes.load(Ordering::Relaxed)
+                + counters.flow_bytes.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn capture_diagnostics_snapshot_sorts_local_ips_and_bounds_non_local_samples() {
+        let local_ips = HashSet::from([
+            "2001:db8::10".parse::<IpAddr>().unwrap(),
+            "192.0.2.10".parse::<IpAddr>().unwrap(),
+        ]);
+        let counters = CaptureCounters::with_local_ips(&local_ips);
+
+        for index in 0..(NON_LOCAL_ENDPOINT_SAMPLE_LIMIT + 3) {
+            counters.record_packet(
+                64,
+                &FlowParseOutcome::discarded(PacketDisposition::NonLocal {
+                    version: IpVersion::V4,
+                    src: IpAddr::V4(Ipv4Addr::new(10, 0, 0, index as u8)),
+                    dst: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+                }),
+            );
+        }
+
+        let snapshot = counters.diagnostics_snapshot();
+        let mut expected_local_ips = local_ips.into_iter().collect::<Vec<_>>();
+        expected_local_ips.sort_unstable();
+        assert_eq!(snapshot.local_ips, expected_local_ips);
+        assert_eq!(
+            snapshot.non_local_ipv4_samples.len(),
+            NON_LOCAL_ENDPOINT_SAMPLE_LIMIT
+        );
+        assert_eq!(
+            snapshot.non_local_ipv4_samples[0],
+            NonLocalEndpointSample {
+                src: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
+                dst: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+            }
+        );
+        assert!(snapshot.non_local_ipv6_samples.is_empty());
+    }
+
+    #[test]
+    fn capture_diagnostics_refreshes_samples_during_long_non_local_streams() {
+        let counters = CaptureCounters::default();
+        let initial = NonLocalEndpointSample {
+            src: "10.0.0.1".parse().unwrap(),
+            dst: "198.51.100.1".parse().unwrap(),
+        };
+        let later = NonLocalEndpointSample {
+            src: "10.0.0.2".parse().unwrap(),
+            dst: "198.51.100.2".parse().unwrap(),
+        };
+
+        for _ in 0..NON_LOCAL_ENDPOINT_SAMPLE_LIMIT {
+            counters.record_packet(
+                64,
+                &FlowParseOutcome::discarded(PacketDisposition::NonLocal {
+                    version: IpVersion::V4,
+                    src: initial.src,
+                    dst: initial.dst,
+                }),
+            );
+        }
+        for _ in 0..NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL {
+            counters.record_packet(
+                1_500,
+                &FlowParseOutcome::discarded(PacketDisposition::NonLocal {
+                    version: IpVersion::V4,
+                    src: later.src,
+                    dst: later.dst,
+                }),
+            );
+        }
+
+        let snapshot = counters.diagnostics_snapshot();
+        assert_eq!(
+            snapshot.non_local_ipv4_samples.len(),
+            NON_LOCAL_ENDPOINT_SAMPLE_LIMIT
+        );
+        assert!(snapshot.non_local_ipv4_samples.contains(&later));
     }
 
     #[test]
@@ -1630,7 +2043,7 @@ mod tests {
         let mut lo = device("lo", None);
         lo.addresses.push(address("::1"));
 
-        let local_ips = collect_local_ips(&[eth0, any, lo]);
+        let local_ips = collect_local_ips_with_native(&[eth0, any, lo], []);
 
         assert_eq!(
             local_ips,
@@ -1641,6 +2054,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_ips_include_native_addresses_missing_from_pcap_devices() {
+        let mut virtio = device(r"\Device\NPF_{virtio}", None);
+        virtio.addresses.push(address("100.127.185.26"));
+
+        let local_ips =
+            collect_local_ips_with_native(&[virtio], ["10.11.12.31".parse::<IpAddr>().unwrap()]);
+
+        assert!(local_ips.contains(&"100.127.185.26".parse().unwrap()));
+        assert!(local_ips.contains(&"10.11.12.31".parse().unwrap()));
+    }
     fn ipv4_frame(protocol: u8, total_length: u16, transport: &[u8]) -> Vec<u8> {
         let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00];
         frame.extend_from_slice(&ipv4_packet_between(
