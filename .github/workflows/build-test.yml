@@ -12,6 +12,7 @@ on:
           - all
           - linux
           - windows
+          - macos
 
 concurrency:
   group: flowlens-build-test-${{ github.ref }}
@@ -195,10 +196,74 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-macos:
+    name: build-macos-${{ matrix.arch }}
+    if: inputs.platform == 'all' || inputs.platform == 'macos'
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            target_dir: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            target_dir: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-test-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-
+      - name: Inspect macOS build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcrun --show-sdk-path
+          pkg-config --modversion libpcap || true
+      - name: Build macOS distribution binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Verify macOS binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target_dir }}/release/flowlens"
+          test -x "$binary"
+          file "$binary"
+          otool -L "$binary"
+          "$binary" --help >/dev/null
+      - name: Package macOS binary
+        env:
+          BUILD_SHA: ${{ needs.metadata.outputs.short_sha }}
+        run: |
+          mkdir -p dist
+          tar -C "target/${{ matrix.target_dir }}/release" \
+            -czf "dist/flowlens-${BUILD_SHA}-macos-${{ matrix.arch }}.tar.gz" flowlens
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flowlens-${{ needs.metadata.outputs.short_sha }}-macos-${{ matrix.arch }}
+          path: dist/flowlens-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   checksums:
     name: checksums
-    if: always() && (needs.build-linux.result == 'success' || needs.build-windows.result == 'success')
-    needs: [metadata, build-linux, build-windows]
+    if: always() && (needs.build-linux.result == 'success' || needs.build-windows.result == 'success' || needs.build-macos.result == 'success')
+    needs: [metadata, build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
