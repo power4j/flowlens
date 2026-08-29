@@ -10,11 +10,11 @@ use crate::attribution::PendingAttributionSnapshot;
 use crate::capture::CaptureCounters;
 use crate::proc_table::{LookupMissSample, ProcDiagnosticsSnapshot, SharedProcTable};
 use crate::stats::{
-    DiagnosticsCounters, DiagnosticsGauges, DiagnosticsIp, DiagnosticsMissSample,
-    DiagnosticsSnapshot, StatsDiagnostics,
+    DiagnosticsCapture, DiagnosticsCounters, DiagnosticsEndpointSample, DiagnosticsGauges,
+    DiagnosticsIp, DiagnosticsMissSample, DiagnosticsSnapshot, StatsDiagnostics,
 };
 
-pub(crate) const SCHEMA_VERSION: u8 = 1;
+pub(crate) const SCHEMA_VERSION: u8 = 2;
 
 pub(crate) fn default_output_path() -> PathBuf {
     PathBuf::from(format!(
@@ -41,6 +41,10 @@ pub(crate) fn from_parts(
     proc: ProcDiagnosticsSnapshot,
     inputs: DiagnosticsInputs<'_>,
 ) -> DiagnosticsSnapshot {
+    let capture = inputs
+        .pcap
+        .map(CaptureCounters::diagnostics_snapshot)
+        .unwrap_or_default();
     DiagnosticsSnapshot {
         counters: DiagnosticsCounters {
             lookup_hits: proc.lookup_hits,
@@ -86,6 +90,48 @@ pub(crate) fn from_parts(
             pcap_if_dropped: inputs
                 .pcap
                 .map_or(0, |c| c.if_dropped.load(Ordering::Relaxed)),
+            capture_read_packets: inputs
+                .pcap
+                .map_or(0, |c| c.packets_read.load(Ordering::Relaxed)),
+            capture_read_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.bytes_read.load(Ordering::Relaxed)),
+            capture_parse_error_packets: inputs
+                .pcap
+                .map_or(0, |c| c.parse_error_packets.load(Ordering::Relaxed)),
+            capture_parse_error_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.parse_error_bytes.load(Ordering::Relaxed)),
+            capture_non_ip_packets: inputs
+                .pcap
+                .map_or(0, |c| c.non_ip_packets.load(Ordering::Relaxed)),
+            capture_non_ip_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.non_ip_bytes.load(Ordering::Relaxed)),
+            capture_non_local_ipv4_packets: inputs
+                .pcap
+                .map_or(0, |c| c.non_local_ipv4_packets.load(Ordering::Relaxed)),
+            capture_non_local_ipv4_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.non_local_ipv4_bytes.load(Ordering::Relaxed)),
+            capture_non_local_ipv6_packets: inputs
+                .pcap
+                .map_or(0, |c| c.non_local_ipv6_packets.load(Ordering::Relaxed)),
+            capture_non_local_ipv6_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.non_local_ipv6_bytes.load(Ordering::Relaxed)),
+            capture_duplicate_outgoing_packets: inputs
+                .pcap
+                .map_or(0, |c| c.duplicate_outgoing_packets.load(Ordering::Relaxed)),
+            capture_duplicate_outgoing_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.duplicate_outgoing_bytes.load(Ordering::Relaxed)),
+            capture_flow_created_packets: inputs
+                .pcap
+                .map_or(0, |c| c.flow_packets.load(Ordering::Relaxed)),
+            capture_flow_created_bytes: inputs
+                .pcap
+                .map_or(0, |c| c.flow_bytes.load(Ordering::Relaxed)),
         },
         gauges: DiagnosticsGauges {
             flow_table_entries: inputs.flow_table_entries,
@@ -106,11 +152,31 @@ pub(crate) fn from_parts(
             outbound_rising_entries: inputs.stats.outbound_rising_ip_entries,
             outbound_observation_entries: inputs.stats.outbound_observation_ip_entries,
         },
+        capture: DiagnosticsCapture {
+            local_ips: capture.local_ips,
+            non_local_ipv4_samples: capture
+                .non_local_ipv4_samples
+                .into_iter()
+                .map(endpoint_sample)
+                .collect(),
+            non_local_ipv6_samples: capture
+                .non_local_ipv6_samples
+                .into_iter()
+                .map(endpoint_sample)
+                .collect(),
+        },
         miss_samples: proc
             .lookup_miss_samples
             .into_iter()
             .map(miss_sample)
             .collect(),
+    }
+}
+
+fn endpoint_sample(sample: crate::capture::NonLocalEndpointSample) -> DiagnosticsEndpointSample {
+    DiagnosticsEndpointSample {
+        src: sample.src,
+        dst: sample.dst,
     }
 }
 
@@ -179,6 +245,7 @@ impl DiagnosticsWriter {
             counters: &snapshot.counters,
             gauges: &snapshot.gauges,
             ip: &snapshot.ip,
+            capture: &snapshot.capture,
             miss_sample_count: snapshot.miss_samples.len(),
         };
         serde_json::to_writer(&mut self.writer, &record).map_err(io::Error::other)?;
@@ -214,6 +281,7 @@ struct SnapshotRecord<'a> {
     counters: &'a DiagnosticsCounters,
     gauges: &'a DiagnosticsGauges,
     ip: &'a DiagnosticsIp,
+    capture: &'a DiagnosticsCapture,
     miss_sample_count: usize,
 }
 
@@ -254,10 +322,57 @@ mod tests {
     }
 
     #[test]
+    fn capture_pipeline_counters_are_included_in_diagnostics() {
+        let counters = CaptureCounters::default();
+        counters.packets_read.store(10, Ordering::Relaxed);
+        counters.bytes_read.store(1_000, Ordering::Relaxed);
+        counters.parse_error_packets.store(1, Ordering::Relaxed);
+        counters.parse_error_bytes.store(100, Ordering::Relaxed);
+        counters.non_local_ipv4_packets.store(7, Ordering::Relaxed);
+        counters.non_local_ipv4_bytes.store(700, Ordering::Relaxed);
+        counters.flow_packets.store(2, Ordering::Relaxed);
+        counters.flow_bytes.store(200, Ordering::Relaxed);
+
+        let proc_table = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::proc_table::ProcTable::default(),
+        ));
+        let snapshot = from_parts(
+            ProcDiagnosticsSnapshot::default(),
+            DiagnosticsInputs {
+                proc_table: &proc_table,
+                pending: PendingAttributionSnapshot::default(),
+                stats: StatsDiagnostics::default(),
+                flow_table_entries: 0,
+                pcap: Some(&counters),
+            },
+        );
+
+        assert_eq!(snapshot.counters.capture_read_packets, 10);
+        assert_eq!(snapshot.counters.capture_read_bytes, 1_000);
+        assert_eq!(snapshot.counters.capture_parse_error_packets, 1);
+        assert_eq!(snapshot.counters.capture_parse_error_bytes, 100);
+        assert_eq!(snapshot.counters.capture_non_local_ipv4_packets, 7);
+        assert_eq!(snapshot.counters.capture_non_local_ipv4_bytes, 700);
+        assert_eq!(snapshot.counters.capture_flow_created_packets, 2);
+        assert_eq!(snapshot.counters.capture_flow_created_bytes, 200);
+        assert!(snapshot.capture.local_ips.is_empty());
+        assert!(snapshot.capture.non_local_ipv4_samples.is_empty());
+        assert!(snapshot.capture.non_local_ipv6_samples.is_empty());
+    }
+
+    #[test]
     fn writer_emits_snapshot_then_miss_events_with_shared_sequence() {
         let path = temp_path("records");
         let mut writer = DiagnosticsWriter::create(&path).unwrap();
         let snapshot = DiagnosticsSnapshot {
+            capture: DiagnosticsCapture {
+                local_ips: vec!["192.0.2.10".parse().unwrap()],
+                non_local_ipv4_samples: vec![DiagnosticsEndpointSample {
+                    src: "10.0.0.5".parse().unwrap(),
+                    dst: "198.51.100.2".parse().unwrap(),
+                }],
+                non_local_ipv6_samples: Vec::new(),
+            },
             miss_samples: vec![DiagnosticsMissSample {
                 reason: "ambiguous".to_string(),
                 protocol: "tcp".to_string(),
@@ -275,8 +390,21 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["schema_version"], SCHEMA_VERSION);
         assert_eq!(records[0]["kind"], "snapshot");
         assert_eq!(records[0]["seq"], 1);
+        assert_eq!(
+            records[0]["capture"]["local_ips"],
+            serde_json::json!(["192.0.2.10"])
+        );
+        assert_eq!(
+            records[0]["capture"]["non_local_ipv4_samples"],
+            serde_json::json!([{"src": "10.0.0.5", "dst": "198.51.100.2"}])
+        );
+        assert_eq!(
+            records[0]["capture"]["non_local_ipv6_samples"],
+            serde_json::json!([])
+        );
         assert_eq!(records[0]["miss_sample_count"], 1);
         assert_eq!(records[1]["kind"], "lookup_miss_sample");
         assert_eq!(records[1]["seq"], 1);

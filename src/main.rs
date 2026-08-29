@@ -19,6 +19,9 @@ mod tui;
 #[allow(dead_code)]
 mod windows_connection_probe;
 
+#[cfg(windows)]
+mod windows_local_ips;
+
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 

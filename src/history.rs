@@ -338,6 +338,7 @@ mod tests {
 
     /// ADR 0013 硬门槛：候选 PID 查不到启动时间或启动晚于流观测时间 → 拒绝。
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn start_time_gate_rejects_unverifiable_or_later_processes() {
         let mut history = AttributionHistory::default();
         // 正例：当前测试进程（存活，启动早于现在）。

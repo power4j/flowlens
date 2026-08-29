@@ -259,8 +259,22 @@ pub struct DiagnosticsSnapshot {
     pub counters: DiagnosticsCounters,
     pub gauges: DiagnosticsGauges,
     pub ip: DiagnosticsIp,
+    pub capture: DiagnosticsCapture,
     #[serde(skip)]
     pub miss_samples: Vec<DiagnosticsMissSample>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DiagnosticsCapture {
+    pub local_ips: Vec<IpAddr>,
+    pub non_local_ipv4_samples: Vec<DiagnosticsEndpointSample>,
+    pub non_local_ipv6_samples: Vec<DiagnosticsEndpointSample>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct DiagnosticsEndpointSample {
+    pub src: IpAddr,
+    pub dst: IpAddr,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -304,6 +318,20 @@ pub struct DiagnosticsCounters {
     pub pcap_received: u64,
     pub pcap_dropped: u64,
     pub pcap_if_dropped: u64,
+    pub capture_read_packets: u64,
+    pub capture_read_bytes: u64,
+    pub capture_parse_error_packets: u64,
+    pub capture_parse_error_bytes: u64,
+    pub capture_non_ip_packets: u64,
+    pub capture_non_ip_bytes: u64,
+    pub capture_non_local_ipv4_packets: u64,
+    pub capture_non_local_ipv4_bytes: u64,
+    pub capture_non_local_ipv6_packets: u64,
+    pub capture_non_local_ipv6_bytes: u64,
+    pub capture_duplicate_outgoing_packets: u64,
+    pub capture_duplicate_outgoing_bytes: u64,
+    pub capture_flow_created_packets: u64,
+    pub capture_flow_created_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

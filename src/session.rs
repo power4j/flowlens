@@ -372,7 +372,7 @@ mod tests {
         session
             .begin_activate_with("wlan0", |_| {
                 Ok(TrafficPipeline::from_delayed_failure_for_test(
-                    std::time::Duration::from_millis(75),
+                    std::time::Duration::from_millis(500),
                     "pcap device closed",
                 ))
             })

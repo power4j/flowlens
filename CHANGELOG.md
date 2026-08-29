@@ -10,6 +10,8 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Fixed
 
+- On Windows, local-address detection now supplements Npcap device metadata with the native adapter-address API. This prevents Tailscale file-transfer traffic on Red Hat VirtIO Ethernet adapters from being incorrectly treated as non-local and omitted from FlowLens totals.
+
 ### Removed
 
 ### Deprecated
