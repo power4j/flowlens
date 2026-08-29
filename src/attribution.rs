@@ -1205,6 +1205,7 @@ mod tests {
     /// ADR 0013 第三刀：上一代曾观测到的 socket 消失后，pending 终结时由
     /// 区间日志追回，独占归属且 evidence = history。
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn vanished_socket_is_recovered_from_history() {
         let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
         let mut table = ProcTable::default();

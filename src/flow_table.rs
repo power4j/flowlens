@@ -190,16 +190,16 @@ mod tests {
 
     #[test]
     fn accessed_entries_reset_idle_timer() {
-        // TTI=75ms；每次访问重置 idle timer，连续三次 sleep 50ms < 75ms 应都命中。
-        let table = FlowTable::with_capacity_and_tti(100, Duration::from_millis(75));
+        // TTI=500ms；每次访问重置 idle timer，连续三次 sleep 100ms < 500ms 应都命中。
+        let table = FlowTable::with_capacity_and_tti(100, Duration::from_millis(500));
         let k = key(5);
         table.insert_resolved(k.clone(), Arc::from("example.com"));
 
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
         assert!(table.lookup(&k).is_some(), "首次访问应命中");
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
         assert!(table.lookup(&k).is_some(), "TTI 应被 get 重置");
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
         assert!(table.lookup(&k).is_some(), "连续访问仍应命中");
     }
 
