@@ -82,13 +82,13 @@ The CI checks run on Linux, Windows, and native macOS runners for pull requests 
 
 The macOS jobs use `macos-15-intel` for `x86_64` (`x86_64-apple-darwin`) and `macos-15` for `arm64` (`aarch64-apple-darwin`). They build and test on native runners rather than cross-compiling. The jobs use the system `libpcap`; Homebrew is not required by CI. The workflow prints the SDK, `libpcap`, and binary linkage information to make runner-specific dependency failures diagnosable.
 
-The macOS jobs do not upload artifacts and do not run real network capture, long-running traffic tests, or performance benchmarks. Artifact packaging, signing, notarization, installer integration, and Release publication remain separate follow-up work. Those checks are manual release-readiness activities because they depend on host permissions, adapters, traffic generators, Npcap behavior, and system load.
+The macOS CI jobs do not run real network capture, long-running traffic tests, or performance benchmarks. The `Build Test` workflow now packages and uploads unsigned macOS trial artifacts separately from the validation jobs. Signing, notarization, installer integration, and Release publication remain separate follow-up work because they depend on host permissions, adapters, traffic generators, and system load.
 
 ## On-demand test builds
 
-The `Build Test` workflow creates distribution-shaped binaries for manual testing without changing the Cargo version, creating a tag, or creating a Release. Select a branch or commit and choose `all`, `linux`, or `windows` in the GitHub Actions page. Artifacts are retained for 14 days and include a short commit identifier in their names.
+The `Build Test` workflow creates distribution-shaped binaries for manual testing without changing the Cargo version, creating a tag, or creating a Release. Select a branch or commit and choose `all`, `linux`, `windows`, or `macos` in the GitHub Actions page. Artifacts are retained for 14 days and include a short commit identifier in their names.
 
-The current `Build Test` workflow creates Linux and Windows artifacts only. macOS validation is currently limited to the dedicated build/test surface in `ci.yml`; adding macOS trial artifacts is a separate follow-up.
+The `macos` option creates native `aarch64` and `x86_64` archives from `macos-15` and `macos-15-intel` runners. These archives contain only the unsigned `flowlens` binary and are for trial validation, not formal macOS release support.
 
 The workflow can also be started with GitHub CLI:
 
