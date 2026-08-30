@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::stats::Stats;
+use crate::stats::{ProcTraffic, RankWindow, Stats};
 
 // ── shared helpers ──
 
@@ -48,6 +48,46 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
     format!("{head}…")
 }
 
+fn selected_process_traffic(
+    process: &crate::stats::ProcessSnapshot,
+    window: RankWindow,
+) -> ProcTraffic {
+    if window == RankWindow::Cumulative {
+        ProcTraffic {
+            recv: process.recv,
+            sent: process.sent,
+        }
+    } else {
+        process.rank
+    }
+}
+
+fn format_rank_bytes(bytes: u64, window: RankWindow) -> String {
+    if window == RankWindow::Cumulative {
+        human_bytes(bytes)
+    } else {
+        format!("{}/s", human_bytes(bytes))
+    }
+}
+
+fn ranking_metric_label(metric: crate::stats::RankingMetric) -> &'static str {
+    match metric {
+        crate::stats::RankingMetric::TotalBytes => "total_bytes",
+        crate::stats::RankingMetric::AverageThroughput => "average_throughput",
+    }
+}
+
+fn ranking_coverage_label(snapshot: &crate::stats::TrafficSnapshot) -> String {
+    match (
+        snapshot.ranking.window.seconds(),
+        snapshot.ranking.coverage_seconds,
+    ) {
+        (Some(window), Some(coverage)) if coverage < window => format!("{coverage}/{window}s !"),
+        (Some(window), _) => format!("{window}s"),
+        (None, _) => "-".to_string(),
+    }
+}
+
 // ── plain file output (tab-separated, no table borders) ──
 
 /// Render plain-text snapshot for background file output: section headers + tab-separated columns.
@@ -58,13 +98,22 @@ pub fn render_file(
     started_at: Instant,
     stats: &Stats,
     top_n: usize,
+    rank_window: RankWindow,
 ) -> std::io::Result<()> {
     std::fs::write(
         path,
-        plain_snapshot(interface, started_wall, started_at, stats, top_n),
+        plain_snapshot_with_window(
+            interface,
+            started_wall,
+            started_at,
+            stats,
+            top_n,
+            rank_window,
+        ),
     )
 }
 
+#[cfg(test)]
 fn plain_snapshot(
     interface: &str,
     started_wall: &chrono::DateTime<chrono::Local>,
@@ -72,9 +121,27 @@ fn plain_snapshot(
     stats: &Stats,
     top_n: usize,
 ) -> String {
+    plain_snapshot_with_window(
+        interface,
+        started_wall,
+        started_at,
+        stats,
+        top_n,
+        RankWindow::Cumulative,
+    )
+}
+
+fn plain_snapshot_with_window(
+    interface: &str,
+    started_wall: &chrono::DateTime<chrono::Local>,
+    started_at: Instant,
+    stats: &Stats,
+    top_n: usize,
+    rank_window: RankWindow,
+) -> String {
     let host = hostname();
     let now = chrono::Local::now();
-    let snapshot = stats.snapshot(top_n);
+    let snapshot = stats.snapshot_at(top_n, chrono::Utc::now(), rank_window);
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -82,6 +149,13 @@ fn plain_snapshot(
         started_wall.format("%Y-%m-%d %H:%M:%S"),
         fmt_elapsed(started_at.elapsed()),
         now.format("%Y-%m-%d %H:%M:%S")
+    ));
+
+    out.push_str(&format!(
+        "Ranking\tWindow: {}\tMetric: {}\tCoverage: {}\n\n",
+        snapshot.ranking.window,
+        ranking_metric_label(snapshot.ranking.metric),
+        ranking_coverage_label(&snapshot),
     ));
 
     out.push_str("Interface Traffic\n");
@@ -92,7 +166,7 @@ fn plain_snapshot(
     ));
 
     out.push_str(&format!("Top Processes ({top_n})\n"));
-    out.push_str("Process\tPID\tRecv\tSent\tTotal\tWin\tAttr\tLast Seen\tPath\n");
+    out.push_str("Process\tPID\tRecv\tSent\tTotal\tSelected\tAttr\tLast Seen\tPath\n");
     for process in snapshot.processes.iter() {
         let name = process.display_name();
         let pid = process
@@ -106,53 +180,48 @@ fn plain_snapshot(
         } else {
             "single"
         };
-        // ADR 0013 第二刀：累计列 + 窗口列（5 分钟滚动）并列。
+        // Selected ranking values are throughput for a finite window and lifetime totals otherwise.
+        let rank = selected_process_traffic(process, rank_window);
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             name,
             pid,
-            human_bytes(process.recv),
-            human_bytes(process.sent),
-            human_bytes(process.total()),
-            human_bytes(process.window.total()),
+            format_rank_bytes(rank.recv, rank_window),
+            format_rank_bytes(rank.sent, rank_window),
+            format_rank_bytes(rank.total(), rank_window),
+            human_bytes(process.selected.total()),
             attr,
             process.last_seen().to_rfc3339(),
             path
         ));
     }
     let attribution = &snapshot.attribution;
-    let attribution_window = &snapshot.attribution_window;
-    for (label, traffic, window) in [
-        (
-            "<system traffic (no socket)>",
-            attribution.system,
-            attribution_window.system,
-        ),
-        (
-            "<unattributed traffic>",
-            attribution.unattributed,
-            attribution_window.unattributed,
-        ),
+    for (label, traffic) in [
+        ("<system traffic (no socket)>", attribution.system),
+        ("<unattributed traffic>", attribution.unattributed),
     ] {
         out.push_str(&format!(
-            "{}\t-\t{}\t{}\t{}\t{}\t-\t-\t-\n",
+            "{}\t-\t{}\t{}\t{}\t-\t{}\t-\t-\n",
             label,
             human_bytes(traffic.recv),
             human_bytes(traffic.sent),
             human_bytes(traffic.total()),
-            human_bytes(window.total()),
+            "-",
         ));
     }
 
-    out.push_str(&format!("\nTop Hosts ({top_n})\n"));
+    out.push_str(&format!("\nTop Outbound Domains ({top_n})\n"));
     out.push_str("Host\tIn\tOut\tTotal\tLast Seen\n");
     for domain in snapshot.outbound_domains.iter() {
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\n",
             domain.host(),
-            human_bytes(domain.in_bytes),
-            human_bytes(domain.out_bytes),
-            human_bytes(domain.total_bytes()),
+            format_rank_bytes(domain.rank_in_bytes, rank_window),
+            format_rank_bytes(domain.rank_out_bytes, rank_window),
+            format_rank_bytes(
+                domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
+                rank_window,
+            ),
             domain.last_seen().to_rfc3339(),
         ));
     }
@@ -163,7 +232,7 @@ fn plain_snapshot(
         out.push_str(&format!(
             "{}\t{}\t{}\n",
             entry.ip,
-            human_bytes(entry.bytes),
+            format_rank_bytes(entry.rank_bytes, rank_window),
             entry.last_seen().to_rfc3339()
         ));
     }
@@ -174,7 +243,7 @@ fn plain_snapshot(
         out.push_str(&format!(
             "{}\t{}\t{}\n",
             entry.ip,
-            human_bytes(entry.bytes),
+            format_rank_bytes(entry.rank_bytes, rank_window),
             entry.last_seen().to_rfc3339()
         ));
     }
@@ -193,9 +262,9 @@ struct JsonFrame<'a> {
     uptime_secs: u64,
     totals: JsonTotals,
     attribution: JsonAttributionSummary,
-    attribution_window: JsonAttributionSummary,
+    ranking: crate::stats::RankingSnapshot,
     top_processes: Vec<JsonProc>,
-    top_hosts: Vec<JsonHost>,
+    top_outbound_domains: Vec<JsonHost>,
     top_inbound_ips: Vec<JsonIp>,
     top_outbound_ips: Vec<JsonIp>,
 }
@@ -235,18 +304,33 @@ impl From<&crate::stats::AttributionSummary> for JsonAttributionSummary {
 }
 
 #[derive(Serialize)]
+struct JsonTraffic {
+    recv_bytes: u64,
+    sent_bytes: u64,
+    total_bytes: u64,
+    throughput_bytes_per_sec: Option<u64>,
+}
+
+impl JsonTraffic {
+    fn from_traffic(traffic: ProcTraffic, throughput_bytes_per_sec: Option<u64>) -> Self {
+        Self {
+            recv_bytes: traffic.recv,
+            sent_bytes: traffic.sent,
+            total_bytes: traffic.total(),
+            throughput_bytes_per_sec,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct JsonProc {
     pid: Option<u32>,
     name: Option<String>,
     path: Option<String>,
     last_seen: String,
-    recv: u64,
-    sent: u64,
-    total: u64,
+    lifetime: JsonTraffic,
+    selected: JsonTraffic,
     attribution: JsonProcAttribution,
-    window_recv: u64,
-    window_sent: u64,
-    window_total: u64,
 }
 
 /// ADR 0013：进程归属构成。inclusive 口径：进程 recv/sent = exclusive + shared 之和。
@@ -264,19 +348,20 @@ struct JsonProcAttribution {
 #[derive(Serialize)]
 struct JsonIp {
     ip: String,
-    bytes: u64,
     last_seen: String,
+    lifetime: JsonTraffic,
+    selected: JsonTraffic,
 }
 
 #[derive(Serialize)]
 struct JsonHost {
     host: String,
-    in_bytes: u64,
-    out_bytes: u64,
-    total_bytes: u64,
     last_seen: String,
+    lifetime: JsonTraffic,
+    selected: JsonTraffic,
 }
 
+#[cfg(test)]
 fn build_json_frame<'a>(
     interface: &'a str,
     started_wall: &chrono::DateTime<chrono::Local>,
@@ -284,10 +369,28 @@ fn build_json_frame<'a>(
     stats: &'a Stats,
     top_n: usize,
 ) -> JsonFrame<'a> {
+    build_json_frame_with_window(
+        interface,
+        started_wall,
+        started_at,
+        stats,
+        top_n,
+        RankWindow::Cumulative,
+    )
+}
+
+fn build_json_frame_with_window<'a>(
+    interface: &'a str,
+    started_wall: &chrono::DateTime<chrono::Local>,
+    started_at: Instant,
+    stats: &'a Stats,
+    top_n: usize,
+    rank_window: RankWindow,
+) -> JsonFrame<'a> {
     let host = hostname();
     let now = chrono::Local::now();
 
-    let snapshot = stats.snapshot(top_n);
+    let snapshot = stats.snapshot_at(top_n, chrono::Utc::now(), rank_window);
     let top_processes = snapshot
         .processes
         .iter()
@@ -296,9 +399,17 @@ fn build_json_frame<'a>(
             name: process.name().map(str::to_string),
             path: process.path().map(str::to_string),
             last_seen: process.last_seen().to_rfc3339(),
-            recv: process.recv,
-            sent: process.sent,
-            total: process.total(),
+            lifetime: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: process.recv,
+                    sent: process.sent,
+                },
+                None,
+            ),
+            selected: JsonTraffic::from_traffic(
+                process.selected,
+                (rank_window != RankWindow::Cumulative).then_some(process.rank.total()),
+            ),
             attribution: JsonProcAttribution {
                 exclusive_recv: process.attribution.exclusive.recv,
                 exclusive_sent: process.attribution.exclusive.sent,
@@ -318,9 +429,6 @@ fn build_json_frame<'a>(
                     .map(str::to_string)
                     .collect(),
             },
-            window_recv: process.window.recv,
-            window_sent: process.window.sent,
-            window_total: process.window.total(),
         })
         .collect();
 
@@ -329,8 +437,21 @@ fn build_json_frame<'a>(
         .iter()
         .map(|entry| JsonIp {
             ip: entry.ip.to_string(),
-            bytes: entry.bytes,
             last_seen: entry.last_seen().to_rfc3339(),
+            lifetime: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: entry.bytes,
+                    sent: 0,
+                },
+                None,
+            ),
+            selected: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: entry.selected_bytes,
+                    sent: 0,
+                },
+                (rank_window != RankWindow::Cumulative).then_some(entry.rank_bytes),
+            ),
         })
         .collect();
 
@@ -339,20 +460,45 @@ fn build_json_frame<'a>(
         .iter()
         .map(|entry| JsonIp {
             ip: entry.ip.to_string(),
-            bytes: entry.bytes,
             last_seen: entry.last_seen().to_rfc3339(),
+            lifetime: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: 0,
+                    sent: entry.bytes,
+                },
+                None,
+            ),
+            selected: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: 0,
+                    sent: entry.selected_bytes,
+                },
+                (rank_window != RankWindow::Cumulative).then_some(entry.rank_bytes),
+            ),
         })
         .collect();
 
-    let top_hosts = snapshot
+    let top_outbound_domains = snapshot
         .outbound_domains
         .iter()
         .map(|domain| JsonHost {
             host: domain.host().to_string(),
-            in_bytes: domain.in_bytes,
-            out_bytes: domain.out_bytes,
-            total_bytes: domain.total_bytes(),
             last_seen: domain.last_seen().to_rfc3339(),
+            lifetime: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: domain.in_bytes,
+                    sent: domain.out_bytes,
+                },
+                None,
+            ),
+            selected: JsonTraffic::from_traffic(
+                ProcTraffic {
+                    recv: domain.selected_in_bytes,
+                    sent: domain.selected_out_bytes,
+                },
+                (rank_window != RankWindow::Cumulative)
+                    .then_some(domain.rank_in_bytes.saturating_add(domain.rank_out_bytes)),
+            ),
         })
         .collect();
 
@@ -369,9 +515,9 @@ fn build_json_frame<'a>(
             out_bytes: snapshot.out_bytes,
         },
         attribution,
-        attribution_window: JsonAttributionSummary::from(&snapshot.attribution_window),
+        ranking: snapshot.ranking,
         top_processes,
-        top_hosts,
+        top_outbound_domains,
         top_inbound_ips,
         top_outbound_ips,
     }
@@ -384,8 +530,16 @@ pub fn render_jsonl(
     started_at: Instant,
     stats: &Stats,
     top_n: usize,
+    rank_window: RankWindow,
 ) {
-    let frame = build_json_frame(interface, started_wall, started_at, stats, top_n);
+    let frame = build_json_frame_with_window(
+        interface,
+        started_wall,
+        started_at,
+        stats,
+        top_n,
+        rank_window,
+    );
     if let Ok(line) = serde_json::to_string(&frame) {
         println!("{line}");
     }
@@ -399,8 +553,16 @@ pub fn render_file_json(
     started_at: Instant,
     stats: &Stats,
     top_n: usize,
+    rank_window: RankWindow,
 ) -> std::io::Result<()> {
-    let frame = build_json_frame(interface, started_wall, started_at, stats, top_n);
+    let frame = build_json_frame_with_window(
+        interface,
+        started_wall,
+        started_at,
+        stats,
+        top_n,
+        rank_window,
+    );
     let json = serde_json::to_string_pretty(&frame).map_err(std::io::Error::other)?;
     std::fs::write(path, json)
 }
@@ -429,7 +591,9 @@ mod tests {
 
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
-        assert!(rendered.contains("Process\tPID\tRecv\tSent\tTotal\tWin\tAttr\tLast Seen\tPath"));
+        assert!(
+            rendered.contains("Process\tPID\tRecv\tSent\tTotal\tSelected\tAttr\tLast Seen\tPath")
+        );
         assert!(rendered.contains(
             "curl\t7\t40 B\t0 B\t40 B\t40 B\tsingle\t2026-07-15T08:00:00+00:00\t/usr/bin/curl"
         ));
@@ -445,8 +609,8 @@ mod tests {
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
         // ADR 0013：未归属从排名表移出，作为固定行渲染，无 Attr/时间列。
-        assert!(rendered.contains("<unattributed traffic>\t-\t40 B\t60 B\t100 B\t100 B\t-\t-\t-"));
-        assert!(rendered.contains("<system traffic (no socket)>\t-\t0 B\t0 B\t0 B\t0 B\t-\t-\t-"));
+        assert!(rendered.contains("<unattributed traffic>\t-\t40 B\t60 B\t100 B\t-\t-\t-\t-"));
+        assert!(rendered.contains("<system traffic (no socket)>\t-\t0 B\t0 B\t0 B\t-\t-\t-\t-"));
     }
 
     #[test]
@@ -538,8 +702,44 @@ mod tests {
         let entry = &value["top_inbound_ips"][0];
 
         assert_eq!(entry["ip"], "127.0.0.1");
-        assert_eq!(entry["bytes"], 40);
+        assert_eq!(entry["lifetime"]["recv_bytes"], 40);
+        assert_eq!(entry["selected"]["recv_bytes"], 40);
+        assert!(entry["lifetime"]["throughput_bytes_per_sec"].is_null());
         assert_eq!(entry["last_seen"], "2026-07-15T08:04:00+00:00");
+    }
+
+    #[test]
+    fn json_recent_ranking_uses_lifetime_and_selected_groups() {
+        let created = chrono::Utc::now() - chrono::Duration::seconds(5);
+        let observed_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let mut stats = Stats::new_at(created);
+        stats.record_flow_at(
+            flow(Direction::Outbound, 400),
+            Some(ObservedProcess {
+                pid: 7,
+                name: Some(Arc::from("curl")),
+                path: Some(Arc::from("/usr/bin/curl")),
+            }),
+            observed_at,
+        );
+
+        let frame = build_json_frame_with_window(
+            "eth0",
+            &chrono::Local::now(),
+            Instant::now(),
+            &stats,
+            10,
+            RankWindow::FIVE_SECONDS,
+        );
+        let value = serde_json::to_value(frame).unwrap();
+        assert!(value.get("attribution_window").is_none());
+        assert!(value["ranking"].get("window_evictions").is_none());
+        let process = &value["top_processes"][0];
+        assert!(process.get("window_recv").is_none());
+        assert!(process.get("window_total").is_none());
+        assert_eq!(process["lifetime"]["sent_bytes"], 400);
+        assert_eq!(process["selected"]["sent_bytes"], 400);
+        assert!(process["selected"]["throughput_bytes_per_sec"].is_number());
     }
 
     fn flow(direction: Direction, bytes: u64) -> Flow {
@@ -584,7 +784,7 @@ mod tests {
 
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
-        assert!(rendered.contains("Top Hosts (10)\n"));
+        assert!(rendered.contains("Top Outbound Domains (10)\n"));
         assert!(rendered.contains("Host\tIn\tOut\tTotal\tLast Seen\n"));
         assert!(rendered.contains("example.com\t240 B\t100 B\t340 B\t2026-07-15T08:00:00+00:00\n"));
     }
@@ -595,7 +795,7 @@ mod tests {
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
         // Section header and column row still appear when no domains observed.
-        assert!(rendered.contains("Top Hosts (10)\n"));
+        assert!(rendered.contains("Top Outbound Domains (10)\n"));
         assert!(rendered.contains("Host\tIn\tOut\tTotal\tLast Seen\n"));
         // No domain data rows.
         assert!(!rendered.contains("example.com"));
@@ -620,13 +820,15 @@ mod tests {
         let frame = build_json_frame("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
         let value = serde_json::to_value(frame).unwrap();
 
-        let top_hosts = value["top_hosts"].as_array().unwrap();
-        assert_eq!(top_hosts.len(), 1);
-        let entry = &top_hosts[0];
+        let top_outbound_domains = value["top_outbound_domains"].as_array().unwrap();
+        assert_eq!(top_outbound_domains.len(), 1);
+        let entry = &top_outbound_domains[0];
         assert_eq!(entry["host"], "example.com");
-        assert_eq!(entry["in_bytes"], 240);
-        assert_eq!(entry["out_bytes"], 100);
-        assert_eq!(entry["total_bytes"], 340);
+        assert_eq!(entry["lifetime"]["recv_bytes"], 240);
+        assert_eq!(entry["lifetime"]["sent_bytes"], 100);
+        assert_eq!(entry["lifetime"]["total_bytes"], 340);
+        assert_eq!(entry["selected"]["recv_bytes"], 240);
+        assert_eq!(entry["selected"]["sent_bytes"], 100);
         // RFC 3339 (matches process/IP dimension's last_seen format).
         assert_eq!(entry["last_seen"], "2026-07-15T08:00:00+00:00");
     }
@@ -637,7 +839,7 @@ mod tests {
         let frame = build_json_frame("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
         let value = serde_json::to_value(frame).unwrap();
 
-        assert!(value["top_hosts"].is_array());
-        assert!(value["top_hosts"].as_array().unwrap().is_empty());
+        assert!(value["top_outbound_domains"].is_array());
+        assert!(value["top_outbound_domains"].as_array().unwrap().is_empty());
     }
 }

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread;
 
@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use crate::capture::{CaptureSource, InterfaceInfo};
 use crate::pipeline::{CaptureReadiness, PipelineError, TrafficPipeline};
 use crate::proc_table::SharedProcTable;
-use crate::stats::TrafficSnapshot;
+use crate::stats::{RankWindow, TrafficSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Activation {
@@ -38,6 +38,7 @@ pub struct TrafficSession {
     top_n: usize,
     flow_table_capacity: u64,
     diagnostics_enabled: Arc<AtomicBool>,
+    rank_window: Arc<AtomicU8>,
     active: Option<ActiveCapture>,
     fallback: Option<ActiveCapture>,
     pending: Option<PendingActivation>,
@@ -56,6 +57,7 @@ impl TrafficSession {
             top_n,
             flow_table_capacity,
             diagnostics_enabled: Arc::new(AtomicBool::new(diagnostics_enabled)),
+            rank_window: Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             active: None,
             fallback: None,
             pending: None,
@@ -74,14 +76,19 @@ impl TrafficSession {
         Arc::clone(&self.diagnostics_enabled)
     }
 
+    pub fn rank_window_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.rank_window)
+    }
+
     pub fn activate(&mut self, selector: &str) -> Result<Activation> {
         let proc_table = self.proc_table.clone();
         let top_n = self.top_n;
         let capacity = self.flow_table_capacity;
         let diagnostics_enabled = Arc::clone(&self.diagnostics_enabled);
+        let rank_window = Arc::clone(&self.rank_window);
         self.activate_with(selector, move |name| {
             let source = CaptureSource::open(name, capacity)?;
-            TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled)
+            TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled, rank_window)
                 .map_err(anyhow::Error::from)
         })
     }
@@ -91,9 +98,10 @@ impl TrafficSession {
         let top_n = self.top_n;
         let capacity = self.flow_table_capacity;
         let diagnostics_enabled = Arc::clone(&self.diagnostics_enabled);
+        let rank_window = Arc::clone(&self.rank_window);
         self.begin_activate_with(selector, move |name| {
             let source = CaptureSource::open(name, capacity)?;
-            TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled)
+            TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled, rank_window)
                 .map_err(anyhow::Error::from)
         })
     }
@@ -108,6 +116,8 @@ impl TrafficSession {
         };
         let pending = self.pending.take().expect("pending activation exists");
         Some(result.map(|prepared| {
+            self.rank_window
+                .store(RankWindow::Cumulative.to_u8(), Ordering::Release);
             let previous = self.active.replace(ActiveCapture {
                 interface: pending.interface,
                 pipeline: prepared.pipeline,
@@ -160,6 +170,8 @@ impl TrafficSession {
             interface,
             pipeline,
         });
+        self.rank_window
+            .store(RankWindow::Cumulative.to_u8(), Ordering::Release);
         Ok(Activation::Activated)
     }
 
@@ -242,6 +254,7 @@ impl TrafficSession {
             top_n,
             flow_table_capacity: crate::flow_table::DEFAULT_FLOW_TABLE_CAPACITY,
             diagnostics_enabled: Arc::new(AtomicBool::new(false)),
+            rank_window: Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             active: Some(ActiveCapture {
                 interface: interface.to_string(),
                 pipeline,

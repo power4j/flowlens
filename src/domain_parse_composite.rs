@@ -12,7 +12,7 @@
 //!    字节可能 panic 或返回不确定错误）。
 //!
 //! 非 TLS 非 HTTP 的字节（任意 0x16 之外的二进制）会落到 HTTP parser，由
-//! httparse 返回 None（与 spec Q12 "首包解析失败标记 NoDomain" 一致）。
+//! httparse 返回 None；连接级有限重试由 capture 层流表控制。
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 0x16;
 /// TLS + HTTP 复合域名解析器。
 ///
 /// 生产路径（`CaptureSource::open`）使用此类型作为默认 parser，配合
-/// [`crate::flow_table::FlowTable`] 实现"每连接首包解析一次"。
+/// [`crate::flow_table::FlowTable`] 实现连接级缓存及有限重试。
 pub struct CompositeDomainParser {
     tls: TlsDomainParser,
     http: HttpDomainParser,

@@ -6,10 +6,16 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+- Configurable ranking windows: cumulative totals, 5s, 10s, 30s, 60s, and 5m average throughput, selectable from the settings overlay or with `--rank-window`. The active window is shown in the TUI.
+
 ### Changed
+
+- Process, IP, and outbound-domain rankings can now use sliding-window average throughput while interface totals remain cumulative. Finite-window rankings also show their current coverage while warming up.
 
 ### Fixed
 
+- TCP domain detection now performs bounded retries after an initial payload lacks SNI or an HTTP `Host`, allowing later payloads to populate domain rankings without repeatedly parsing long-lived connections.
+- Ranking tables reserve enough width for rate values such as `100.00 KB/s`, and finite-window domain views distinguish having no recent observations from having no cumulative observations.
 - On Windows, local-address detection now supplements Npcap device metadata with the native adapter-address API. This prevents Tailscale file-transfer traffic on Red Hat VirtIO Ethernet adapters from being incorrectly treated as non-local and omitted from FlowLens totals.
 
 ### Removed

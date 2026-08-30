@@ -6,7 +6,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -26,15 +26,17 @@ use crate::diagnostics::DiagnosticsWriter;
 use crate::palette;
 use crate::report::{fmt_elapsed, hostname, human_bytes, truncate};
 use crate::session::{Activation, TrafficSession};
-use crate::stats::{IpSnapshot, ProcessSnapshot, TrafficSnapshot};
+use crate::stats::{IpSnapshot, ProcessSnapshot, RankWindow, TrafficSnapshot};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Number of selectable rows in the settings overlay.
-const SETTINGS_SELECTABLE_ROWS: usize = 2;
+const SETTINGS_SELECTABLE_ROWS: usize = 3;
 /// Settings row index for the palette choice.
 const PALETTE_ROW: usize = 0;
 /// Settings row index for the diagnostics toggle.
 const DIAGNOSTICS_ROW: usize = 1;
+/// Settings row index for the ranking window.
+const RANK_WINDOW_ROW: usize = 2;
 
 /// Which page is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,8 +175,12 @@ struct AppState {
     /// actual state is OFF. Never turned into a real file except by a final
     /// ON commit; discarded when the final state is OFF.
     diagnostics_pending_path: Option<PathBuf>,
-    /// Selected settings row (0 = Palette, 1 = Diagnostics).
+    /// Selected settings row (0 = Palette, 1 = Diagnostics, 2 = Rank window).
     settings_selection: usize,
+    /// Actual ranking window used by the pipeline.
+    rank_window: RankWindow,
+    /// Draft ranking window committed when the settings overlay closes.
+    rank_window_draft: RankWindow,
     /// Waiting for a second confirmation before leaving the TUI.
     quit_confirm: bool,
 }
@@ -203,6 +209,8 @@ impl AppState {
             diagnostics_file: None,
             diagnostics_pending_path: None,
             settings_selection: 0,
+            rank_window: RankWindow::Cumulative,
+            rank_window_draft: RankWindow::Cumulative,
             quit_confirm: false,
         }
     }
@@ -252,6 +260,8 @@ impl AppState {
         self.diagnostics_draft = diagnostics_draft;
         self.diagnostics_file = diagnostics_file;
         self.diagnostics_error = diagnostics_error;
+        self.rank_window = RankWindow::Cumulative;
+        self.rank_window_draft = RankWindow::Cumulative;
     }
 
     fn update_process_detail(&mut self, snapshot: &TrafficSnapshot) {
@@ -383,6 +393,13 @@ where
                             .diagnostics_pending_path
                             .get_or_insert_with(crate::diagnostics::default_output_path);
                     }
+                } else if state.settings_selection == RANK_WINDOW_ROW {
+                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
+                    state.rank_window_draft = if forward {
+                        state.rank_window_draft.next()
+                    } else {
+                        state.rank_window_draft.prev()
+                    };
                 } else {
                     return KeyOutcome::Ignored;
                 }
@@ -397,6 +414,7 @@ where
     } else if key.code == KeyCode::Char('o') {
         state.settings_open = true;
         state.settings_selection = 0;
+        state.rank_window_draft = state.rank_window;
         // Start editing from the actual diagnostics state, and reserve one
         // pending output path up front when diagnostics are currently off.
         // Repeated in-overlay toggles reuse it; no file is created here.
@@ -445,11 +463,29 @@ fn finish_tui_activation(
 struct DiagnosticsRuntime {
     writer: Option<DiagnosticsWriter>,
     enabled: Arc<AtomicBool>,
+    rank_window: Arc<AtomicU8>,
 }
 
 impl DiagnosticsRuntime {
+    #[cfg(test)]
     fn new(writer: Option<DiagnosticsWriter>, enabled: Arc<AtomicBool>) -> Self {
-        Self { writer, enabled }
+        Self::new_with_rank(
+            writer,
+            enabled,
+            Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
+        )
+    }
+
+    fn new_with_rank(
+        writer: Option<DiagnosticsWriter>,
+        enabled: Arc<AtomicBool>,
+        rank_window: Arc<AtomicU8>,
+    ) -> Self {
+        Self {
+            writer,
+            enabled,
+            rank_window,
+        }
     }
 
     /// Apply the settings-overlay draft to the actual diagnostics state once
@@ -459,6 +495,12 @@ impl DiagnosticsRuntime {
     fn reconcile(&mut self, state: &mut AppState) -> bool {
         if state.settings_open {
             return false;
+        }
+        if state.rank_window_draft != state.rank_window {
+            state.rank_window = state.rank_window_draft;
+            self.rank_window
+                .store(state.rank_window.to_u8(), Ordering::Release);
+            return true;
         }
         if state.diagnostics_draft == state.diagnostics_enabled {
             // No runtime change (final state matches the actual one). Discard
@@ -521,6 +563,7 @@ pub fn run(
     session: &mut TrafficSession,
     diagnostics_writer: Option<DiagnosticsWriter>,
     diagnostics_enabled: Arc<AtomicBool>,
+    rank_window: Arc<AtomicU8>,
 ) -> io::Result<()> {
     palette::set_active_tier(palette::detect_tier());
     let started_at = Instant::now();
@@ -541,6 +584,8 @@ pub fn run(
     } else {
         AppState::startup(session.interfaces())
     };
+    state.rank_window = RankWindow::from_u8(rank_window.load(Ordering::Acquire));
+    state.rank_window_draft = state.rank_window;
     if let Some(writer) = diagnostics_writer.as_ref() {
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
@@ -553,7 +598,7 @@ pub fn run(
         &host,
         started_at,
         session,
-        DiagnosticsRuntime::new(diagnostics_writer, diagnostics_enabled),
+        DiagnosticsRuntime::new_with_rank(diagnostics_writer, diagnostics_enabled, rank_window),
     );
 
     // Restore terminal regardless of how the event loop exited.
@@ -1052,6 +1097,7 @@ fn draw_with_interfaces_at(
         host,
         started_at,
         mode,
+        snapshot,
     );
     let body = chunks[1].inner(Margin {
         horizontal: 1,
@@ -1060,7 +1106,7 @@ fn draw_with_interfaces_at(
     match state.page {
         Page::Overview => draw_overview(f, body, snapshot, mode, now),
         Page::Processes => match state.process_detail.as_ref() {
-            Some(detail) => draw_process_detail(f, body, detail, now),
+            Some(detail) => draw_process_detail(f, body, detail, snapshot, now),
             None => draw_processes(f, body, state, snapshot, mode, now),
         },
         Page::Ips => draw_ips(f, body, state, snapshot, mode, now),
@@ -1251,6 +1297,7 @@ fn draw_too_small(f: &mut ratatui::Frame, area: Rect) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_header(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1259,6 +1306,7 @@ fn draw_header(
     host: &str,
     started_at: Instant,
     mode: LayoutMode,
+    snapshot: &TrafficSnapshot,
 ) {
     let navigation = navigation_line(page, mode);
     if page == Page::About {
@@ -1266,7 +1314,7 @@ fn draw_header(
         return;
     }
 
-    let runtime = runtime_line(interface, host, started_at, mode);
+    let runtime = runtime_line(interface, host, started_at, mode, snapshot);
     let runtime_width = (runtime.width() as u16).min(area.width / 2);
     let chunks = Layout::default()
         .direction(LayoutDir::Horizontal)
@@ -1317,6 +1365,7 @@ fn runtime_line(
     host: &str,
     started_at: Instant,
     mode: LayoutMode,
+    snapshot: &TrafficSnapshot,
 ) -> Line<'static> {
     let mut spans = vec![
         Span::styled(" ", Style::default()),
@@ -1337,6 +1386,14 @@ fn runtime_line(
         fmt_elapsed(started_at.elapsed()),
         Style::default().fg(palette::strong()),
     ));
+    spans.push(Span::styled(
+        "  rank ",
+        Style::default().fg(palette::muted()),
+    ));
+    spans.push(Span::styled(
+        ranking_window_indicator(snapshot),
+        Style::default().fg(palette::accent()),
+    ));
     if mode != LayoutMode::Compact {
         spans.push(Span::styled(
             format!("  {}", chrono::Local::now().format("%H:%M:%S")),
@@ -1344,6 +1401,31 @@ fn runtime_line(
         ));
     }
     Line::from(spans)
+}
+
+fn ranking_window_label(window: RankWindow) -> String {
+    match window {
+        RankWindow::Cumulative => "total".to_string(),
+        RankWindow::Seconds(_) => window.label().to_string(),
+    }
+}
+
+fn ranking_window_indicator(snapshot: &TrafficSnapshot) -> String {
+    let Some(window) = snapshot.ranking.window.seconds() else {
+        return "total".to_string();
+    };
+    match snapshot.ranking.coverage_seconds {
+        Some(coverage) if coverage < window => format!("{coverage}/{window}s!"),
+        _ => format!("{window}s"),
+    }
+}
+
+fn format_rank_value(snapshot: &TrafficSnapshot, bytes: u64) -> String {
+    if snapshot.ranking.window == RankWindow::Cumulative {
+        human_bytes(bytes)
+    } else {
+        format!("{}/s", human_bytes(bytes))
+    }
 }
 
 fn draw_overview(
@@ -1584,13 +1666,13 @@ fn process_table(
         Table::new(
             rows,
             [
-                Constraint::Min(19),
+                Constraint::Min(13),
                 Constraint::Length(8),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(10),
-                Constraint::Length(4),
                 Constraint::Length(11),
+                Constraint::Length(11),
+                Constraint::Length(11),
+                Constraint::Length(4),
+                Constraint::Length(9),
             ],
         )
         .header(
@@ -1643,12 +1725,19 @@ fn process_rows(
             let name = Cell::from(process_name_span(process, 40));
             // ADR 0013（2026-08-19 修订）：Attr 列值单字母，E = exclusive-only（全部独占），
             // M = mixed（含共享字节）；构成明细与图例在详情页。
-            // Recv/Sent/Total 为启动以来累计口径；窗口字节仍在详情页。
+            let traffic = if snapshot.ranking.window == RankWindow::Cumulative {
+                crate::stats::ProcTraffic {
+                    recv: process.recv,
+                    sent: process.sent,
+                }
+            } else {
+                process.rank
+            };
             let attr = if process.is_mixed() { "M" } else { "E" };
             if compact {
                 Row::new(vec![
                     name,
-                    Cell::from(human_bytes(process.total()))
+                    Cell::from(format_rank_value(snapshot, traffic.total()))
                         .style(Style::default().fg(palette::strong())),
                     Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
@@ -1662,11 +1751,11 @@ fn process_rows(
                             .map(|pid| pid.to_string())
                             .unwrap_or_else(|| "-".to_string()),
                     ),
-                    Cell::from(human_bytes(process.recv))
+                    Cell::from(format_rank_value(snapshot, traffic.recv))
                         .style(Style::default().fg(palette::inbound())),
-                    Cell::from(human_bytes(process.sent))
+                    Cell::from(format_rank_value(snapshot, traffic.sent))
                         .style(Style::default().fg(palette::outbound())),
-                    Cell::from(human_bytes(process.total()))
+                    Cell::from(format_rank_value(snapshot, traffic.total()))
                         .style(Style::default().fg(palette::strong())),
                     Cell::from(attr),
                     Cell::from(relative_last_seen(process.last_seen(), now)),
@@ -1910,6 +1999,7 @@ fn draw_process_detail(
     f: &mut ratatui::Frame,
     area: Rect,
     detail: &ProcessDetail,
+    snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     let process = &detail.process;
@@ -1943,12 +2033,34 @@ fn draw_process_detail(
         )),
     ];
     lines.extend(process_attribution_detail_lines(process));
+    let selected = if snapshot.ranking.window == RankWindow::Cumulative {
+        process.selected
+    } else {
+        process.rank
+    };
     lines.push(Line::from(format!(
-        "Window (5m): {}  Recv {}  Sent {}",
-        human_bytes(process.window.total()),
-        human_bytes(process.window.recv),
-        human_bytes(process.window.sent)
+        "Selected ({}): {}  Recv {}  Sent {}",
+        ranking_window_indicator(snapshot),
+        format_rank_value(snapshot, selected.total()),
+        format_rank_value(snapshot, selected.recv),
+        format_rank_value(snapshot, selected.sent)
     )));
+    if snapshot.ranking.window == RankWindow::Cumulative {
+        lines.push(Line::from(format!(
+            "Rank (total): {}  Recv {}  Sent {}",
+            human_bytes(process.total()),
+            human_bytes(process.recv),
+            human_bytes(process.sent)
+        )));
+    } else {
+        lines.push(Line::from(format!(
+            "Rank ({}): {}  Recv {}  Sent {}",
+            ranking_window_indicator(snapshot),
+            format_rank_value(snapshot, process.rank.total()),
+            format_rank_value(snapshot, process.rank.recv),
+            format_rank_value(snapshot, process.rank.sent)
+        )));
+    }
     if !process.attribution.shared_with.is_empty() {
         lines.push(Line::from(format!(
             "  Shared with: {}",
@@ -2023,7 +2135,7 @@ fn draw_ip_preview(
         palette::border(),
         Some(preview_position(entries.len(), area.height)),
     );
-    let table = ip_table(entries, color, block, now);
+    let table = ip_table(entries, color, block, snapshot, now);
     f.render_widget(table, area);
 }
 
@@ -2039,6 +2151,7 @@ fn ip_table(
     entries: &[IpSnapshot],
     color: Color,
     block: Block<'static>,
+    snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Table<'static> {
     let rows = if entries.is_empty() {
@@ -2052,7 +2165,8 @@ fn ip_table(
             .map(|entry| {
                 Row::new(vec![
                     Cell::from(entry.ip.to_string()),
-                    Cell::from(human_bytes(entry.bytes)).style(Style::default().fg(color)),
+                    Cell::from(format_rank_value(snapshot, entry.rank_bytes))
+                        .style(Style::default().fg(color)),
                     Cell::from(relative_last_seen(entry.last_seen(), now)),
                 ])
             })
@@ -2062,7 +2176,7 @@ fn ip_table(
         rows,
         [
             Constraint::Min(14),
-            Constraint::Length(10),
+            Constraint::Length(11),
             Constraint::Length(10),
         ],
     )
@@ -2120,6 +2234,7 @@ fn draw_ips(
         true,
         state.ip_focus == IpFocus::Inbound,
         state.ip_in_scroll,
+        snapshot,
         now,
     );
     draw_ip_table(
@@ -2129,10 +2244,12 @@ fn draw_ips(
         false,
         state.ip_focus == IpFocus::Outbound,
         state.ip_out_scroll,
+        snapshot,
         now,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_ip_table(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -2140,6 +2257,7 @@ fn draw_ip_table(
     inbound: bool,
     focused: bool,
     selected: usize,
+    snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     let (prefix, title, color) = ip_theme(inbound);
@@ -2151,7 +2269,7 @@ fn draw_ip_table(
         palette::border(),
         Some(selected_position(selected, entries.len())),
     );
-    let table = ip_table(entries, color, block, now)
+    let table = ip_table(entries, color, block, snapshot, now)
         .row_highlight_style(if focused {
             Style::default()
                 .fg(palette::strong())
@@ -2248,10 +2366,10 @@ fn domain_table(
             rows,
             [
                 Constraint::Min(20),
-                Constraint::Length(10),
-                Constraint::Length(10),
+                Constraint::Length(11),
+                Constraint::Length(11),
                 Constraint::Length(12),
-                Constraint::Length(12),
+                Constraint::Length(10),
             ],
         )
         .header(Row::new(vec!["Host", "In", "Out", "Total", "Last seen"]).style(header_style))
@@ -2265,15 +2383,16 @@ fn domain_rows(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Row<'static>> {
     if snapshot.outbound_domains.is_empty() {
+        let empty_state = if snapshot.ranking.window == RankWindow::Cumulative {
+            "No outbound domains observed"
+        } else {
+            "No domains in window"
+        };
         let cells = if compact {
-            vec![
-                Cell::from("No outbound domains observed"),
-                Cell::from(""),
-                Cell::from(""),
-            ]
+            vec![Cell::from(empty_state), Cell::from(""), Cell::from("")]
         } else {
             vec![
-                Cell::from("No outbound domains observed"),
+                Cell::from(empty_state),
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
@@ -2292,19 +2411,25 @@ fn domain_rows(
             if compact {
                 Row::new(vec![
                     host,
-                    Cell::from(human_bytes(domain.total_bytes()))
-                        .style(Style::default().fg(palette::strong())),
+                    Cell::from(format_rank_value(
+                        snapshot,
+                        domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
+                    ))
+                    .style(Style::default().fg(palette::strong())),
                     last_seen,
                 ])
             } else {
                 Row::new(vec![
                     host,
-                    Cell::from(human_bytes(domain.in_bytes))
+                    Cell::from(format_rank_value(snapshot, domain.rank_in_bytes))
                         .style(Style::default().fg(palette::inbound())),
-                    Cell::from(human_bytes(domain.out_bytes))
+                    Cell::from(format_rank_value(snapshot, domain.rank_out_bytes))
                         .style(Style::default().fg(palette::outbound())),
-                    Cell::from(human_bytes(domain.total_bytes()))
-                        .style(Style::default().fg(palette::strong())),
+                    Cell::from(format_rank_value(
+                        snapshot,
+                        domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
+                    ))
+                    .style(Style::default().fg(palette::strong())),
                     last_seen,
                 ])
             }
@@ -2395,7 +2520,7 @@ fn truncate_with_ellipsis(text: &str, max: usize) -> String {
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let popup = centered_rect(area, 70, 9);
+    let popup = centered_rect(area, 70, 11);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette::accent()))
@@ -2412,6 +2537,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let detected_label = color_tier_label(state.detected_tier);
     let choice_label = palette_choice_label(state.palette_choice);
     let diagnostics_label = if state.diagnostics_draft { "ON" } else { "OFF" };
+    let rank_window_label = ranking_window_label(state.rank_window_draft);
     let selection_style = palette::selection_style();
     let palette_selected = state.settings_selection == PALETTE_ROW;
     let mut palette_line = Line::from(vec![
@@ -2443,10 +2569,24 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         ),
         Span::styled(diagnostics_label, Style::default().fg(palette::accent())),
     ]);
+    let mut rank_window_line = Line::from(vec![
+        Span::raw(settings_selection_prefix(
+            state.settings_selection == RANK_WINDOW_ROW,
+        )),
+        Span::styled(
+            "Rank window: ",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(rank_window_label, Style::default().fg(palette::accent())),
+    ]);
     if palette_selected {
         palette_line.style = selection_style;
-    } else {
+    } else if state.settings_selection == DIAGNOSTICS_ROW {
         diagnostics_line.style = selection_style;
+    } else {
+        rank_window_line.style = selection_style;
     }
     // File display follows the (actual, draft) matrix: the live file name is
     // shown while diagnostics are actually on (flagged when the draft would
@@ -2484,6 +2624,7 @@ fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
         Line::from(""),
         palette_line,
         diagnostics_line,
+        rank_window_line,
         Line::from(vec![
             Span::styled(
                 "File: ",
@@ -3427,6 +3568,66 @@ mod tests {
         assert!(rendered2.contains("Top Domains"));
         assert!(rendered2.contains("No outbound domains observed"));
         assert!(rendered2.contains("0/0"));
+
+        let window_empty = TrafficSnapshot {
+            ranking: crate::stats::RankingSnapshot {
+                window: RankWindow::TEN_SECONDS,
+                metric: crate::stats::RankingMetric::AverageThroughput,
+                coverage_seconds: Some(10),
+            },
+            ..TrafficSnapshot::default()
+        };
+        let mut terminal3 = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal3
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &window_empty,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                )
+            })
+            .unwrap();
+        let rendered3 = rendered_lines(&terminal3).join("\n");
+        assert!(rendered3.contains("No domains in window"));
+        assert!(!rendered3.contains("No outbound domains observed"));
+    }
+
+    #[test]
+    fn ranking_values_keep_rate_suffix_visible_in_tables() {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            None,
+            chrono::Utc::now(),
+            100 * 1024,
+            100 * 1024,
+        );
+        process.rank = crate::stats::ProcTraffic {
+            recv: 100 * 1024,
+            sent: 100 * 1024,
+        };
+        let snapshot = TrafficSnapshot {
+            ranking: crate::stats::RankingSnapshot {
+                window: RankWindow::TEN_SECONDS,
+                metric: crate::stats::RankingMetric::AverageThroughput,
+                coverage_seconds: Some(10),
+            },
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("100.00 KB/s"));
     }
 
     #[test]
@@ -3772,12 +3973,6 @@ mod tests {
                 system: crate::stats::ProcTraffic { recv: 20, sent: 10 },
                 unattributed: crate::stats::ProcTraffic { recv: 40, sent: 60 },
             },
-            attribution_window: crate::stats::AttributionSummary {
-                exclusive: crate::stats::ProcTraffic { recv: 90, sent: 80 },
-                shared: crate::stats::ProcTraffic { recv: 10, sent: 5 },
-                system: crate::stats::ProcTraffic { recv: 2, sent: 1 },
-                unattributed: crate::stats::ProcTraffic { recv: 4, sent: 6 },
-            },
             processes: vec![
                 {
                     let mut process = ProcessSnapshot::attributed(
@@ -3840,7 +4035,7 @@ mod tests {
     fn overview_page_renders_from_snapshot() {
         let snapshot = TrafficSnapshot {
             attribution: Default::default(),
-            attribution_window: Default::default(),
+            ranking: Default::default(),
             in_bytes: 1024,
             out_bytes: 2048,
             pending_attribution_bytes: 0,
@@ -4325,6 +4520,7 @@ mod tests {
             recv: 256,
             sent: 512,
         };
+        process.selected = process.window;
         let snapshot = TrafficSnapshot {
             process_data_fresh: true,
             processes: vec![process].into(),
@@ -4383,7 +4579,7 @@ mod tests {
         };
         assert_eq!(value_column(exclusive), value_column(shared));
         assert_eq!(value_column(shared), value_column(total));
-        assert!(rendered.contains("Window (5m): 768 B  Recv 256 B  Sent 512 B"));
+        assert!(rendered.contains("Selected (total): 768 B  Recv 256 B  Sent 512 B"));
         assert!(
             rendered.contains(
                 "Shared traffic is included in Total and may appear in multiple processes."
@@ -4837,13 +5033,15 @@ mod tests {
         );
         assert_eq!(state.settings_selection, 1);
         assert_eq!(send_key(&mut state, KeyCode::Down), KeyOutcome::Changed);
-        assert_eq!(state.settings_selection, 1);
+        assert_eq!(state.settings_selection, 2);
 
-        // Up/k moves back to Palette and clamps at the top.
+        // Up/k moves back through Diagnostics to Palette and clamps at the top.
         assert_eq!(
             send_key(&mut state, KeyCode::Char('k')),
             KeyOutcome::Changed
         );
+        assert_eq!(state.settings_selection, 1);
+        assert_eq!(send_key(&mut state, KeyCode::Up), KeyOutcome::Changed);
         assert_eq!(state.settings_selection, 0);
         assert_eq!(send_key(&mut state, KeyCode::Up), KeyOutcome::Changed);
         assert_eq!(state.settings_selection, 0);
@@ -5396,7 +5594,7 @@ mod tests {
             width: 80,
             height: 24,
         };
-        let popup = centered_rect(area, 60, 9);
+        let popup = centered_rect(area, 70, 11);
         let render_styles = |selection: usize| {
             let mut state = AppState::new();
             state.settings_open = true;
@@ -5466,7 +5664,7 @@ mod tests {
             width: 80,
             height: 24,
         };
-        let popup = centered_rect(area, 60, 9);
+        let popup = centered_rect(area, 70, 11);
 
         terminal
             .draw(|frame| {
