@@ -1,6 +1,6 @@
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -13,10 +13,10 @@ use crate::diagnostics;
 use crate::proc_table;
 use crate::proc_table::SharedProcTable;
 use crate::process_probe::ProcessProbe;
-use crate::stats::{Stats, TrafficSnapshot};
+use crate::stats::{RankWindow, Stats, TrafficSnapshot};
 
 const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
-const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
+const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const FLOW_CHANNEL_CAPACITY: usize = 8192;
 const SNAPSHOT_CHANNEL_CAPACITY: usize = 2;
 const CAPTURE_EARLY_FAILURE_WINDOW: Duration = Duration::from_millis(50);
@@ -111,11 +111,12 @@ fn aggregate_loop_with_probe(
     probe: Option<ProcessProbe>,
     flow_table_entries: Option<Arc<AtomicU64>>,
     diagnostics_enabled: Arc<AtomicBool>,
+    rank_window: Arc<AtomicU8>,
     pcap_counters: Option<Arc<CaptureCounters>>,
     stop: Arc<AtomicBool>,
     failure: Arc<OnceLock<PipelineError>>,
 ) {
-    let mut stats = Stats::default();
+    let mut stats = Stats::new_at(chrono::Utc::now());
     let mut attributor = match probe {
         Some(probe) => PendingAttributor::with_probe(
             attribution::PENDING_ATTRIBUTION_WINDOW,
@@ -147,6 +148,7 @@ fn aggregate_loop_with_probe(
                 flow_table_entries.as_ref(),
                 pcap_counters.as_ref(),
                 false,
+                &rank_window,
             );
             let published = match snapshot_tx.try_send(Arc::new(snapshot)) {
                 Ok(()) => true,
@@ -172,6 +174,7 @@ fn aggregate_loop_with_probe(
                 flow_table_entries.as_ref(),
                 pcap_counters.as_ref(),
                 diagnostics_enabled_now,
+                &rank_window,
             );
             let snapshot = Arc::new(snapshot);
             match snapshot_tx.try_send(snapshot) {
@@ -230,6 +233,7 @@ fn aggregate_loop(
         None,
         None,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
         None,
         stop,
         failure,
@@ -246,8 +250,10 @@ fn snapshot_for_publish(
     flow_table_entries: Option<&Arc<AtomicU64>>,
     pcap_counters: Option<&Arc<CaptureCounters>>,
     diagnostics_enabled: bool,
+    rank_window: &Arc<AtomicU8>,
 ) -> TrafficSnapshot {
-    let mut snapshot = stats.snapshot(top_n);
+    let rank_window = RankWindow::from_u8(rank_window.load(Ordering::Acquire));
+    let mut snapshot = stats.snapshot_at(top_n, chrono::Utc::now(), rank_window);
     snapshot.pending_attribution_bytes = pending_attribution_bytes;
     snapshot.process_data_fresh = proc_table.read().is_ok_and(|table| table.is_fresh());
     snapshot.diagnostics = if diagnostics_enabled {
@@ -283,6 +289,7 @@ impl TrafficPipeline {
         proc_table: SharedProcTable,
         top_n: usize,
         diagnostics_enabled: Arc<AtomicBool>,
+        rank_window: Arc<AtomicU8>,
     ) -> io::Result<Self> {
         let breakloop = source.breakloop_handle();
         let flow_table_entries = Arc::new(AtomicU64::new(0));
@@ -299,6 +306,7 @@ impl TrafficPipeline {
             top_n,
             Some(flow_table_entries),
             diagnostics_enabled,
+            rank_window,
             Some(Box::new(move || breakloop.breakloop())),
             Some(pcap_counters),
             spawn_named_thread,
@@ -321,6 +329,7 @@ impl TrafficPipeline {
             top_n,
             None,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             None,
             None,
             spawn_named_thread,
@@ -345,6 +354,7 @@ impl TrafficPipeline {
             top_n,
             None,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             Some(Box::new(wake_capture)),
             None,
             spawn_named_thread,
@@ -358,6 +368,7 @@ impl TrafficPipeline {
         top_n: usize,
         flow_table_entries: Option<Arc<AtomicU64>>,
         diagnostics_enabled: Arc<AtomicBool>,
+        rank_window: Arc<AtomicU8>,
         capture_wakeup: Option<CaptureWakeup>,
         pcap_counters: Option<Arc<CaptureCounters>>,
         mut spawn_thread: S,
@@ -390,6 +401,7 @@ impl TrafficPipeline {
                     Some(ProcessProbe::spawn()),
                     flow_table_entries,
                     diagnostics_enabled,
+                    rank_window,
                     pcap_counters,
                     aggregate_stop,
                     aggregate_failure,
@@ -1132,6 +1144,7 @@ mod tests {
             10,
             None,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             None,
             None,
             move |name, task| {

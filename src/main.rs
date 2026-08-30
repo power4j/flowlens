@@ -107,8 +107,18 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
             eprintln!("Failed to open interface: {error}");
             return ExitCode::FAILURE;
         }
+        session.rank_window_handle().store(
+            cli.rank_window.to_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
         let diagnostics_enabled = session.diagnostics_enabled_handle();
-        if let Err(error) = tui::run(&mut session, diagnostics_writer, diagnostics_enabled) {
+        let rank_window = session.rank_window_handle();
+        if let Err(error) = tui::run(
+            &mut session,
+            diagnostics_writer,
+            diagnostics_enabled,
+            rank_window,
+        ) {
             eprintln!("TUI error: {error}");
             return ExitCode::FAILURE;
         }
@@ -145,6 +155,7 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
                 &started_wall,
                 started_at,
                 top_n,
+                cli.rank_window,
                 is_json,
                 diagnostics_writer,
             );
@@ -160,6 +171,7 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
                     &started_wall,
                     started_at,
                     top_n,
+                    cli.rank_window,
                     diagnostics_writer,
                 );
             }
@@ -217,10 +229,11 @@ fn background_loop(
     started_wall: &chrono::DateTime<chrono::Local>,
     started_at: Instant,
     top_n: usize,
+    rank_window: stats::RankWindow,
     is_json: bool,
     mut diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
 ) {
-    let mut stats = stats::Stats::default();
+    let mut stats = stats::Stats::new_at(chrono::Utc::now());
     let mut attributor = attribution::PendingAttributor::with_probe(
         attribution::PENDING_ATTRIBUTION_WINDOW,
         attribution::PENDING_ATTRIBUTION_CAPACITY,
@@ -232,9 +245,25 @@ fn background_loop(
         if Instant::now() >= next_refresh {
             attributor.advance(&mut stats, proc_table, Instant::now());
             let res = if is_json {
-                report::render_file_json(path, interface, started_wall, started_at, &stats, top_n)
+                report::render_file_json(
+                    path,
+                    interface,
+                    started_wall,
+                    started_at,
+                    &stats,
+                    top_n,
+                    rank_window,
+                )
             } else {
-                report::render_file(path, interface, started_wall, started_at, &stats, top_n)
+                report::render_file(
+                    path,
+                    interface,
+                    started_wall,
+                    started_at,
+                    &stats,
+                    top_n,
+                    rank_window,
+                )
             };
             if let Err(e) = res {
                 eprintln!("Failed to write output file: {e}");
@@ -266,9 +295,10 @@ fn json_stdout_loop(
     started_wall: &chrono::DateTime<chrono::Local>,
     started_at: Instant,
     top_n: usize,
+    rank_window: stats::RankWindow,
     mut diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
 ) {
-    let mut stats = stats::Stats::default();
+    let mut stats = stats::Stats::new_at(chrono::Utc::now());
     let mut attributor = attribution::PendingAttributor::with_probe(
         attribution::PENDING_ATTRIBUTION_WINDOW,
         attribution::PENDING_ATTRIBUTION_CAPACITY,
@@ -279,7 +309,14 @@ fn json_stdout_loop(
         process_next(|| source.next(), proc_table, &mut stats, &mut attributor);
         if Instant::now() >= next_refresh {
             attributor.advance(&mut stats, proc_table, Instant::now());
-            report::render_jsonl(interface, started_wall, started_at, &stats, top_n);
+            report::render_jsonl(
+                interface,
+                started_wall,
+                started_at,
+                &stats,
+                top_n,
+                rank_window,
+            );
             if let Some(writer) = diagnostics_writer.as_mut()
                 && let Some(snapshot) = diagnostics::collect(diagnostics::DiagnosticsInputs {
                     proc_table,
@@ -340,6 +377,9 @@ struct Cli {
     /// Number of entries per top-N list (default: 10, min: 1)
     #[arg(long = "top-n", short = 'n', default_value_t = DEFAULT_TOP_N, value_parser = clap::value_parser!(u64).range(1..))]
     top_n: u64,
+    /// Ranking window: cumulative, 5s, 10s, 30s, 60s, or 5m
+    #[arg(long = "rank-window", default_value = "cumulative", value_parser = parse_rank_window)]
+    rank_window: stats::RankWindow,
     /// Connection flow table capacity in 5-tuples (default: 65536, min: 1)
     #[arg(long = "flow-table", default_value_t = DEFAULT_FLOW_TABLE, value_parser = clap::value_parser!(u64).range(1..))]
     flow_table: u64,
@@ -356,6 +396,20 @@ fn positive_u64(s: &str) -> Result<u64, String> {
         Ok(v) if v > 0 => Ok(v),
         Ok(_) => Err(String::from("value must be greater than 0")),
         Err(_) => Err(String::from("value must be a positive integer")),
+    }
+}
+
+fn parse_rank_window(value: &str) -> Result<stats::RankWindow, String> {
+    match value {
+        "cumulative" => Ok(stats::RankWindow::Cumulative),
+        "5s" => Ok(stats::RankWindow::FIVE_SECONDS),
+        "10s" => Ok(stats::RankWindow::TEN_SECONDS),
+        "30s" => Ok(stats::RankWindow::THIRTY_SECONDS),
+        "60s" => Ok(stats::RankWindow::SIXTY_SECONDS),
+        "5m" => Ok(stats::RankWindow::FIVE_MINUTES),
+        _ => Err(String::from(
+            "must be one of: cumulative, 5s, 10s, 30s, 60s, 5m",
+        )),
     }
 }
 
@@ -516,6 +570,16 @@ mod cli_tests {
     fn proc_refresh_non_numeric_rejected() {
         let result = Cli::try_parse_from(["flowlens", "eth0", "--proc-refresh", "abc"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rank_window_accepts_only_the_six_supported_values() {
+        for value in ["cumulative", "5s", "10s", "30s", "60s", "5m"] {
+            assert!(parse_rank_window(value).is_ok(), "{value}");
+        }
+        for value in ["total", "1m"] {
+            assert!(parse_rank_window(value).is_err(), "{value}");
+        }
     }
 
     #[test]
