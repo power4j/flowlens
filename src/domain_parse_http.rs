@@ -4,11 +4,11 @@
 //! HTTP Host 头在 RFC 9110 §7.2 中规定为大小写不敏感，[`httparse`] 保留 wire 形式
 //! 不做归一（已对照源码确认），故此处用 [`str::eq_ignore_ascii_case`] 比对。
 //!
-//! 行为契约（按 spec Q12 首包只解析一次）：
+//! 行为契约：
 //! - [`Status::Complete`] 后遍历 headers 找首个 Host（大小写不敏感），命中即返回
 //!   UTF-8 解码结果；无效 UTF-8、空 Host 值返回 `None`。
-//! - [`Status::Partial`]（首包不完整）当失败处理返回 `None`——不缓存、不重试，
-//!   后续包不在本解析器职责内（由 capture 层流表标记 NoDomain）。
+//! - [`Status::Partial`]（当前 payload 不完整）返回 `None`；解析器本身无状态，
+//!   是否对后续 payload 重试由 capture 层流表控制。
 //! - HTTP 响应（`HTTP/1.1 200 ...`）会被 [`httparse`] 视为 token 错误（`Err(Token)`），
 //!   自然落到失败分支返回 `None`，匹配"只解析请求，匹配出站方向"。
 //! - 非 HTTP 字节、空 payload、解析错误统一返回 `None`。
@@ -65,7 +65,7 @@ impl DomainParser for HttpDomainParser {
         let mut headers = [EMPTY_HEADER; MAX_HEADERS];
         let mut req = Request::new(&mut headers);
 
-        // 只接收 Complete：Partial（首包不完整，按 Q12 当失败）、任何 Err（非
+        // 只接收 Complete：Partial（当前 payload 不完整）、任何 Err（非
         // HTTP 请求、HTTP 响应、畸形 token、超出 64 header）都落到 None。
         let _consumed = match req.parse(tcp_payload) {
             Ok(Status::Complete(n)) => n,
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn returns_none_for_partial_first_packet() {
-        // 首包只含请求行 + 部分 header，缺 \r\n\r\n 终结符。
+        // payload 只含请求行 + 部分 header，缺 \r\n\r\n 终结符。
         let req = b"GET / HTTP/1.1\r\nHost: example.com";
 
         assert!(HttpDomainParser::new().parse_domain(req).is_none());

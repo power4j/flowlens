@@ -1666,13 +1666,13 @@ fn process_table(
         Table::new(
             rows,
             [
-                Constraint::Min(19),
+                Constraint::Min(13),
                 Constraint::Length(8),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(10),
-                Constraint::Length(4),
                 Constraint::Length(11),
+                Constraint::Length(11),
+                Constraint::Length(11),
+                Constraint::Length(4),
+                Constraint::Length(9),
             ],
         )
         .header(
@@ -2176,7 +2176,7 @@ fn ip_table(
         rows,
         [
             Constraint::Min(14),
-            Constraint::Length(10),
+            Constraint::Length(11),
             Constraint::Length(10),
         ],
     )
@@ -2366,10 +2366,10 @@ fn domain_table(
             rows,
             [
                 Constraint::Min(20),
-                Constraint::Length(10),
-                Constraint::Length(10),
+                Constraint::Length(11),
+                Constraint::Length(11),
                 Constraint::Length(12),
-                Constraint::Length(12),
+                Constraint::Length(10),
             ],
         )
         .header(Row::new(vec!["Host", "In", "Out", "Total", "Last seen"]).style(header_style))
@@ -2383,15 +2383,16 @@ fn domain_rows(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Row<'static>> {
     if snapshot.outbound_domains.is_empty() {
+        let empty_state = if snapshot.ranking.window == RankWindow::Cumulative {
+            "No outbound domains observed"
+        } else {
+            "No domains in window"
+        };
         let cells = if compact {
-            vec![
-                Cell::from("No outbound domains observed"),
-                Cell::from(""),
-                Cell::from(""),
-            ]
+            vec![Cell::from(empty_state), Cell::from(""), Cell::from("")]
         } else {
             vec![
-                Cell::from("No outbound domains observed"),
+                Cell::from(empty_state),
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
@@ -3567,6 +3568,66 @@ mod tests {
         assert!(rendered2.contains("Top Domains"));
         assert!(rendered2.contains("No outbound domains observed"));
         assert!(rendered2.contains("0/0"));
+
+        let window_empty = TrafficSnapshot {
+            ranking: crate::stats::RankingSnapshot {
+                window: RankWindow::TEN_SECONDS,
+                metric: crate::stats::RankingMetric::AverageThroughput,
+                coverage_seconds: Some(10),
+            },
+            ..TrafficSnapshot::default()
+        };
+        let mut terminal3 = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal3
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &window_empty,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                )
+            })
+            .unwrap();
+        let rendered3 = rendered_lines(&terminal3).join("\n");
+        assert!(rendered3.contains("No domains in window"));
+        assert!(!rendered3.contains("No outbound domains observed"));
+    }
+
+    #[test]
+    fn ranking_values_keep_rate_suffix_visible_in_tables() {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            None,
+            chrono::Utc::now(),
+            100 * 1024,
+            100 * 1024,
+        );
+        process.rank = crate::stats::ProcTraffic {
+            recv: 100 * 1024,
+            sent: 100 * 1024,
+        };
+        let snapshot = TrafficSnapshot {
+            ranking: crate::stats::RankingSnapshot {
+                window: RankWindow::TEN_SECONDS,
+                metric: crate::stats::RankingMetric::AverageThroughput,
+                coverage_seconds: Some(10),
+            },
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("100.00 KB/s"));
     }
 
     #[test]

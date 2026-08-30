@@ -13,7 +13,9 @@ use pcap::{Capture, Device};
 
 use crate::domain_parse::DomainParser;
 use crate::domain_parse_composite::CompositeDomainParser;
-use crate::flow_table::{DEFAULT_FLOW_TABLE_CAPACITY, FlowEntry, FlowKey, FlowTable};
+use crate::flow_table::{
+    DEFAULT_FLOW_TABLE_CAPACITY, FlowEntry, FlowKey, FlowTable, MAX_NO_DOMAIN_PARSE_ATTEMPTS,
+};
 use crate::stats::Direction;
 
 const NON_LOCAL_ENDPOINT_SAMPLE_LIMIT: usize = 8;
@@ -761,9 +763,9 @@ fn parse_with_payload<'a>(
     ))
 }
 
-/// 在 [`parse`] 基础上调用 L7 域名解析 seam，并配合流表实现"首包解析一次"。
+/// 在 [`parse`] 基础上调用 L7 域名解析 seam，并配合流表实现连接级缓存。
 ///
-/// 行为（spec Q12 / NoDomain 不重试 / 流表边界）：
+/// 行为（spec Q12 / 有限重试 / 流表边界）：
 /// - 非 TCP、非出站、无 payload → 跳过解析（`flow.domain` 留 None）。
 /// - `flow_table` 为 None（测试用）：每次出站 TCP 有 payload 都调用 `parser`，
 ///   不缓存。
@@ -771,8 +773,9 @@ fn parse_with_payload<'a>(
 ///   - 无法构造 FlowKey（local_socket/peer_port 缺失，或非 TCP）→ 直接调 parser、
 ///     不写表（边界情况，TCP+出站正常路径不会触发）；
 ///   - 流表命中 [`FlowEntry::Resolved`] → `flow.domain = Some(domain)`，跳过 parser；
-///   - 流表命中 [`FlowEntry::NoDomain`] → 跳过 parser，`flow.domain` 留 None
-///     （NoDomain 不重试）；
+///   - 流表命中 [`FlowEntry::NoDomain`] 且未达到重试上限 → 调 parser；
+///   - 流表命中 [`FlowEntry::NoDomain`] 且已达到重试上限 → 跳过 parser，
+///     `flow.domain` 留 None；
 ///   - 流表未命中 → 调 parser：`Some(domain)` 写 [`FlowEntry::Resolved`]，
 ///     `None` 写 [`FlowEntry::NoDomain`]。
 ///
@@ -817,17 +820,20 @@ fn parse_with_domain_parser_outcome(
     // 尝试构造 5-tuple 键；非 TCP / 缺端口时退化为“不查表、直接解析”。
     let key = flow_key_from(&flow);
 
+    let mut retrying_no_domain = false;
     if let (Some(table), Some(key)) = (flow_table, key.as_ref()) {
         match table.lookup(key) {
             Some(FlowEntry::Resolved(domain)) => {
                 flow.domain = Some(domain);
                 return Ok(FlowParseOutcome::accepted(flow));
             }
-            Some(FlowEntry::NoDomain) => {
-                // NoDomain 不重试：解析失败的连接后续包直接返回 Flow。
+            Some(FlowEntry::NoDomain { attempts }) if attempts < MAX_NO_DOMAIN_PARSE_ATTEMPTS => {
+                retrying_no_domain = true;
+            }
+            Some(FlowEntry::NoDomain { .. }) => {
                 return Ok(FlowParseOutcome::accepted(flow));
             }
-            None => {} // 首包未解析过，落入下方解析。
+            None => {} // 尚未解析过，落入下方解析。
         }
     }
 
@@ -836,6 +842,7 @@ fn parse_with_domain_parser_outcome(
     if let (Some(table), Some(key)) = (flow_table, key) {
         match &resolved {
             Some(domain) => table.insert_resolved(key, domain.clone()),
+            None if retrying_no_domain => table.record_no_domain_attempt(key),
             None => table.insert_no_domain(key),
         }
     }
@@ -1318,14 +1325,14 @@ mod tests {
     }
 
     #[test]
-    fn flow_table_hit_no_domain_skips_parser_and_leaves_domain_none() {
-        // 预填表标记 NoDomain：后续包不调 parser，flow.domain 留 None。
+    fn flow_table_hit_no_domain_retries_and_can_resolve() {
+        // 首次解析失败后，后续相同 5-tuple 的 payload 应允许有限重试。
         let parser = RecordingParser::new(Some(Arc::from("would-be.com")));
         let table = FlowTable::new();
         let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
         let packet = outbound_tcp_ethernet_frame(b"\x16\x03\x01\x00\x00");
 
-        // 第一包解析失败 → 流表写 NoDomain。
+        // 第一包解析失败 → 流表写入一次失败记录。
         let first = parse_with_domain_parser(
             pcap::Linktype::ETHERNET,
             &packet,
@@ -1339,10 +1346,10 @@ mod tests {
         let key = flow_key_from(&first).expect("TCP flow has a 5-tuple key");
         assert!(matches!(
             table.lookup(&key),
-            Some(crate::flow_table::FlowEntry::NoDomain)
+            Some(crate::flow_table::FlowEntry::NoDomain { attempts: 1 })
         ));
 
-        // 第二包相同 5-tuple：应跳过 parser，domain 留 None。
+        // 第二包相同 5-tuple：重试 parser 并解析成功。
         let flow = parse_with_domain_parser(
             pcap::Linktype::ETHERNET,
             &packet,
@@ -1353,8 +1360,40 @@ mod tests {
         .expect("supported data link")
         .expect("outbound TCP flow");
 
-        assert!(flow.domain.is_none());
-        assert_eq!(parser.call_count(), 0, "命中 NoDomain 不应重试");
+        assert_eq!(flow.domain.as_deref(), Some("would-be.com"));
+        assert_eq!(parser.call_count(), 1, "命中 NoDomain 且未达上限时应重试");
+        assert!(matches!(
+            table.lookup(&key),
+            Some(crate::flow_table::FlowEntry::Resolved(domain))
+                if domain.as_ref() == "would-be.com"
+        ));
+    }
+
+    #[test]
+    fn flow_table_hit_no_domain_stops_after_retry_limit() {
+        let parser = RecordingParser::new(None);
+        let table = FlowTable::new();
+        let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
+        let packet = outbound_tcp_ethernet_frame(b"\x16\x03\x01\x00\x00");
+
+        for _ in 0..=crate::flow_table::MAX_NO_DOMAIN_PARSE_ATTEMPTS {
+            let flow = parse_with_domain_parser(
+                pcap::Linktype::ETHERNET,
+                &packet,
+                &local_ips,
+                &parser,
+                Some(&table),
+            )
+            .expect("supported data link")
+            .expect("outbound TCP flow");
+            assert!(flow.domain.is_none());
+        }
+
+        assert_eq!(
+            parser.call_count(),
+            usize::from(crate::flow_table::MAX_NO_DOMAIN_PARSE_ATTEMPTS),
+            "达到 NoDomain 重试上限后应停止调用 parser"
+        );
     }
 
     #[test]
@@ -1409,7 +1448,7 @@ mod tests {
         let key = flow_key_from(&flow).expect("TCP flow has a 5-tuple key");
         assert!(matches!(
             table.lookup(&key),
-            Some(crate::flow_table::FlowEntry::NoDomain)
+            Some(crate::flow_table::FlowEntry::NoDomain { attempts: 1 })
         ));
     }
 

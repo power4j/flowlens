@@ -1,13 +1,13 @@
 //! 连接级域名流表（04 票）。
 //!
-//! 5-tuple → 域名解析结果的 moka sync 缓存：每条 TCP 连接首次解析后填表，
-//! 后续包直接查表（命中 Resolved 写入 flow.domain；命中 NoDomain 跳过解析、
-//! domain 留 None）。表满走 moka W-TinyLFU 淘汰，空闲超时（默认 5 分钟）
+//! 5-tuple → 域名解析结果的 moka sync 缓存：每条 TCP 连接首次解析及有限重试后填表，
+//! 后续包直接查表；命中 NoDomain 时在重试上限内允许再次解析，
+//! 达到上限后跳过解析并让 domain 留 None。表满走 moka W-TinyLFU 淘汰，空闲超时（默认 5 分钟）
 //! 由 moka 原生 time_to_idle 提供——不手写淘汰逻辑（spec 缓存库决策）。
 //!
 //! 不做 TCP 状态追踪（FIN/RST），接受 5-tuple 复用低概率误归属（spec 边界）。
-//! 不设 Pending 状态：未命中（无项）即表示"首包未解析过"，由调用方执行首包
-//! 解析并写入 Resolved/NoDomain。无 Pending 窗口简化了状态机。
+//! 不设 Pending 状态：未命中（无项）即表示"尚未解析过"，由调用方执行解析并
+//! 写入 Resolved/NoDomain。无 Pending 窗口简化了状态机。
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -20,6 +20,9 @@ pub const DEFAULT_FLOW_TABLE_CAPACITY: u64 = 65_536;
 
 /// 流表默认空闲超时（spec：5 分钟，对应 TCP 连接典型寿命）。
 pub const DEFAULT_TTI: Duration = Duration::from_secs(5 * 60);
+
+/// 单条 TCP 连接最多执行的域名解析次数（含首次解析）。
+pub const MAX_NO_DOMAIN_PARSE_ATTEMPTS: u8 = 3;
 
 /// TCP 连接的 5-tuple 键。
 ///
@@ -35,15 +38,15 @@ pub struct FlowKey {
 
 /// 域名解析结果。
 ///
-/// 不设 Pending：未命中（表中无项）即表示"首包未解析过"，由调用方执行
-/// 首包解析并写入 Resolved/NoDomain。
+/// 不设 Pending：未命中（表中无项）即表示"尚未解析过"，由调用方执行
+/// 解析并写入 Resolved/NoDomain。
 #[derive(Clone, Debug)]
 pub enum FlowEntry {
     /// 解析成功，携带域名（Arc 共享，clone 廉价）。
     Resolved(Arc<str>),
-    /// 首包解析失败（无 SNI、无 Host、ECH、非 TLS/HTTP、解析错误）。
-    /// 该连接后续包不再解析，flow.domain 留 None。
-    NoDomain,
+    /// 最近一次解析失败；attempts 记录已执行的解析次数。
+    /// 达到 [`MAX_NO_DOMAIN_PARSE_ATTEMPTS`] 后不再重试，避免对长期连接持续解析。
+    NoDomain { attempts: u8 },
 }
 
 /// 连接级流表：5-tuple → 域名解析结果。
@@ -91,9 +94,18 @@ impl FlowTable {
         self.cache.insert(key, FlowEntry::Resolved(domain));
     }
 
-    /// 写入 NoDomain 条目（首包解析失败，后续包不重试）。
+    /// 写入一次解析失败条目。后续包可在上限内继续触发解析。
     pub fn insert_no_domain(&self, key: FlowKey) {
-        self.cache.insert(key, FlowEntry::NoDomain);
+        self.cache.insert(key, FlowEntry::NoDomain { attempts: 1 });
+    }
+
+    /// 记录一次缓存命中的解析失败，供调用方控制重试上限。
+    pub fn record_no_domain_attempt(&self, key: FlowKey) {
+        let Some(FlowEntry::NoDomain { attempts }) = self.cache.get(&key) else {
+            return;
+        };
+        let attempts = attempts.saturating_add(1).min(MAX_NO_DOMAIN_PARSE_ATTEMPTS);
+        self.cache.insert(key, FlowEntry::NoDomain { attempts });
     }
 
     /// 触发 moka 的 pending maintenance（测试与生产均可主动调用，
@@ -157,20 +169,44 @@ mod tests {
         let k = key(2);
         table.insert_no_domain(k.clone());
 
-        assert!(matches!(table.lookup(&k), Some(FlowEntry::NoDomain)));
+        assert!(matches!(
+            table.lookup(&k),
+            Some(FlowEntry::NoDomain { attempts: 1 })
+        ));
     }
 
-    // ── NoDomain 不重试：流表如实返回，调用方据此跳过 parser ─────────
+    // ── NoDomain 有限重试：流表记录解析次数，调用方控制是否重试 ────────
 
     #[test]
-    fn no_domain_entry_remains_no_domain_on_repeated_lookup() {
+    fn no_domain_entry_tracks_bounded_parse_attempts() {
         let table = FlowTable::new();
         let k = key(3);
         table.insert_no_domain(k.clone());
 
-        for _ in 0..3 {
-            assert!(matches!(table.lookup(&k), Some(FlowEntry::NoDomain)));
-        }
+        assert!(matches!(
+            table.lookup(&k),
+            Some(FlowEntry::NoDomain { attempts: 1 })
+        ));
+        table.record_no_domain_attempt(k.clone());
+        assert!(matches!(
+            table.lookup(&k),
+            Some(FlowEntry::NoDomain { attempts: 2 })
+        ));
+        table.record_no_domain_attempt(k.clone());
+        table.record_no_domain_attempt(k.clone());
+        assert!(matches!(
+            table.lookup(&k),
+            Some(FlowEntry::NoDomain {
+                attempts: MAX_NO_DOMAIN_PARSE_ATTEMPTS
+            })
+        ));
+        table.record_no_domain_attempt(k.clone());
+        assert!(matches!(
+            table.lookup(&k),
+            Some(FlowEntry::NoDomain {
+                attempts: MAX_NO_DOMAIN_PARSE_ATTEMPTS
+            })
+        ));
     }
 
     // ── 空闲超时淘汰 ─────────────────────────────────────────────────
