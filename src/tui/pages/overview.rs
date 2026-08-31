@@ -162,3 +162,201 @@ pub(in crate::tui) fn traffic_line(
         Span::styled(format!("  {value}"), Style::default().fg(palette::strong())),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::*;
+
+    #[test]
+    fn wide_overview_uses_row_layout_with_equal_columns() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let lines = rendered_lines(&terminal);
+        let position = |label: &str| {
+            lines
+                .iter()
+                .enumerate()
+                .find_map(|(y, line)| {
+                    line.find(label)
+                        .map(|byte_offset| (line[..byte_offset].chars().count(), y))
+                })
+                .unwrap_or_else(|| panic!("missing panel label: {label}"))
+        };
+        let traffic = position("Traffic");
+        let inbound = position("Inbound IPs");
+        let outbound = position("Outbound IPs");
+        let processes = position("Top Processes");
+        let domains = position("Top Domains");
+
+        // Row 1: Traffic spans the full width at the top.
+        assert!(traffic.1 < processes.1);
+        assert!(traffic.1 < inbound.1);
+
+        // Row 2: Process (left) and Domain (right) share the same band.
+        assert_eq!(processes.1, domains.1);
+        assert!(processes.0 < 50);
+        assert!(domains.0 >= 50);
+
+        // Row 3: Inbound (left) and Outbound (right) share a lower band.
+        assert_eq!(inbound.1, outbound.1);
+        assert!(inbound.1 > processes.1);
+        assert!(inbound.0 < 50);
+        assert!(outbound.0 >= 50);
+
+        // Two equal columns: the right column sits ~half the body width to the
+        // right of the left column.
+        let body_width: usize = 120 - 4; // 2-char margin each side
+        let half_width = body_width / 2;
+        assert!((domains.0 - processes.0) >= half_width.saturating_sub(2));
+        assert!((domains.0 - processes.0) <= half_width + 2);
+        assert!((outbound.0 - inbound.0) >= half_width.saturating_sub(2));
+        assert!((outbound.0 - inbound.0) <= half_width + 2);
+
+        // Palette: the "n" prefix of the Traffic panel keeps the violet tint.
+        let net_cell = &terminal.backend().buffer()[(traffic.0 as u16 - 4, traffic.1 as u16)];
+        assert_eq!(net_cell.symbol(), "n");
+        assert_eq!(net_cell.fg, Color::Rgb(167, 139, 250));
+        assert_eq!(net_cell.bg, Color::Rgb(9, 13, 20));
+    }
+
+    #[test]
+    fn standard_overview_uses_row_layout_with_equal_columns() {
+        // 80-column terminal lands in Standard mode (80..120). The Overview
+        // still arranges its panels in the row-based layout: Traffic at top,
+        // then Process|Domain on the same band, then Inbound|Outbound IPs on
+        // the next.
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let lines = rendered_lines(&terminal);
+        let position = |label: &str| {
+            lines
+                .iter()
+                .enumerate()
+                .find_map(|(y, line)| {
+                    line.find(label)
+                        .map(|byte_offset| (line[..byte_offset].chars().count(), y))
+                })
+                .unwrap_or_else(|| panic!("missing panel label: {label}"))
+        };
+        let traffic = position("Traffic");
+        let processes = position("Top Processes");
+        let domains = position("Top Domains");
+        let inbound = position("Inbound IPs");
+        let outbound = position("Outbound IPs");
+
+        assert!(traffic.1 < processes.1);
+        assert!(traffic.1 < inbound.1);
+
+        assert_eq!(processes.1, domains.1);
+        assert!(processes.0 < domains.0);
+
+        assert_eq!(inbound.1, outbound.1);
+        assert!(inbound.1 > processes.1);
+        assert!(inbound.0 < outbound.0);
+    }
+
+    #[test]
+    fn compact_overview_stacks_five_rows_without_side_by_side_panels() {
+        // <80 columns triggers Compact mode. Overview stacks Traffic / Process
+        // / Domain / Inbound / Outbound IP vertically — no side-by-side panels.
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(72, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let lines = rendered_lines(&terminal);
+        let position = |label: &str| {
+            lines
+                .iter()
+                .enumerate()
+                .find_map(|(y, line)| {
+                    line.find(label)
+                        .map(|byte_offset| (line[..byte_offset].chars().count(), y))
+                })
+                .unwrap_or_else(|| panic!("missing panel label: {label}"))
+        };
+        let traffic = position("Traffic");
+        let processes = position("Top Processes");
+        let domains = position("Top Domains");
+        let inbound = position("Inbound IPs");
+        let outbound = position("Outbound IPs");
+
+        // Vertical order: Traffic < Process < Domain < Inbound IP < Outbound IP.
+        assert!(traffic.1 < processes.1);
+        assert!(processes.1 < domains.1);
+        assert!(domains.1 < inbound.1);
+        assert!(inbound.1 < outbound.1);
+    }
+
+    #[test]
+    fn overview_page_renders_from_snapshot() {
+        let snapshot = TrafficSnapshot {
+            attribution: Default::default(),
+            ranking: Default::default(),
+            in_bytes: 1024,
+            out_bytes: 2048,
+            pending_attribution_bytes: 0,
+            processes: vec![ProcessSnapshot::attributed(
+                7,
+                Some(Arc::from("curl --silent")),
+                Some(Arc::from("/usr/bin/curl")),
+                chrono::Utc::now(),
+                1024,
+                2048,
+            )]
+            .into(),
+            inbound_ips: vec![IpSnapshot::new(
+                "192.0.2.10".parse().unwrap(),
+                1024,
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+            )]
+            .into(),
+            outbound_ips: vec![IpSnapshot::new(
+                "198.51.100.20".parse().unwrap(),
+                2048,
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+            )]
+            .into(),
+            outbound_domains: vec![OutboundDomainSnapshot::new(
+                Arc::from("example.com"),
+                1024,
+                2048,
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+            )]
+            .into(),
+            process_data_fresh: false,
+            diagnostics: None,
+        };
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("curl --silent"));
+        assert!(rendered.contains("192.0.2.10"));
+        assert!(rendered.contains("198.51.100.20"));
+        assert!(rendered.contains("Top Processes"));
+        assert!(rendered.contains("Top Domains"));
+        assert!(rendered.contains("example.com"));
+        assert!(!rendered.contains("/usr/bin/curl"));
+    }
+}

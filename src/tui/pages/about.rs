@@ -60,3 +60,53 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect) {
     let para = Paragraph::new(lines).alignment(Alignment::Center);
     f.render_widget(para, content_area);
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::tui::*;
+
+    #[test]
+    fn about_page_frames_identity_and_hides_capture_context() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        state.page = Page::About;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "private-interface",
+                    "private-host",
+                    Instant::now(),
+                )
+            })
+            .unwrap();
+
+        let lines = rendered_lines(&terminal);
+        let identity_row = lines
+            .iter()
+            .rposition(|line| line.contains("flowlens"))
+            .expect("about identity");
+        assert!(
+            lines[..identity_row]
+                .iter()
+                .any(|line| line.contains("────────"))
+        );
+        assert!(
+            lines[identity_row + 1..]
+                .iter()
+                .any(|line| line.contains("────────"))
+        );
+        let rendered = lines.join("\n");
+        assert!(rendered.contains("Network Traffic Analyzer"));
+        assert!(rendered.contains("Version"));
+        assert!(rendered.contains(env!("FLOWLENS_BUILD_COMMIT")));
+        assert!(rendered.contains(env!("CARGO_PKG_REPOSITORY")));
+        assert!(!rendered.contains("private-interface"));
+        assert!(!rendered.contains("private-host"));
+    }
+}

@@ -179,3 +179,78 @@ pub(in crate::tui) fn draw_ip_table(
         .highlight_symbol(if focused { "> " } else { "  " });
     f.render_stateful_widget(table, area, &mut ratatui_state(entries.len(), selected));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::*;
+
+    #[test]
+    fn compact_ips_stack_themed_panels_vertically() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        state.page = Page::Ips;
+        let mut terminal = Terminal::new(TestBackend::new(72, 24)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let lines = rendered_lines(&terminal);
+        let inbound_y = lines
+            .iter()
+            .position(|line| line.contains("in Inbound IPs"))
+            .expect("inbound panel");
+        let outbound_y = lines
+            .iter()
+            .position(|line| line.contains("out Outbound IPs"))
+            .expect("outbound panel");
+        assert!(inbound_y < outbound_y);
+        assert!(outbound_y - inbound_y >= 8);
+    }
+
+    #[test]
+    fn ips_page_renders_from_snapshot() {
+        let snapshot = TrafficSnapshot {
+            inbound_ips: vec![IpSnapshot::new(
+                "192.0.2.10".parse().unwrap(),
+                1024,
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+            )]
+            .into(),
+            outbound_ips: vec![IpSnapshot::new(
+                "198.51.100.20".parse().unwrap(),
+                2048,
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+            )]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Ips;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_at(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                )
+            })
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("192.0.2.10"));
+        assert!(rendered.contains("1.00 KB"));
+        assert!(rendered.contains("198.51.100.20"));
+        assert!(rendered.contains("2.00 KB"));
+        assert!(rendered.contains("Total"));
+        assert!(rendered.contains("Last seen"));
+        assert!(rendered.contains("2m ago"));
+    }
+}

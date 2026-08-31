@@ -493,3 +493,60 @@ pub(super) fn ratatui_state(len: usize, scroll: usize) -> ratatui::widgets::Tabl
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::*;
+
+    #[test]
+    fn top_navigation_renders_page_tabs_with_the_active_page_selected() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let first_line = rendered_lines(&terminal)[0].clone();
+        assert!(
+            first_line.contains("flowlens  1 Overview  2 Processes  3 IPs  4 Domains  5 About")
+        );
+        let overview_cell = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "O")
+            .expect("Overview tab cell");
+        assert_eq!(overview_cell.bg, Color::Rgb(43, 37, 15));
+        assert!(overview_cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn undersized_terminal_shows_only_the_minimum_size_message() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(59, 15)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "private-interface",
+                    "private-host",
+                    Instant::now(),
+                )
+            })
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("Terminal too small (minimum 60x16)"));
+        assert!(!rendered.contains("private-interface"));
+        assert!(!rendered.contains("private-host"));
+        assert!(!rendered.contains("Traffic"));
+    }
+}

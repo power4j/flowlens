@@ -239,3 +239,200 @@ pub(in crate::tui) fn draw_processes(
         &mut ratatui_state(snapshot.processes.len(), state.proc_scroll),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::*;
+
+    #[test]
+    fn eighty_column_processes_keep_full_columns_and_a_visible_selection() {
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![ProcessSnapshot::attributed(
+                7,
+                Some(Arc::from("curl")),
+                Some(Arc::from("/usr/bin/curl")),
+                chrono::Utc::now(),
+                40,
+                60,
+            )]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("proc Processes 1"));
+        assert!(rendered.contains("Process"));
+        assert!(rendered.contains("PID"));
+        assert!(rendered.contains("Recv"));
+        assert!(rendered.contains("Sent"));
+        assert!(rendered.contains("Total"));
+        assert!(rendered.contains("1/1"));
+        let selected = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "c" && cell.bg == Color::Rgb(23, 43, 60))
+            .expect("selected process row");
+        assert!(selected.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn processes_page_renders_from_snapshot() {
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        let snapshot = TrafficSnapshot {
+            in_bytes: 40,
+            out_bytes: 60,
+            processes: vec![{
+                let mut process = ProcessSnapshot::attributed(
+                    7,
+                    Some(Arc::from("curl --silent")),
+                    None,
+                    observed_at,
+                    40,
+                    60,
+                );
+                process.window = crate::stats::ProcTraffic { recv: 40, sent: 60 };
+                process
+            }]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_at(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                );
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("curl --silent"));
+        assert!(rendered.contains("100 B"));
+        assert!(rendered.contains("Last seen"));
+        assert!(rendered.contains("2m ago"));
+    }
+
+    #[test]
+    fn processes_page_marks_the_selected_row() {
+        let snapshot = TrafficSnapshot {
+            processes: vec![
+                ProcessSnapshot::attributed(
+                    7,
+                    Some(Arc::from("curl")),
+                    Some(Arc::from("/usr/bin/curl")),
+                    chrono::Utc::now(),
+                    40,
+                    60,
+                ),
+                ProcessSnapshot::attributed(
+                    8,
+                    Some(Arc::from("ssh")),
+                    Some(Arc::from("/usr/bin/ssh")),
+                    chrono::Utc::now(),
+                    10,
+                    20,
+                ),
+            ]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        assert!(matches!(
+            handle_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &snapshot,
+            ),
+            KeyOutcome::Changed
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_at(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                )
+            })
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("> ssh"));
+        assert!(rendered.contains("Process"));
+        assert!(rendered.contains("PID"));
+        assert!(rendered.contains("Recv"));
+        assert!(rendered.contains("Sent"));
+        assert!(rendered.contains("Total"));
+        assert!(rendered.contains("Last seen"));
+        assert!(rendered.contains("Enter:details"));
+        assert!(rendered.contains("q:quit"));
+        assert!(!rendered.contains("/usr/bin/ssh"));
+    }
+
+    #[test]
+    fn process_preview_has_no_selection_cursor() {
+        let snapshot = TrafficSnapshot {
+            processes: vec![ProcessSnapshot::attributed(
+                7,
+                Some(Arc::from("curl")),
+                Some(Arc::from("/usr/bin/curl")),
+                chrono::Utc::now(),
+                40,
+                60,
+            )]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw_process_preview(
+                    frame,
+                    frame.area(),
+                    &snapshot,
+                    LayoutMode::Standard,
+                    chrono::Utc::now(),
+                );
+            })
+            .unwrap();
+
+        let process_line = rendered_lines(&terminal)
+            .into_iter()
+            .find(|line| line.contains("curl"))
+            .expect("process row");
+        assert!(!process_line.contains("> "));
+    }
+}

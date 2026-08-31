@@ -356,3 +356,380 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::*;
+
+    #[test]
+    fn ranking_values_keep_rate_suffix_visible_in_tables() {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            None,
+            chrono::Utc::now(),
+            100 * 1024,
+            100 * 1024,
+        );
+        process.rank = crate::stats::ProcTraffic {
+            recv: 100 * 1024,
+            sent: 100 * 1024,
+        };
+        let snapshot = TrafficSnapshot {
+            ranking: crate::stats::RankingSnapshot {
+                window: RankWindow::TEN_SECONDS,
+                metric: crate::stats::RankingMetric::AverageThroughput,
+                coverage_seconds: Some(10),
+            },
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("100.00 KB/s"));
+    }
+
+    #[test]
+    fn long_file_label_is_truncated_with_a_middle_ellipsis() {
+        assert_eq!(truncate_with_ellipsis("short.log", 20), "short.log");
+        assert_eq!(truncate_with_ellipsis("x", 1), "x");
+        let long = "flowlens-20260811T053335Z194489942-23262.log (pending)";
+        let out = truncate_with_ellipsis(long, 30);
+        assert_eq!(out.chars().count(), 30);
+        assert!(out.starts_with("flowlens-2026"));
+        assert!(out.ends_with("(pending)"));
+        assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn diagnostics_pending_path_is_generated_once_per_overlay_open() {
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        assert!(state.settings_open);
+        assert!(state.diagnostics_pending_path.is_some());
+        let pending = state.diagnostics_pending_path.clone().unwrap();
+
+        send_key(&mut state, KeyCode::Char('j'));
+        for _ in 0..6 {
+            send_key(&mut state, KeyCode::Char('l'));
+            assert_eq!(
+                state.diagnostics_pending_path.as_deref(),
+                Some(pending.as_path())
+            );
+            send_key(&mut state, KeyCode::Char('l'));
+            assert_eq!(
+                state.diagnostics_pending_path.as_deref(),
+                Some(pending.as_path())
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_final_on_commits_a_single_writer_at_the_pending_path() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        let pending = diagnostics_temp_path("final-on");
+        assert!(!pending.exists());
+        state.diagnostics_pending_path = Some(pending.clone());
+
+        send_key(&mut state, KeyCode::Char('o'));
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft ON
+        send_key(&mut state, KeyCode::Char('l')); // draft OFF
+        send_key(&mut state, KeyCode::Char('l')); // draft ON again
+        assert!(state.diagnostics_draft);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Changed
+        );
+        assert!(!state.settings_open);
+
+        // Commit happens on the next reconcile (same loop iteration in the TUI).
+        assert!(runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_some());
+        assert!(enabled.load(Ordering::Relaxed));
+        assert!(state.diagnostics_enabled);
+        assert_eq!(state.diagnostics_error, None);
+        assert!(state.diagnostics_pending_path.is_none());
+        let committed = state.diagnostics_file.clone().unwrap();
+        assert_eq!(
+            Some(committed.as_str()),
+            pending
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .as_deref()
+        );
+        assert!(pending.is_file(), "the committed file must exist");
+
+        // A follow-up reconcile is quiescent: no second writer or file.
+        assert!(!runtime.reconcile(&mut state));
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_final_off_creates_no_file_and_discards_the_pending_path() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        let pending = diagnostics_temp_path("final-off");
+        state.diagnostics_pending_path = Some(pending.clone());
+        assert!(!pending.exists());
+
+        send_key(&mut state, KeyCode::Char('o')); // draft := actual (OFF)
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft ON
+        send_key(&mut state, KeyCode::Char('l')); // draft OFF
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(!runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "an OFF draft discards the pending path"
+        );
+        assert!(
+            !pending.exists(),
+            "no file may be created for a final OFF state"
+        );
+    }
+
+    #[test]
+    fn diagnostics_actual_on_keeps_writer_and_file_when_draft_returns_on() {
+        let pending = diagnostics_temp_path("keep-on");
+        let writer = DiagnosticsWriter::create(&pending).unwrap();
+        let file_name = writer.file_name().unwrap();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
+
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some(file_name.clone());
+
+        send_key(&mut state, KeyCode::Char('o')); // draft := actual (ON)
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "no pending path is reserved while diagnostics are actually on"
+        );
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft OFF
+        assert!(!state.diagnostics_draft);
+        send_key(&mut state, KeyCode::Char('l')); // draft ON again
+        assert!(state.diagnostics_draft);
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(
+            !runtime.reconcile(&mut state),
+            "draft matches actual: no change"
+        );
+        assert!(runtime.writer.is_some());
+        assert_eq!(
+            runtime.writer.as_ref().unwrap().file_name().as_deref(),
+            Some(file_name.as_str())
+        );
+        assert!(enabled.load(Ordering::Relaxed));
+        assert_eq!(state.diagnostics_file.as_deref(), Some(file_name.as_str()));
+        assert!(pending.is_file());
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn diagnostics_unchanged_close_does_nothing() {
+        // Actual OFF + draft OFF: closing without toggling must not create a
+        // writer, and the pending path is discarded.
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        let pending = state.diagnostics_pending_path.clone().unwrap();
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(!runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(state.diagnostics_pending_path.is_none());
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn diagnostics_commit_failure_keeps_actual_state_and_reports_error() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        // Point the pending path at an existing file so create_new fails.
+        let blocking = diagnostics_temp_path("block");
+        std::fs::write(&blocking, "occupied").unwrap();
+        state.diagnostics_enabled = false;
+        state.diagnostics_draft = true; // final intent ON
+        state.diagnostics_pending_path = Some(blocking.clone());
+
+        assert!(runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none(), "no half-baked writer on failure");
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled, "actual state stays OFF");
+        assert!(!state.diagnostics_draft, "failed intent is reverted");
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "failed path is consumed"
+        );
+        assert!(
+            state
+                .diagnostics_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Diagnostics unavailable:"))
+        );
+        // The failed intent must not be retried on every loop iteration.
+        assert!(!runtime.reconcile(&mut state));
+
+        std::fs::remove_file(&blocking).unwrap();
+    }
+
+    #[test]
+    fn write_failure_forces_draft_and_pending_off_without_retry() {
+        // A runtime write failure must shut diagnostics down completely: the
+        // actual state, the settings draft, the writer and the shared flag
+        // all go OFF, the reserved path is cleared, and the next reconcile
+        // does not re-open the writer. The error stays visible.
+        let file = diagnostics_temp_path("write-fail");
+        let writer = DiagnosticsWriter::create(&file).unwrap();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
+
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some("flowlens-42.log".to_string());
+        state.diagnostics_pending_path = Some(PathBuf::from("stale-pending.log"));
+
+        runtime.note_write_failure(&mut state, io::Error::other("disk full"));
+
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(
+            !state.diagnostics_draft,
+            "the draft is forced off together with the actual state"
+        );
+        assert!(state.diagnostics_file.is_none());
+        assert!(
+            state.diagnostics_pending_path.is_none(),
+            "the stale pending path is cleared"
+        );
+        assert!(
+            state
+                .diagnostics_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Diagnostics disabled:"))
+        );
+
+        // The next reconcile must not re-create the writer or re-enable
+        // diagnostics, and the error must survive it.
+        assert!(!runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_none());
+        assert!(!enabled.load(Ordering::Relaxed));
+        assert!(!state.diagnostics_enabled);
+        assert!(
+            state
+                .diagnostics_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Diagnostics disabled:"))
+        );
+
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn write_failure_then_manual_reopen_commits_a_fresh_writer() {
+        // After a forced shutdown the user can re-open the settings overlay,
+        // toggle the draft ON manually and commit a fresh writer.
+        let enabled = Arc::new(AtomicBool::new(false));
+        let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        runtime.note_write_failure(&mut state, io::Error::other("disk full"));
+        assert!(!state.diagnostics_draft);
+
+        let pending = diagnostics_temp_path("reopen");
+        state.diagnostics_pending_path = Some(pending.clone());
+        send_key(&mut state, KeyCode::Char('o')); // draft := actual (OFF)
+        assert!(state.settings_open);
+        assert!(!state.diagnostics_draft);
+        assert_eq!(
+            state.diagnostics_pending_path.as_deref(),
+            Some(pending.as_path())
+        );
+        send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('l')); // draft ON
+        assert!(state.diagnostics_draft);
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.settings_open);
+
+        assert!(runtime.reconcile(&mut state));
+        assert!(runtime.writer.is_some());
+        assert!(enabled.load(Ordering::Relaxed));
+        assert!(state.diagnostics_enabled);
+        assert_eq!(
+            state.diagnostics_error, None,
+            "a successful manual commit clears the stale error"
+        );
+        assert!(pending.is_file());
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn interface_switch_preserves_writer_flag_and_file_name() {
+        // The runtime side of the switch: after the view reset, reconcile must
+        // not see a state mismatch and silently close an open writer.
+        let pending = diagnostics_temp_path("switch");
+        let writer = DiagnosticsWriter::create(&pending).unwrap();
+        let file_name = writer.file_name().unwrap();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
+
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some(file_name.clone());
+
+        state.reset_after_interface_switch();
+
+        assert!(state.diagnostics_enabled);
+        assert!(state.diagnostics_draft);
+        assert_eq!(state.diagnostics_file.as_deref(), Some(file_name.as_str()));
+        assert!(
+            !runtime.reconcile(&mut state),
+            "no reconcile churn after the switch"
+        );
+        assert!(runtime.writer.is_some());
+        assert_eq!(
+            runtime.writer.as_ref().unwrap().file_name().as_deref(),
+            Some(file_name.as_str())
+        );
+        assert!(enabled.load(Ordering::Relaxed));
+
+        runtime.writer = None;
+        std::fs::remove_file(&pending).unwrap();
+    }
+}

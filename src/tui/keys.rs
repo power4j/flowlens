@@ -380,3 +380,183 @@ pub(super) fn scroll_to_bottom(state: &mut AppState, snapshot: &TrafficSnapshot)
 }
 
 // ── drawing ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::*;
+
+    #[test]
+    fn page_key_four_opens_domains_and_five_opens_about() {
+        let mut state = AppState::new();
+        let snapshot = TrafficSnapshot::default();
+
+        let outcome = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert!(matches!(outcome, KeyOutcome::Changed));
+        assert!(state.page == Page::Domains);
+
+        let outcome = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert!(matches!(outcome, KeyOutcome::Changed));
+        assert!(state.page == Page::About);
+    }
+
+    #[test]
+    fn page_key_reports_changed() {
+        let mut state = AppState::new();
+        let snapshot = TrafficSnapshot::default();
+
+        let outcome = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            &snapshot,
+        );
+
+        assert!(matches!(outcome, KeyOutcome::Changed));
+        assert!(state.page == Page::Processes);
+    }
+
+    #[test]
+    fn page_key_draws_before_checking_for_snapshot_update() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let draw_calls = calls.clone();
+        let latest_calls = calls.clone();
+        let mut state = AppState::new();
+        let mut snapshot = Arc::new(TrafficSnapshot::default());
+
+        let quit = process_iteration(
+            &mut state,
+            &mut snapshot,
+            Some(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)),
+            |_, _| {
+                draw_calls.borrow_mut().push("draw");
+                Ok::<_, ()>(())
+            },
+            || {
+                latest_calls.borrow_mut().push("latest");
+                Ok::<_, ()>(None)
+            },
+        )
+        .unwrap();
+
+        assert!(!quit);
+        assert_eq!(*calls.borrow(), vec!["draw", "latest"]);
+    }
+
+    #[test]
+    fn interface_switch_keeps_diagnostics_enabled_and_file() {
+        let interfaces = interfaces();
+        let mut state = AppState::new();
+        state.diagnostics_enabled = true;
+        state.diagnostics_draft = true;
+        state.diagnostics_file = Some("flowlens-42.log".to_string());
+        let mut snapshot = Arc::new(TrafficSnapshot::default());
+
+        handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            Some("eth0"),
+            |_| unreachable!(),
+        );
+        handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            Some("eth0"),
+            |_| unreachable!(),
+        );
+        let outcome = handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            Some("eth0"),
+            |_| Ok(Activation::Activated),
+        );
+
+        assert_eq!(outcome, KeyOutcome::Changed);
+        assert!(state.interface_selector.is_none());
+        assert!(
+            state.diagnostics_enabled,
+            "a successful interface switch must not disable diagnostics"
+        );
+        assert_eq!(state.diagnostics_file.as_deref(), Some("flowlens-42.log"));
+    }
+
+    #[test]
+    fn overlay_swallows_page_keys_but_q_still_quits() {
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        assert!(state.settings_open);
+
+        // Tab/1-5 get swallowed by the overlay.
+        assert_eq!(send_key(&mut state, KeyCode::Tab), KeyOutcome::Ignored,);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('1')),
+            KeyOutcome::Ignored,
+        );
+        assert_eq!(state.page, Page::Overview);
+
+        // q still requests a global quit even with the overlay open.
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
+        assert!(state.settings_open);
+        assert_eq!(send_key(&mut state, KeyCode::Char('q')), KeyOutcome::Quit);
+    }
+
+    #[test]
+    fn quit_requires_confirmation_and_can_be_cancelled() {
+        let mut state = AppState::new();
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('n')),
+            KeyOutcome::Changed
+        );
+        assert!(!state.quit_confirm);
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
+        assert!(!state.quit_confirm);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Quit);
+    }
+
+    #[test]
+    fn quit_confirm_overlay_renders_prompt() {
+        let mut state = AppState::new();
+        state.quit_confirm = true;
+        let snapshot = TrafficSnapshot::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("Confirm"));
+        assert!(rendered.contains("Quit FlowLens?"));
+        assert!(rendered.contains("q/y/Enter quit"));
+        assert!(rendered.contains("n/Esc cancel"));
+    }
+}
