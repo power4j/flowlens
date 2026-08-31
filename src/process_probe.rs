@@ -12,13 +12,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::capture::{LocalSocket, TransportProtocol};
+use crate::proc_table::SocketKey;
 #[cfg(windows)]
 use crate::windows_connection_probe;
 
 const REQUEST_CHANNEL_CAPACITY: usize = 1_024;
 const SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
-type SocketKey = (IpAddr, u16, TransportProtocol);
 type ListenerQuery = Box<dyn FnMut() -> Result<Vec<ListenerSnapshot>, String> + Send + 'static>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

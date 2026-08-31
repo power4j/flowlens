@@ -89,42 +89,58 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
     let is_json = cli.format == "json";
 
     if cli.output.is_none() && !is_json {
-        let mut session = match session::TrafficSession::discover(
-            proc_table,
-            top_n,
-            cli.flow_table,
-            cli.diagnostics,
-        ) {
+        return run_tui_mode(&cli, diagnostics_writer, proc_table, top_n);
+    }
+
+    run_capture_mode(&cli, diagnostics_writer, proc_table, top_n, is_json)
+}
+
+fn run_tui_mode(
+    cli: &Cli,
+    diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
+    proc_table: proc_table::SharedProcTable,
+    top_n: usize,
+) -> ExitCode {
+    let mut session =
+        match session::TrafficSession::discover(proc_table, top_n, cli.flow_table, cli.diagnostics)
+        {
             Ok(session) => session,
             Err(error) => {
                 eprintln!("Failed to enumerate interfaces: {error}");
                 return ExitCode::FAILURE;
             }
         };
-        if let Some(selector) = cli.interface.as_deref()
-            && let Err(error) = session.activate(selector)
-        {
-            eprintln!("Failed to open interface: {error}");
-            return ExitCode::FAILURE;
-        }
-        session.rank_window_handle().store(
-            cli.rank_window.to_u8(),
-            std::sync::atomic::Ordering::Release,
-        );
-        let diagnostics_enabled = session.diagnostics_enabled_handle();
-        let rank_window = session.rank_window_handle();
-        if let Err(error) = tui::run(
-            &mut session,
-            diagnostics_writer,
-            diagnostics_enabled,
-            rank_window,
-        ) {
-            eprintln!("TUI error: {error}");
-            return ExitCode::FAILURE;
-        }
-        return ExitCode::SUCCESS;
+    if let Some(selector) = cli.interface.as_deref()
+        && let Err(error) = session.activate(selector)
+    {
+        eprintln!("Failed to open interface: {error}");
+        return ExitCode::FAILURE;
     }
+    session.rank_window_handle().store(
+        cli.rank_window.to_u8(),
+        std::sync::atomic::Ordering::Release,
+    );
+    let diagnostics_enabled = session.diagnostics_enabled_handle();
+    let rank_window = session.rank_window_handle();
+    if let Err(error) = tui::run(
+        &mut session,
+        diagnostics_writer,
+        diagnostics_enabled,
+        rank_window,
+    ) {
+        eprintln!("TUI error: {error}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
 
+fn run_capture_mode(
+    cli: &Cli,
+    diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
+    proc_table: proc_table::SharedProcTable,
+    top_n: usize,
+    is_json: bool,
+) -> ExitCode {
     let interface_selector = cli
         .interface
         .as_deref()
