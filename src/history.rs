@@ -1,11 +1,16 @@
-//! socket→PID 区间日志与历史归属（ADR 0013 第三刀）。
+//! socket→PID interval log and history-based attribution (ADR 0013 history
+//! engine).
 //!
-//! 操作系统只能回答「现在」的连接归属；短连接在探测窗口内消失后，
-//! 唯一的证据是它曾被某一代 proc_table 观测到。区间日志把每次代次刷新
-//! 中存在的 socket→PID 映射记录为 [valid_from, valid_to] 区间，终结归属时
-//! 用流的观测时间回查。追回结果必须通过 PID 启动时间硬门槛——候选进程的
-//! 启动时间无法验证或晚于流观测时间时一律拒绝，防止 PID 复用造成错误归属
-//! （错误归属比未知更有害）。
+//! The operating system can only answer attribution for connections that
+//! exist "now". Once a short-lived connection disappears inside the probe
+//! window, the only evidence is that some proc_table generation once
+//! observed it. The interval log records each generation's socket→PID
+//! mappings as [valid_from, valid_to] intervals, and final-time attribution
+//! looks them up by the flow's observation time. Recovered candidates must
+//! pass the PID start-time hard gate — when a candidate's start time cannot
+//! be verified or is later than the flow's observation time, it is rejected
+//! outright, preventing PID reuse from producing wrong attribution (a wrong
+//! attribution is worse than an unknown one).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -16,20 +21,22 @@ use crate::capture::LocalSocket;
 use crate::proc_table::{ProcInfo, SocketKey};
 use crate::stats::ObservedProcess;
 
-/// 默认保留 15 分钟（ADR 0013）。
+/// Default retention: 15 minutes (ADR 0013).
 pub(crate) const HISTORY_RETENTION: Duration = Duration::minutes(15);
-/// 默认容量 8192 条（ADR 0013），约 1–2 MB 量级。
+/// Default capacity: 8,192 entries (ADR 0013), roughly 1–2 MB.
 pub(crate) const HISTORY_CAPACITY: usize = 8192;
 
 struct HistoryInterval {
     valid_from: DateTime<Utc>,
-    /// `None` = 当前代仍存在；`Some(t)` = 最后一次被观测到的代次时间。
+    /// `None` = still present in the current generation; `Some(t)` = the last
+    /// generation time it was observed.
     valid_to: Option<DateTime<Utc>>,
     name: Option<Arc<str>>,
     path: Option<Arc<str>>,
 }
 
-/// socket→PID 区间日志。按代次刷新维护区间，按保留期与容量淘汰。
+/// socket→PID interval log. Intervals are maintained per generation refresh
+/// and evicted by retention and capacity.
 pub(crate) struct AttributionHistory {
     intervals: HashMap<SocketKey, HashMap<u32, HistoryInterval>>,
     retention: Duration,
@@ -51,8 +58,9 @@ impl AttributionHistory {
         }
     }
 
-    /// 代次刷新：当前代存在的映射保持或新开区间；上一代有而本代没有的关闭；
-    /// 随后按保留期与容量淘汰。
+    /// Generation refresh: mappings present in the current generation keep
+    /// their interval or open a new one; those seen last generation but not
+    /// this one are closed; then retention and capacity pruning runs.
     pub(crate) fn update<'a>(
         &mut self,
         now: DateTime<Utc>,
@@ -92,7 +100,8 @@ impl AttributionHistory {
         self.prune(now);
     }
 
-    /// 追回：`at` 落入区间的全部候选，逐个过 PID 启动时间硬门槛。
+    /// Recovery: all candidates whose interval covers `at`, each passed
+    /// through the PID start-time hard gate.
     pub(crate) fn lookup_verified(
         &self,
         socket: LocalSocket,
@@ -132,8 +141,9 @@ impl AttributionHistory {
             });
         }
         self.intervals.retain(|_, by_pid| !by_pid.is_empty());
-        // 容量超限时淘汰关闭最早（valid_to 最小）的区间；全部开启则本轮不动，
-        // 避免误删正在计时的证据。
+        // Over capacity, evict the interval closed earliest (smallest
+        // valid_to); if all are open, leave them this round — never delete
+        // evidence that is still accumulating.
         let excess = self.len().saturating_sub(self.capacity);
         for _ in 0..excess {
             let victim = self
@@ -164,14 +174,15 @@ impl AttributionHistory {
     }
 }
 
-/// PID 启动时间（ADR 0013 硬门槛）：Windows 经进程创建时间查询。
+/// PID start time (ADR 0013 hard gate): on Windows, queried via the process
+/// creation time.
 #[cfg(windows)]
 pub(crate) fn process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    // SAFETY: 句柄立即关闭，仅读取时间字段。
+    // SAFETY: the handle is closed immediately; only time fields are read.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut creation = FILETIME::default();
@@ -200,15 +211,16 @@ pub(crate) fn process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     }
 }
 
-/// PID 启动时间：/proc/{pid}/stat 字段 22 + /proc/stat btime。
-/// CLK_TCK 在几乎所有 Linux 发行版上为 100，按 100 折算。
+/// PID start time: field 22 of /proc/{pid}/stat plus /proc/stat btime.
+/// CLK_TCK is 100 on virtually every Linux distribution; converted as 100.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // comm 可能含空格/括号，从最后一个 ')' 之后取字段；其后首字段是第 3 项 state。
+    // comm may contain spaces/parentheses; take fields after the last ')' —
+    // its first field is state, item 3.
     let after_comm = stat.rsplit_once(')')?.1;
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
-    // starttime 是第 22 项，相对 state（第 3 项）索引为 22 - 3 = 19。
+    // starttime is item 22, index 22 - 3 = 19 relative to state (item 3).
     let starttime_ticks: u64 = fields.get(19)?.parse().ok()?;
     let btime: i64 = std::fs::read_to_string("/proc/stat")
         .ok()?
@@ -224,7 +236,8 @@ pub(crate) fn process_start_time(pid: u32) -> Option<DateTime<Utc>> {
     )
 }
 
-/// 其他平台（macOS 仅作架构兼容）不支持进程启动时间查询。
+/// Other platforms (macOS for architecture compatibility only) do not
+/// support process start-time queries.
 #[cfg(any(target_os = "macos", not(any(windows, unix))))]
 pub(crate) fn process_start_time(_pid: u32) -> Option<DateTime<Utc>> {
     None
@@ -266,13 +279,13 @@ mod tests {
         let mut history = AttributionHistory::new(Duration::minutes(15), 16);
         let entry = info(7, "server");
         history.update(t(0), once(((IP, 49_152, TCP), &entry)));
-        // 开启区间：valid_from 之后任意时间命中。
+        // Open interval: any time after valid_from hits.
         assert_eq!(history.lookup(socket(49_152), t(5)).len(), 1);
-        // 消失 → 关闭于 t(6)；关闭时刻本身仍命中，之后不命中。
+        // Disappears -> closed at t(6); the closing instant itself still hits, later does not.
         history.update(t(6), std::iter::empty());
         assert_eq!(history.lookup(socket(49_152), t(6)).len(), 1);
         assert!(history.lookup(socket(49_152), t(7)).is_empty());
-        // 复现 → 重开新区间（简化语义：旧区间被覆盖）。
+        // Reappears -> a new interval opens (simplified semantics: the old one is replaced).
         history.update(t(10), once(((IP, 49_152, TCP), &entry)));
         assert!(history.lookup(socket(49_152), t(7)).is_empty());
         assert_eq!(history.lookup(socket(49_152), t(12)).len(), 1);
@@ -302,12 +315,12 @@ mod tests {
             t(0),
             vec![((IP, 10_000, TCP), &gone), ((IP, 10_001, TCP), &alive)].into_iter(),
         );
-        // gone 在 t(1) 关闭；alive 持续开启。
+        // gone closes at t(1); alive stays open.
         history.update(t(1), once(((IP, 10_001, TCP), &alive)));
-        // 15 分钟保留期内都在。
+        // Both survive within the 15-minute retention.
         history.update(t(15), once(((IP, 10_001, TCP), &alive)));
         assert_eq!(history.len(), 2);
-        // t(17)：gone 的 valid_to = t(1) 距今 16 分钟 → 淘汰；alive 开启中保留。
+        // t(17): gone's valid_to = t(1), 16 minutes ago -> pruned; alive stays (open).
         history.update(t(17), once(((IP, 10_001, TCP), &alive)));
         assert_eq!(history.len(), 1);
         assert_eq!(history.lookup(socket(10_001), t(17)).len(), 1);
@@ -323,9 +336,9 @@ mod tests {
             t(0),
             vec![((IP, 10, TCP), &a), ((IP, 11, TCP), &b)].into_iter(),
         );
-        // a 关闭于 t(1)，b 保持。
+        // a closes at t(1); b stays.
         history.update(t(1), once(((IP, 11, TCP), &b)));
-        // c 于 t(2) 开启 → 超容量，淘汰关闭最早的 a。
+        // c opens at t(2) -> over capacity; a, closed earliest, is evicted.
         history.update(
             t(2),
             vec![((IP, 11, TCP), &b), ((IP, 12, TCP), &c)].into_iter(),
@@ -336,12 +349,13 @@ mod tests {
         assert_eq!(history.lookup(socket(12), t(2)).len(), 1);
     }
 
-    /// ADR 0013 硬门槛：候选 PID 查不到启动时间或启动晚于流观测时间 → 拒绝。
+    /// ADR 0013 hard gate: reject a candidate PID whose start time cannot be
+    /// resolved or is later than the flow's observation time.
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn start_time_gate_rejects_unverifiable_or_later_processes() {
         let mut history = AttributionHistory::default();
-        // 正例：当前测试进程（存活，启动早于现在）。
+        // Positive case: the current test process (alive, started before now).
         let self_info = info(std::process::id(), "self");
         let now = Utc::now();
         history.update(now, once(((IP, 20_000, TCP), &self_info)));
@@ -351,7 +365,7 @@ mod tests {
                 .len(),
             1
         );
-        // 反例 1：流的观测时间早于进程启动（伪造的过去区间）→ 拒绝。
+        // Negative case 1: flow observed before the process started (a fabricated past interval) -> rejected.
         let past: DateTime<Utc> = "2000-01-01T00:00:00Z".parse().unwrap();
         let past_info = info(std::process::id(), "past");
         history.update(past, once(((IP, 20_001, TCP), &past_info)));
@@ -360,7 +374,7 @@ mod tests {
                 .lookup_verified(socket(20_001), past + Duration::seconds(1))
                 .is_empty()
         );
-        // 反例 2：PID 不存在 → 查不到启动时间 → 拒绝。
+        // Negative case 2: nonexistent PID -> no start time -> rejected.
         let ghost = info(u32::MAX, "ghost");
         history.update(Utc::now(), once(((IP, 20_002, TCP), &ghost)));
         assert!(
