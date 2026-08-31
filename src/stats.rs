@@ -283,8 +283,9 @@ struct IpDiagnosticsCounters {
     evictions_rising: u64,
     evictions_observation: u64,
 }
-/// 双向滚动窗口（ADR 0013 第二刀）：复用 IP 维度 epoch bucket 机制，
-/// 60s 桶 × `IP_WINDOW_BUCKETS` = 5 分钟滚动窗口，按方向拆分。
+/// Bidirectional rolling window (ADR 0013 process windowing): reuses the IP
+/// dimension's epoch-bucket machinery — 60s buckets × `IP_WINDOW_BUCKETS` =
+/// a 5-minute rolling window, split by direction.
 #[derive(Clone, Copy, Debug, Default)]
 struct DirectionalWindows {
     inbound: IpWindowState,
@@ -317,8 +318,10 @@ impl ProcTraffic {
         self.recv.saturating_add(self.sent)
     }
 }
-/// 归属通道汇总（记录层口径，ADR 0013）：每字节恰好计入一个通道一次。
-/// 守恒等式：total = exclusive + shared + system + unattributed（已结算，不含在途 pending）。
+/// Attribution-channel summary (record-layer basis, ADR 0013): each byte is
+/// counted into exactly one channel. Conservation identity: total =
+/// exclusive + shared + system + unattributed (settled amounts only, no
+/// in-flight pending).
 #[derive(Clone, Copy, Default)]
 pub struct AttributionSummary {
     pub exclusive: ProcTraffic,
@@ -335,17 +338,20 @@ impl AttributionSummary {
             .saturating_add(self.unattributed.total())
     }
 }
-/// 进程归属构成（ADR 0013）：exclusive 与 shared 双通道；进程行的 recv/sent 是两者之和（inclusive）。
+/// Process attribution breakdown (ADR 0013): exclusive and shared channels;
+/// the process row's recv/sent is their sum (inclusive).
 #[derive(Clone, Default)]
 pub struct ProcessAttribution {
     pub exclusive: ProcTraffic,
     pub shared: ProcTraffic,
-    /// 共享伙伴的进程显示名。
+    /// Display names of the shared partners.
     pub shared_with: Vec<Arc<str>>,
-    /// 独占通道的证据来源集合（ADR 0013 第三刀）；共享通道证据不单独追踪。
+    /// Evidence sources of the exclusive channel (ADR 0013 history engine);
+    /// shared-channel evidence is not tracked separately.
     pub evidence: Evidence,
 }
-/// 归属证据来源（ADR 0013）：位标志，进程维度按出现顺序累积。
+/// Attribution evidence sources (ADR 0013): bit flags, accumulated in
+/// arrival order per process.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Evidence(u8);
 impl Evidence {
@@ -355,7 +361,7 @@ impl Evidence {
     pub(crate) fn merge(self, other: Evidence) -> Evidence {
         Evidence(self.0 | other.0)
     }
-    /// JSON `attribution.evidence` 的输出值。
+    /// Output values of JSON `attribution.evidence`.
     pub fn labels(&self) -> Vec<&'static str> {
         let mut labels = Vec::new();
         if self.0 & Self::SNAPSHOT.0 != 0 {
@@ -387,13 +393,15 @@ pub struct TrafficSnapshot {
     pub out_bytes: u64,
     pub process_data_fresh: bool,
     pub pending_attribution_bytes: u64,
-    /// 记录层守恒汇总（ADR 0013）：总计 = 独占 + 共享 + 系统 + 未归属。
+    /// Record-layer conservation summary (ADR 0013): total = exclusive +
+    /// shared + system + unattributed.
     pub attribution: AttributionSummary,
     pub ranking: RankingSnapshot,
     pub processes: Arc<[ProcessSnapshot]>,
     pub inbound_ips: Arc<[IpSnapshot]>,
     pub outbound_ips: Arc<[IpSnapshot]>,
-    /// 出站域名维度（05 票）；消费方：TUI 概览/详情页（06-07）、report plain/JSON 输出（08）。
+    /// Outbound-domain dimension; consumers: TUI overview/detail pages and
+    /// the plain/JSON reports.
     pub outbound_domains: Arc<[OutboundDomainSnapshot]>,
     pub diagnostics: Option<Arc<DiagnosticsSnapshot>>,
 }
@@ -504,11 +512,12 @@ pub struct DiagnosticsMissSample {
 #[derive(Clone)]
 pub struct ProcessSnapshot {
     identity: ProcessIdentity,
-    /// Inclusive 口径总量（exclusive + shared），列表与 top-N 排序键（lifetime）。
+    /// Inclusive total (exclusive + shared); the list and top-N sort key (lifetime).
     pub recv: u64,
     pub sent: u64,
     pub attribution: ProcessAttribution,
-    /// 5 分钟滚动窗口内的 inclusive 字节；保留在详情页与报表，不作为列表主口径。
+    /// Inclusive bytes within the 5-minute rolling window; kept for the
+    /// detail page and reports, not the primary list basis.
     pub window: ProcTraffic,
     /// Selected ranking window bytes before throughput normalization.
     pub selected: ProcTraffic,
@@ -590,7 +599,8 @@ impl ProcessSnapshot {
             ProcessIdentity::Attributed { path, .. } => path.as_deref(),
         }
     }
-    /// 列表 Attr 列语义（ADR 0013）：false = E（全部独占），true = M（含共享字节）。
+    /// Attr column semantics for lists (ADR 0013): false = E (all
+    /// exclusive), true = M (contains shared bytes).
     pub(crate) fn is_mixed(&self) -> bool {
         self.attribution.shared.recv > 0 || self.attribution.shared.sent > 0
     }
@@ -664,12 +674,13 @@ impl IpSnapshot {
         self.last_seen
     }
 }
-/// 出站域名维度的快照项，对齐 ProcessSnapshot 的封装风格。
-/// 字段语义对齐 spec：host / in_bytes / out_bytes / total_bytes / last_seen。
-/// `in_bytes` / `out_bytes` 为 pub（同 ProcessSnapshot::recv / sent）；
-/// `host` / `last_seen` 私有并通过 accessor 暴露（同进程维度的封装）。
-/// 字段与 accessor 在 05 票中落地；消费方：TUI 概览/详情页（06-07）、
-/// report plain/JSON 输出（08）。
+/// Snapshot item of the outbound-domain dimension, following the
+/// encapsulation style of ProcessSnapshot.
+/// Field semantics: host / in_bytes / out_bytes / total_bytes / last_seen.
+/// `in_bytes` / `out_bytes` are pub (like ProcessSnapshot::recv / sent);
+/// `host` / `last_seen` are private, exposed via accessors (like the
+/// process dimension).
+/// Consumers: TUI overview/detail pages and the plain/JSON reports.
 #[derive(Clone)]
 pub struct OutboundDomainSnapshot {
     host: Arc<str>,
@@ -763,24 +774,31 @@ pub struct Stats {
     proc_last_seen: HashMap<ProcessKey, DateTime<Utc>>,
     unattributed: ProcTraffic,
     unattributed_last_seen: Option<DateTime<Utc>>,
-    /// 共享归属通道（ADR 0013）：per-process inclusive 投影；记录层总量在 `shared_total`。
+    /// Shared-attribution channel (ADR 0013): per-process inclusive
+    /// projection; the record-layer total lives in `shared_total`.
     shared_by_proc: HashMap<ProcessKey, ProcTraffic>,
-    /// 记录层共享字节总量（每字节只计一次），守恒等式使用。
+    /// Record-layer shared-byte total (each byte counted once); used by the
+    /// conservation identity.
     shared_total: ProcTraffic,
-    /// 共享伙伴（进程统计身份），详情页 shared_with 数据来源。
+    /// Shared partners (process statistics identity); data source of the
+    /// detail page's shared_with.
     shared_partners: HashMap<ProcessKey, Vec<ProcessKey>>,
-    /// 独占通道证据来源（ADR 0013 第三刀）。
+    /// Evidence sources of the exclusive channel (ADR 0013 history engine).
     evidence_by_proc: HashMap<ProcessKey, Evidence>,
-    /// 系统流量（无本地套接字，ADR 0013），独立于未归属。
+    /// System traffic (no local socket, ADR 0013), separate from
+    /// unattributed.
     system: ProcTraffic,
-    /// 进程维度滚动窗口（ADR 0013 第二刀）：per-process inclusive 字节。
+    /// Per-process rolling window (ADR 0013 process windowing): per-process
+    /// inclusive bytes.
     proc_windows: HashMap<ProcessKey, DirectionalWindows>,
-    /// 记录层四通道滚动窗口（守恒摘要的窗口口径）。
+    /// Record-layer four-channel rolling window (the conservation summary's
+    /// window basis).
     exclusive_window: DirectionalWindows,
     shared_window: DirectionalWindows,
     system_window: DirectionalWindows,
     unattributed_window: DirectionalWindows,
-    /// 进程窗口参考 epoch（最近一次记录的 bucket epoch）。
+    /// Reference epoch of the process window (the bucket epoch of the most
+    /// recent record).
     proc_window_epoch: Option<i64>,
     proc_names: HashMap<ProcessKey, Arc<str>>,
     by_domain: HashMap<Arc<str>, DomainTraffic>,
@@ -811,12 +829,13 @@ pub(crate) struct StatsDiagnostics {
     pub ip_evictions_rising: u64,
     pub ip_evictions_observation: u64,
 }
-/// 按域名累计的双向字节计数，对齐 ProcTraffic 的 recv/sent 拆分。
+/// Per-domain bidirectional byte counters, following ProcTraffic's
+/// recv/sent split.
 #[derive(Default, Clone, Copy)]
 struct DomainTraffic {
-    /// Recv (inbound) bytes —— 对端回包累计到此。
+    /// Recv (inbound) bytes — peer replies accumulate here.
     recv: u64,
-    /// Sent (outbound) bytes —— 本机发出包累计到此。
+    /// Sent (outbound) bytes — locally originated packets accumulate here.
     sent: u64,
 }
 impl Stats {
@@ -1072,7 +1091,8 @@ impl Stats {
     ) {
         self.add_process_or_unattributed(process, direction, bytes, observed_at);
     }
-    /// ADR 0013 第三刀：带证据来源的归属记录（snapshot / probe / history）。
+    /// Attribution record carrying evidence sources (snapshot / probe /
+    /// history; ADR 0013 history engine).
     pub(crate) fn record_process_evidence(
         &mut self,
         process: ObservedProcess,
@@ -1094,11 +1114,12 @@ impl Stats {
         self.evidence_by_proc.insert(key, merged);
         self.record_process(Some(process), direction, bytes, observed_at);
     }
-    /// 按 spec Q8 / Q10：已识别连接（domain=Some）的双向流量按方向累计到该域名，
-    /// 并更新该域名的 last_seen；未识别（domain=None）不进维度。
+    /// Flows of identified connections (domain=Some) accumulate into that
+    /// domain per direction and update the domain's last_seen; unidentified
+    /// flows (domain=None) do not enter this dimension.
     ///
-    /// Last seen 规则与进程维度一致：只在 record_*_domain 被实际调用时更新，
-    /// snapshot() 仅读取不更新。
+    /// Last-seen rule matches the process dimension: updated only when
+    /// record_*_domain actually runs; snapshot() reads but never updates.
     pub(crate) fn record_outbound_domain(
         &mut self,
         domain: Option<&Arc<str>>,
@@ -1139,8 +1160,10 @@ impl Stats {
             }
         }
     }
-    /// ADR 0013 共享归属：同一笔字节全额计入每个候选进程（inclusive 投影），
-    /// 记录层只在 shared_total 计一次；候选不足 2 个不构成共享，退回未归属。
+    /// ADR 0013 shared attribution: the same bytes count in full for every
+    /// candidate process (inclusive projection); the record layer counts
+    /// them once in shared_total. Fewer than 2 candidates is not shared —
+    /// fall back to unattributed.
     pub(crate) fn record_shared(
         &mut self,
         candidates: &[ObservedProcess],
@@ -1194,7 +1217,8 @@ impl Stats {
             }
         }
     }
-    /// ADR 0013 系统流量：无本地套接字的协议流量（ICMP 等），不参与进程归属。
+    /// ADR 0013 system traffic: protocol traffic with no local socket (ICMP
+    /// etc.), not part of process attribution.
     pub(crate) fn record_system(
         &mut self,
         direction: Direction,
@@ -1208,7 +1232,8 @@ impl Stats {
             Direction::Outbound => self.system.sent += bytes,
         }
     }
-    /// 推进进程窗口参考 epoch（单调取最近），返回该 epoch 供各窗口记账。
+    /// Advance the process-window reference epoch (monotonically the
+    /// latest); returns the epoch for window accounting.
     fn advance_proc_window_epoch(&mut self, observed_at: DateTime<Utc>) -> i64 {
         let epoch = bucket_epoch(observed_at);
         self.proc_window_epoch = Some(self.proc_window_epoch.map_or(epoch, |prev| prev.max(epoch)));
@@ -1224,7 +1249,8 @@ impl Stats {
             unattributed: self.unattributed_window.window(epoch),
         }
     }
-    /// 记录层守恒汇总：总计 = 独占 + 共享 + 系统 + 未归属（ADR 0013）。
+    /// Record-layer conservation summary: total = exclusive + shared +
+    /// system + unattributed (ADR 0013).
     pub(crate) fn attribution_summary(&self) -> AttributionSummary {
         let mut exclusive = ProcTraffic::default();
         for traffic in self.by_proc.values() {
@@ -1764,7 +1790,8 @@ mod tests {
             "2026-07-15T07:59:00Z".parse().unwrap(),
         );
         let snapshot = stats.snapshot(10);
-        // ADR 0013：未归属不再作为进程行，只进守恒摘要。
+        // ADR 0013: unattributed is not a process row; it only enters the
+        // conservation summary.
 
         assert!(snapshot.processes.is_empty());
         assert_eq!(snapshot.attribution.unattributed.recv, 40);
@@ -1783,7 +1810,8 @@ mod tests {
         );
         stats.record_flow(flow(Direction::Inbound, [10, 0, 0, 2], 100), None);
         let snapshot = stats.snapshot(1);
-        // ADR 0013：未归属移出排名，topN 只含已归属进程。
+        // ADR 0013: unattributed is out of the ranking; topN holds only
+        // attributed processes.
 
         assert_eq!(snapshot.processes.len(), 1);
         assert_eq!(snapshot.processes[0].pid(), Some(7));
@@ -2070,7 +2098,8 @@ mod tests {
         stats.record_flow(flow(Direction::Outbound, [10, 0, 0, 4], 20), None);
         let snapshot = stats.snapshot(10);
         let summary = snapshot.attribution;
-        // ADR 0013：通道划分取代"进程行求和=接口字节"的旧不变量。
+        // ADR 0013: interface bytes conserve across the four channels;
+        // process-row sums no longer equal interface bytes.
 
         assert_eq!(snapshot.in_bytes, 70);
         assert_eq!(snapshot.out_bytes, 30);
@@ -2080,11 +2109,12 @@ mod tests {
         assert_eq!(summary.unattributed.sent, 20);
         assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
     }
-    /// 列表与 top-N 使用 lifetime 累计：窗口外的历史大户仍占排名。
+    /// Lists and top-N use lifetime totals: historical heavyweights outside
+    /// the window keep their rank.
     #[test]
     fn top_n_ranks_by_lifetime_including_idle_heavyweights() {
         let mut stats = Stats::default();
-        // 旧大户 1000 B（窗口外），新进程 10 B（窗口内）。
+        // Old heavyweight 1000 B (outside the window), new process 10 B (inside).
 
         stats.record_flow_at(
             flow(Direction::Outbound, [10, 0, 0, 1], 1000),
@@ -2157,8 +2187,10 @@ mod tests {
         assert_eq!(snapshot.processes[0].recv, 1000);
         assert_eq!(snapshot.processes[1].recv, 1000);
     }
-    /// ADR 0013 第二刀：窗口口径守恒——窗口内四通道之和恰为窗口内记录字节，
-    /// 滑出窗口后衰减为 0，累计口径不受影响。
+    /// ADR 0013 process windowing: window-basis conservation — the four
+    /// channel sums inside the window equal exactly the bytes recorded in
+    /// the window; once entries slide out they decay to 0 and the lifetime
+    /// basis is unaffected.
     #[test]
     fn attribution_window_summary_tracks_recent_bytes_only() {
         let mut stats = Stats::default();
@@ -2183,7 +2215,7 @@ mod tests {
         assert_eq!(window.total(), 140);
         assert_eq!(snapshot.attribution.unattributed.recv, 100);
         assert_eq!(snapshot.attribution.exclusive.recv, 40);
-        // 推进到 08:10：前两笔全部滑出窗口。
+        // Advance to 08:10: both earlier entries have slid out of the window.
 
         stats.record_flow_at(
             flow(Direction::Inbound, [10, 0, 0, 3], 1),
@@ -2448,7 +2480,7 @@ mod tests {
         assert_eq!(updated.outbound_ips[0].last_seen(), second);
     }
 
-    // ── 出站域名维度（05 票） ──────────────────────────────────────────
+    // ── outbound-domain dimension ────────────────────────────────────
 
     #[test]
     fn domain_flow_aggregates_bidirectionally() {
@@ -2521,7 +2553,8 @@ mod tests {
         stats.record_flow(flow(Direction::Inbound, [203, 0, 113, 9], 50), None);
         let snapshot = stats.snapshot(10);
         assert!(snapshot.outbound_domains.is_empty());
-        // 未识别流量仍然进入接口与 IP 维度，守恒边界不变。
+        // Unidentified traffic still enters the interface and IP dimensions;
+        // the conservation boundary is unchanged.
 
         assert_eq!(snapshot.in_bytes, 50);
         assert_eq!(snapshot.out_bytes, 100);
@@ -2543,7 +2576,7 @@ mod tests {
             first,
         );
         assert_eq!(stats.snapshot(10).outbound_domains[0].last_seen(), first);
-        // snapshot() 不更新 last_seen（与进程维度规则一致）。
+        // snapshot() does not update last_seen (same rule as the process dimension).
 
         let unchanged = stats.snapshot(10);
         assert_eq!(unchanged.outbound_domains[0].last_seen(), first);
@@ -2566,7 +2599,7 @@ mod tests {
     fn domain_dimension_does_not_conserve_with_interface_totals() {
         let mut stats = Stats::default();
         let host: Arc<str> = Arc::from("example.com");
-        // 已识别流量（进出站域名维度）：100 + 50 = 150。
+        // Identified traffic (enters the outbound-domain dimension): 100 + 50 = 150.
 
         stats.record_flow(
             flow_with_domain(
@@ -2581,7 +2614,7 @@ mod tests {
             flow_with_domain(Direction::Inbound, [203, 0, 113, 9], 50, Some(host.clone())),
             None,
         );
-        // 未识别流量（不进域名维度）：80 + 30 = 110。
+        // Unidentified traffic (does not enter the domain dimension): 80 + 30 = 110.
 
         stats.record_flow(flow(Direction::Outbound, [198, 51, 100, 5], 80), None);
         stats.record_flow(flow(Direction::Inbound, [198, 51, 100, 5], 30), None);
@@ -2591,12 +2624,12 @@ mod tests {
             .iter()
             .map(|domain| domain.total_bytes())
             .sum();
-        // 接口总量 = 100 + 50 + 80 + 30 = 260。
+        // Interface total = 100 + 50 + 80 + 30 = 260.
 
         assert_eq!(snapshot.in_bytes, 80);
         assert_eq!(snapshot.out_bytes, 180);
         assert_eq!(snapshot.in_bytes + snapshot.out_bytes, 260);
-        // 域名总量 = 150，是接口总量的子集（明确不与接口总量守恒）。
+        // Domain total = 150, a subset of the interface total (explicitly not conserving with it).
 
         assert_eq!(domain_total, 150);
         assert!(domain_total < snapshot.in_bytes + snapshot.out_bytes);
