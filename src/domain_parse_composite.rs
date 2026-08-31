@@ -1,18 +1,21 @@
-//! 复合域名解析器（04 票）：按首字节路由 TLS / HTTP。
+//! Composite domain parser: routes TLS / HTTP by the first payload byte.
 //!
-//! `payload[0] == 0x16`（TLS handshake ContentType）走 [`TlsDomainParser`]；
-//! 否则走 [`HttpDomainParser`]——HTTP 请求行以 ASCII method（G/P/H/D/C/O/T 等）
-//! 开头，绝不与 0x16 冲突。
+//! `payload[0] == 0x16` (TLS handshake ContentType) goes to
+//! [`TlsDomainParser`]; everything else goes to [`HttpDomainParser`] — an
+//! HTTP request line starts with an ASCII method (G/P/H/D/C/O/T, ...), which
+//! never collides with 0x16.
 //!
-//! 选首字节路由而非链式（TLS 失败再试 HTTP）的理由：
-//! 1. 性能：HTTP 请求不会被 tls-parser 尝试（反之亦然），每次解析仅一个 parser
-//!    被调用；
-//! 2. 清晰：路由规则与 wire format 对应；
-//! 3. 可预测：不依赖 parser 实现的失败行为（例如 tls-parser 对部分 HTTP
-//!    字节可能 panic 或返回不确定错误）。
+//! Why first-byte routing instead of a chain (try TLS, fall back to HTTP):
+//! 1. Performance: HTTP requests are never handed to tls-parser (and vice
+//!    versa); exactly one parser runs per parse.
+//! 2. Clarity: the routing rule maps 1:1 to the wire format.
+//! 3. Predictability: no reliance on parser failure behavior (tls-parser
+//!    may panic or return unstable errors on some HTTP bytes).
 //!
-//! 非 TLS 非 HTTP 的字节（任意 0x16 之外的二进制）会落到 HTTP parser，由
-//! httparse 返回 None；连接级有限重试由 capture 层流表控制。
+//! Bytes that are neither TLS nor HTTP (any binary other than a 0x16
+//! prefix) land in the HTTP parser and httparse returns None;
+//! connection-level bounded retries are governed by the capture layer's
+//! flow table.
 
 use std::sync::Arc;
 
@@ -20,13 +23,14 @@ use crate::domain_parse::DomainParser;
 use crate::domain_parse_http::HttpDomainParser;
 use crate::domain_parse_tls::TlsDomainParser;
 
-/// TLS ContentType=Handshake 的 wire 值（RFC 8446 §5.1）。
+/// Wire value of TLS ContentType=Handshake (RFC 8446 §5.1).
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 0x16;
 
-/// TLS + HTTP 复合域名解析器。
+/// Composite TLS + HTTP domain parser.
 ///
-/// 生产路径（`CaptureSource::open`）使用此类型作为默认 parser，配合
-/// [`crate::flow_table::FlowTable`] 实现连接级缓存及有限重试。
+/// The production path (`CaptureSource::open`) uses this type as the default
+/// parser, combined with [`crate::flow_table::FlowTable`] for
+/// connection-level caching and bounded retries.
 pub struct CompositeDomainParser {
     tls: TlsDomainParser,
     http: HttpDomainParser,
@@ -65,7 +69,7 @@ mod tests {
     use super::*;
     use crate::domain_parse_tls::test_fixtures::*;
 
-    // ── 路由分支 ─────────────────────────────────────────────────────
+    // ── routing branches ────────────────────────────────────────────
 
     #[test]
     fn routes_tls_payload_to_tls_parser() {
@@ -87,19 +91,19 @@ mod tests {
         assert_eq!(domain.as_ref(), "example.com");
     }
 
-    // ── 失败路径 ─────────────────────────────────────────────────────
+    // ── failure paths ───────────────────────────────────────────────
 
     #[test]
     fn returns_none_for_non_tls_non_http_payload() {
-        // 0xAA 非 TLS handshake 也不构成 HTTP 请求行，httparse 解析失败 → None
+        // 0xAA is neither a TLS handshake nor an HTTP request line; httparse fails to parse -> None
         let binary: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
         assert!(CompositeDomainParser::new().parse_domain(binary).is_none());
     }
 
     #[test]
     fn returns_none_for_ech_tls_payload() {
-        // ECH extension 的 TLS ClientHello 由 TLS 分支处理并返回 None
-        // （tls-parser 已识别 ECH 并丢弃外层 SNI，见 02 票测试）。
+        // A TLS ClientHello with an ECH extension is handled by the TLS branch
+        // and returns None (tls-parser recognizes ECH and drops the outer SNI).
         let record = tls_client_hello_with_ech();
 
         assert!(CompositeDomainParser::new().parse_domain(&record).is_none());
@@ -112,15 +116,16 @@ mod tests {
 
     #[test]
     fn returns_none_for_application_data_record() {
-        // 0x17 起始的 TLS ApplicationData 不是 handshake → HTTP 分支 → httparse 失败
+        // TLS ApplicationData starting with 0x17 is not a handshake -> HTTP branch -> httparse fails
         let record = tls_record(0x17, &[0x01, 0x02, 0x03, 0x04]);
         assert!(CompositeDomainParser::new().parse_domain(&record).is_none());
     }
 
     #[test]
     fn returns_none_for_http_response() {
-        // HTTP 响应（出站方向不应作 Host 源）首字节 H(0x48) 非 0x16 → HTTP 分支
-        // httparse 对响应行格式解析失败 → None。
+        // An HTTP response (outbound responses are not a Host source) starts
+        // with H(0x48), not 0x16 -> HTTP branch; httparse rejects the
+        // response-line format -> None.
         let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         assert!(CompositeDomainParser::new().parse_domain(resp).is_none());
     }

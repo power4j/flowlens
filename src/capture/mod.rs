@@ -1,173 +1,25 @@
-use std::collections::HashSet;
-use std::fmt::Write as _;
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use etherparse::{EtherType, NetHeaders, PacketHeaders, TransportHeader};
-use pcap::{Capture, Device};
-
-use crate::domain_parse::DomainParser;
-use crate::domain_parse_composite::CompositeDomainParser;
-use crate::flow_table::{
-    DEFAULT_FLOW_TABLE_CAPACITY, FlowEntry, FlowKey, FlowTable, MAX_NO_DOMAIN_PARSE_ATTEMPTS,
-};
 use crate::stats::Direction;
 
-const NON_LOCAL_ENDPOINT_SAMPLE_LIMIT: usize = 8;
-const NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL: u64 = 4_096;
+mod counters;
+mod parser;
+mod source;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct NonLocalEndpointSample {
-    pub src: IpAddr,
-    pub dst: IpAddr,
-}
+#[cfg(test)]
+use crate::flow_table::FlowTable;
+pub(crate) use counters::*;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CaptureDiagnosticsSnapshot {
-    pub local_ips: Vec<IpAddr>,
-    pub non_local_ipv4_samples: Vec<NonLocalEndpointSample>,
-    pub non_local_ipv6_samples: Vec<NonLocalEndpointSample>,
-}
-
-struct NonLocalEndpointSamples {
-    ipv4: Vec<NonLocalEndpointSample>,
-    ipv6: Vec<NonLocalEndpointSample>,
-}
-
-impl Default for NonLocalEndpointSamples {
-    fn default() -> Self {
-        Self {
-            ipv4: Vec::with_capacity(NON_LOCAL_ENDPOINT_SAMPLE_LIMIT),
-            ipv6: Vec::with_capacity(NON_LOCAL_ENDPOINT_SAMPLE_LIMIT),
-        }
-    }
-}
-
-/// 指定网卡的抓包源。
-/// pcap 层累计计数，由抓包线程周期采样，供诊断输出使用。
-#[derive(Default)]
-pub struct CaptureCounters {
-    pub received: AtomicU64,
-    pub dropped: AtomicU64,
-    pub if_dropped: AtomicU64,
-    pub packets_read: AtomicU64,
-    pub bytes_read: AtomicU64,
-    pub parse_error_packets: AtomicU64,
-    pub parse_error_bytes: AtomicU64,
-    pub non_ip_packets: AtomicU64,
-    pub non_ip_bytes: AtomicU64,
-    pub non_local_ipv4_packets: AtomicU64,
-    pub non_local_ipv4_bytes: AtomicU64,
-    pub non_local_ipv6_packets: AtomicU64,
-    pub non_local_ipv6_bytes: AtomicU64,
-    pub duplicate_outgoing_packets: AtomicU64,
-    pub duplicate_outgoing_bytes: AtomicU64,
-    pub flow_packets: AtomicU64,
-    pub flow_bytes: AtomicU64,
-    local_ips: Arc<[IpAddr]>,
-    non_local_samples: Mutex<NonLocalEndpointSamples>,
-    non_local_ipv4_packets_seen: AtomicU64,
-    non_local_ipv6_packets_seen: AtomicU64,
-}
-
-impl CaptureCounters {
-    fn with_local_ips(local_ips: &HashSet<IpAddr>) -> Self {
-        let mut local_ips = local_ips.iter().copied().collect::<Vec<_>>();
-        local_ips.sort_unstable();
-        Self {
-            local_ips: local_ips.into(),
-            ..Self::default()
-        }
-    }
-
-    fn record_packet(&self, captured_bytes: u64, outcome: &FlowParseOutcome) {
-        self.packets_read.fetch_add(1, Ordering::Relaxed);
-        self.bytes_read.fetch_add(captured_bytes, Ordering::Relaxed);
-
-        let (packets, bytes) = match outcome.disposition {
-            PacketDisposition::Accepted => (&self.flow_packets, &self.flow_bytes),
-            PacketDisposition::ParseError => (&self.parse_error_packets, &self.parse_error_bytes),
-            PacketDisposition::NonIp => (&self.non_ip_packets, &self.non_ip_bytes),
-            PacketDisposition::NonLocal { version, src, dst } => {
-                self.record_non_local_endpoint(version, src, dst);
-                match version {
-                    IpVersion::V4 => (&self.non_local_ipv4_packets, &self.non_local_ipv4_bytes),
-                    IpVersion::V6 => (&self.non_local_ipv6_packets, &self.non_local_ipv6_bytes),
-                }
-            }
-            PacketDisposition::DuplicateOutgoing => (
-                &self.duplicate_outgoing_packets,
-                &self.duplicate_outgoing_bytes,
-            ),
-        };
-        packets.fetch_add(1, Ordering::Relaxed);
-        bytes.fetch_add(captured_bytes, Ordering::Relaxed);
-    }
-
-    fn record_non_local_endpoint(&self, version: IpVersion, src: IpAddr, dst: IpAddr) {
-        let packets_seen = match version {
-            IpVersion::V4 => &self.non_local_ipv4_packets_seen,
-            IpVersion::V6 => &self.non_local_ipv6_packets_seen,
-        }
-        .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        let replacement_index = if packets_seen <= NON_LOCAL_ENDPOINT_SAMPLE_LIMIT as u64 {
-            None
-        } else if packets_seen.is_multiple_of(NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL) {
-            Some(
-                ((packets_seen / NON_LOCAL_ENDPOINT_SAMPLE_INTERVAL - 1)
-                    % NON_LOCAL_ENDPOINT_SAMPLE_LIMIT as u64) as usize,
-            )
-        } else {
-            return;
-        };
-
-        let mut samples = self
-            .non_local_samples
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let samples = match version {
-            IpVersion::V4 => &mut samples.ipv4,
-            IpVersion::V6 => &mut samples.ipv6,
-        };
-        let sample = NonLocalEndpointSample { src, dst };
-        if let Some(index) = replacement_index {
-            samples[index] = sample;
-        } else {
-            samples.push(sample);
-        }
-    }
-
-    pub(crate) fn diagnostics_snapshot(&self) -> CaptureDiagnosticsSnapshot {
-        let samples = self
-            .non_local_samples
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        CaptureDiagnosticsSnapshot {
-            local_ips: self.local_ips.to_vec(),
-            non_local_ipv4_samples: samples.ipv4.clone(),
-            non_local_ipv6_samples: samples.ipv6.clone(),
-        }
-    }
-}
-
-pub struct CaptureSource {
-    cap: Capture<pcap::Active>,
-    interface_name: String,
-    link_type: pcap::Linktype,
-    local_ips: HashSet<IpAddr>,
-    domain_parser: Box<dyn DomainParser>,
-    /// 连接级域名流表（5-tuple → Resolved/NoDomain），生产路径默认启用。
-    /// 测试可通过 [`open_with_domain_parser`] 注入自定义实例。
-    flow_table: Arc<FlowTable>,
-    pcap_counters: Arc<CaptureCounters>,
-    last_pcap_stats_sample: Instant,
-}
+#[cfg(test)]
+pub(crate) use parser::*;
+#[cfg(test)]
+use pcap::Device;
+pub(crate) use source::*;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterfaceInfo {
@@ -205,109 +57,21 @@ impl InterfaceInfo {
     }
 }
 
-// rust-pcap exposes normalized LINKTYPE_RAW (101), while live Linux handles use DLT_RAW (12).
-const LINUX_DLT_RAW: pcap::Linktype = pcap::Linktype(12);
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum PacketFormat {
-    Ethernet,
-    Raw,
-    Ipv4,
-    Ipv6,
-    Null,
-    Loop,
-    LinuxSll,
-    LinuxSll2,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IpVersion {
-    V4,
-    V6,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PacketDisposition {
-    Accepted,
-    ParseError,
-    NonIp,
-    NonLocal {
-        version: IpVersion,
-        src: IpAddr,
-        dst: IpAddr,
-    },
-    DuplicateOutgoing,
-}
-
-struct PayloadParseOutcome<'a> {
-    disposition: PacketDisposition,
-    parsed: Option<(Flow, Option<&'a [u8]>)>,
-}
-
-impl<'a> PayloadParseOutcome<'a> {
-    fn discarded(disposition: PacketDisposition) -> Self {
-        Self {
-            disposition,
-            parsed: None,
-        }
-    }
-
-    fn accepted(flow: Flow, payload: Option<&'a [u8]>) -> Self {
-        Self {
-            disposition: PacketDisposition::Accepted,
-            parsed: Some((flow, payload)),
-        }
-    }
-}
-
-struct FlowParseOutcome {
-    disposition: PacketDisposition,
-    flow: Option<Flow>,
-}
-
-impl FlowParseOutcome {
-    fn discarded(disposition: PacketDisposition) -> Self {
-        Self {
-            disposition,
-            flow: None,
-        }
-    }
-
-    fn accepted(flow: Flow) -> Self {
-        Self {
-            disposition: PacketDisposition::Accepted,
-            flow: Some(flow),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum SllPacketType {
-    Host,
-    Outgoing,
-    Other,
-}
-
-struct IpPayload<'a> {
-    packet: &'a [u8],
-    expected_version: Option<IpVersion>,
-    link_len: u64,
-    sll_packet_type: Option<SllPacketType>,
-}
-
-/// 解析后的单向流量记录。
+/// A parsed one-way traffic record.
 pub struct Flow {
     pub direction: Direction,
-    /// 远端 IP（用于 IP 维度统计）。
+    /// Remote IP (for the IP dimension).
     pub peer: IpAddr,
-    /// 远端 TCP/UDP 端口；非 TCP/UDP 流量为 `None`。
+    /// Remote TCP/UDP port; `None` for non-TCP/UDP traffic.
     pub peer_port: Option<u16>,
     pub bytes: u64,
-    /// 本机 socket，仅 TCP/UDP 有；用于进程关联。
+    /// Local socket, present for TCP/UDP only; used for process attribution.
     pub local_socket: Option<LocalSocket>,
-    /// 第二个本机 socket，仅当源和目标都属于本机时存在。
+    /// Second local socket, present only when both source and destination
+    /// are local.
     pub peer_local_socket: Option<LocalSocket>,
-    /// 出站连接解析出的目标域名；入站或未识别时为 `None`。
+    /// Target domain resolved from the outbound connection; `None` for
+    /// inbound or unidentified flows.
     pub domain: Option<Arc<str>>,
 }
 
@@ -322,673 +86,6 @@ pub struct LocalSocket {
     pub ip: IpAddr,
     pub port: u16,
     pub protocol: TransportProtocol,
-}
-
-/// Determine the default route interface from /proc/net/route.
-#[cfg(target_os = "linux")]
-fn default_interface() -> Option<String> {
-    let content = fs::read_to_string("/proc/net/route").ok()?;
-    for line in content.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 11 {
-            let dest = u32::from_str_radix(fields[1], 16).ok()?;
-            if dest == 0 {
-                return Some(fields[0].to_string());
-            }
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn default_interface() -> Option<String> {
-    None
-}
-
-/// Return available interfaces with the default-route interface highlighted.
-pub fn interface_catalog() -> Result<Vec<InterfaceInfo>> {
-    let default = default_interface();
-    let devices = Device::list()?;
-    Ok(interface_catalog_from_devices(devices, default.as_deref()))
-}
-
-fn interface_catalog_from_devices(
-    devices: Vec<Device>,
-    default: Option<&str>,
-) -> Vec<InterfaceInfo> {
-    devices
-        .into_iter()
-        .map(|device| InterfaceInfo {
-            is_default_route: default == Some(device.name.as_str()),
-            description: device.desc.unwrap_or_else(|| "No description".to_string()),
-            name: device.name,
-        })
-        .collect()
-}
-
-/// Print available interfaces with the default-route interface highlighted.
-pub fn list_interfaces() -> Result<()> {
-    print!("{}", format_interface_list(&interface_catalog()?));
-    Ok(())
-}
-
-pub fn format_interface_list(interfaces: &[InterfaceInfo]) -> String {
-    let mut output = String::from("Available interfaces:\n");
-    for (index, interface) in interfaces.iter().enumerate() {
-        let marker = if interface.is_default_route {
-            "  [default route]"
-        } else {
-            ""
-        };
-        let (primary, secondary) = interface.display_labels();
-        writeln!(output, "  {}. {}{marker}", index + 1, primary).unwrap();
-        if let Some(secondary) = secondary {
-            let label = if cfg!(windows) { "Name" } else { "Description" };
-            writeln!(output, "     {label}: {secondary}").unwrap();
-        }
-    }
-    output.push_str("\nUsage: flowlens <interface-or-number> [OPTIONS]\n");
-    output.push_str("Run flowlens --help for full usage\n");
-    output
-}
-
-fn select_device(selector: &str, mut devices: Vec<Device>) -> Result<Device> {
-    if let Some(index) = devices.iter().position(|device| device.name == selector) {
-        return Ok(devices.remove(index));
-    }
-
-    if !selector.is_empty() && selector.bytes().all(|byte| byte.is_ascii_digit()) {
-        let index = selector
-            .parse::<usize>()
-            .ok()
-            .and_then(|number| number.checked_sub(1));
-        if let Some(index) = index.filter(|index| *index < devices.len()) {
-            return Ok(devices.remove(index));
-        }
-        if devices.is_empty() {
-            return Err(anyhow!(
-                "Invalid interface number: {selector} (no interfaces available)"
-            ));
-        }
-        return Err(anyhow!(
-            "Invalid interface number: {selector} (choose 1-{})",
-            devices.len()
-        ));
-    }
-
-    Err(anyhow!("Interface not found: {selector}"))
-}
-
-fn collect_local_ips(devices: &[Device]) -> HashSet<IpAddr> {
-    collect_local_ips_with_native(devices, native_local_ips())
-}
-
-fn collect_local_ips_with_native(
-    devices: &[Device],
-    native_ips: impl IntoIterator<Item = IpAddr>,
-) -> HashSet<IpAddr> {
-    let mut local_ips: HashSet<IpAddr> = devices
-        .iter()
-        .flat_map(|device| device.addresses.iter().map(|address| address.addr))
-        .collect();
-    local_ips.extend(native_ips);
-    local_ips
-}
-
-#[cfg(windows)]
-fn native_local_ips() -> Vec<IpAddr> {
-    match crate::windows_local_ips::query_native_local_ips() {
-        Ok(addresses) => addresses,
-        Err(error) => {
-            eprintln!("native local IP query failed: {error}");
-            Vec::new()
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn native_local_ips() -> Vec<IpAddr> {
-    Vec::new()
-}
-
-impl CaptureSource {
-    /// 按网卡名打开实时抓包，使用复合 TLS+HTTP parser 与默认容量的流表。
-    ///
-    /// `flow_table_capacity` 由 CLI `--flow-table` 透传；传 0 则使用 spec
-    /// 默认 65536。
-    pub fn open(selector: &str, flow_table_capacity: u64) -> Result<Self> {
-        let parser = Box::new(CompositeDomainParser::new());
-        let capacity = if flow_table_capacity == 0 {
-            DEFAULT_FLOW_TABLE_CAPACITY
-        } else {
-            flow_table_capacity
-        };
-        let flow_table = Arc::new(FlowTable::with_capacity(capacity));
-        Self::open_with_domain_parser(selector, parser, flow_table)
-    }
-
-    /// 与 [`open`](Self::open) 相同，但允许注入自定义 parser 与流表。
-    ///
-    /// 用于测试：注入自定义 [`DomainParser`]（如 `RecordingParser`）控制解析行为；
-    /// 注入自定义流表可隔离测试状态。
-    pub fn open_with_domain_parser(
-        selector: &str,
-        domain_parser: Box<dyn DomainParser>,
-        flow_table: Arc<FlowTable>,
-    ) -> Result<Self> {
-        let devices = Device::list()?;
-        let local_ips = collect_local_ips(&devices);
-        let device = select_device(selector, devices)?;
-        let interface_name = device.name.clone();
-
-        let is_loopback = device.flags.is_loopback();
-        let cap = Capture::from_device(device)?
-            .timeout(150)
-            .snaplen(65535)
-            .buffer_size(2_000_000)
-            .promisc(false)
-            .open()?;
-        if is_loopback {
-            let _ = cap.direction(pcap::Direction::In);
-        }
-        let link_type = cap.get_datalink();
-        packet_format(link_type)?;
-        let pcap_counters = Arc::new(CaptureCounters::with_local_ips(&local_ips));
-
-        Ok(Self {
-            cap,
-            interface_name,
-            link_type,
-            local_ips,
-            domain_parser,
-            flow_table,
-            pcap_counters,
-            last_pcap_stats_sample: Instant::now(),
-        })
-    }
-
-    pub fn interface_name(&self) -> &str {
-        &self.interface_name
-    }
-
-    pub(crate) fn flow_table_entry_count(&self) -> u64 {
-        self.flow_table.entry_count()
-    }
-
-    pub(crate) fn breakloop_handle(&mut self) -> pcap::BreakLoop {
-        self.cap.breakloop_handle()
-    }
-
-    /// 读取下一个包；无包（读超时）返回 Ok(None)。
-    pub fn next(&mut self) -> Result<Option<Flow>> {
-        let result = match self.cap.next_packet() {
-            Ok(packet) => {
-                let captured_bytes = packet.data.len() as u64;
-                match parse_with_domain_parser_outcome(
-                    self.link_type,
-                    packet.data,
-                    &self.local_ips,
-                    self.domain_parser.as_ref(),
-                    Some(self.flow_table.as_ref()),
-                ) {
-                    Ok(outcome) => {
-                        self.pcap_counters.record_packet(captured_bytes, &outcome);
-                        Ok(outcome.flow)
-                    }
-                    Err(error) => {
-                        self.pcap_counters.record_packet(
-                            captured_bytes,
-                            &FlowParseOutcome::discarded(PacketDisposition::ParseError),
-                        );
-                        Err(error)
-                    }
-                }
-            }
-            Err(pcap::Error::TimeoutExpired) => Ok(None),
-            Err(e) => Err(anyhow::Error::from(e)),
-        };
-        self.sample_pcap_stats();
-        result
-    }
-
-    /// 每秒采样一次 pcap 统计（received/dropped/if_dropped），供诊断输出使用。
-    fn sample_pcap_stats(&mut self) {
-        if self.last_pcap_stats_sample.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-        self.last_pcap_stats_sample = Instant::now();
-        if let Ok(stat) = self.cap.stats() {
-            self.pcap_counters
-                .received
-                .store(u64::from(stat.received), Ordering::Relaxed);
-            self.pcap_counters
-                .dropped
-                .store(u64::from(stat.dropped), Ordering::Relaxed);
-            self.pcap_counters
-                .if_dropped
-                .store(u64::from(stat.if_dropped), Ordering::Relaxed);
-        }
-    }
-
-    pub fn pcap_counters(&self) -> Arc<CaptureCounters> {
-        Arc::clone(&self.pcap_counters)
-    }
-}
-
-/// 解析数据链路帧为单向流量记录；非 IP 或与本机无关返回 None。
-///
-/// 仅在测试中使用：production 路径走 [`parse_with_domain_parser_outcome`]，
-/// 老 test 调用此 pure-parsing 入口验证链路层/IP/TCP 解析本身。
-#[cfg(test)]
-fn parse(
-    link_type: pcap::Linktype,
-    data: &[u8],
-    local_ips: &HashSet<IpAddr>,
-) -> Result<Option<Flow>> {
-    Ok(parse_with_payload(link_type, data, local_ips)?
-        .parsed
-        .map(|(flow, _)| flow))
-}
-
-/// 与 [`parse`] 相同，并额外返回 TCP payload（仅当本包为 TCP 且 payload 非空）。
-///
-/// payload 借用自 `data`，调用方须在 `data` 生命周期内使用。
-/// L7 域名解析 seam 在此 payload 上调用 [`DomainParser`]；payload 不进入 Flow。
-#[allow(clippy::type_complexity)]
-fn parse_with_payload<'a>(
-    link_type: pcap::Linktype,
-    data: &'a [u8],
-    local_ips: &HashSet<IpAddr>,
-) -> Result<PayloadParseOutcome<'a>> {
-    let format = packet_format(link_type)?;
-    let (headers, link_len, sll_packet_type) = match format {
-        PacketFormat::Ethernet => {
-            let headers = match PacketHeaders::from_ethernet_slice(data) {
-                Ok(headers) => headers,
-                Err(_) => {
-                    return Ok(PayloadParseOutcome::discarded(
-                        PacketDisposition::ParseError,
-                    ));
-                }
-            };
-            (headers, 14, None)
-        }
-        format => {
-            let payload = match ip_payload(format, data) {
-                Some(payload) => payload,
-                None => {
-                    return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp));
-                }
-            };
-            if payload
-                .expected_version
-                .is_some_and(|expected| ip_version(payload.packet) != Some(expected))
-            {
-                return Ok(PayloadParseOutcome::discarded(
-                    PacketDisposition::ParseError,
-                ));
-            }
-            let headers = match PacketHeaders::from_ip_slice(payload.packet) {
-                Ok(headers) => headers,
-                Err(_) => {
-                    return Ok(PayloadParseOutcome::discarded(
-                        PacketDisposition::ParseError,
-                    ));
-                }
-            };
-            (headers, payload.link_len, payload.sll_packet_type)
-        }
-    };
-
-    let Some(net) = headers.net else {
-        return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp));
-    };
-    let (src, dst, ip_bytes, ip_version) = match net {
-        NetHeaders::Ipv4(ip, _) => (
-            IpAddr::V4(ip.source.into()),
-            IpAddr::V4(ip.destination.into()),
-            u64::from(ip.total_len),
-            IpVersion::V4,
-        ),
-        NetHeaders::Ipv6(ip, _) => (
-            IpAddr::V6(ip.source.into()),
-            IpAddr::V6(ip.destination.into()),
-            u64::from(ip.payload_length) + 40,
-            IpVersion::V6,
-        ),
-        _ => return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp)),
-    };
-
-    let link_ext_len = if format == PacketFormat::Ethernet {
-        headers
-            .link_exts
-            .iter()
-            .map(|header| header.header_len() as u64)
-            .sum()
-    } else {
-        0
-    };
-    let bytes = link_len + link_ext_len + ip_bytes;
-
-    let src_local = local_ips.contains(&src);
-    let dst_local = local_ips.contains(&dst);
-    if src_local && dst_local && sll_packet_type == Some(SllPacketType::Outgoing) {
-        return Ok(PayloadParseOutcome::discarded(
-            PacketDisposition::DuplicateOutgoing,
-        ));
-    }
-    let (direction, local_ip, peer) = if src_local {
-        (Direction::Outbound, src, dst)
-    } else if dst_local {
-        (Direction::Inbound, dst, src)
-    } else {
-        return Ok(PayloadParseOutcome::discarded(
-            PacketDisposition::NonLocal {
-                version: ip_version,
-                src,
-                dst,
-            },
-        ));
-    };
-
-    let is_tcp = matches!(headers.transport, Some(TransportHeader::Tcp(_)));
-    let (local_socket, peer_local_socket, peer_port) = match &headers.transport {
-        Some(TransportHeader::Tcp(tcp)) => {
-            let port = if direction == Direction::Outbound {
-                tcp.source_port
-            } else {
-                tcp.destination_port
-            };
-            let peer_port = if direction == Direction::Outbound {
-                tcp.destination_port
-            } else {
-                tcp.source_port
-            };
-            let local_socket = LocalSocket {
-                ip: local_ip,
-                port,
-                protocol: TransportProtocol::Tcp,
-            };
-            let peer_local_socket = (src_local && dst_local).then_some(LocalSocket {
-                ip: dst,
-                port: tcp.destination_port,
-                protocol: TransportProtocol::Tcp,
-            });
-            (Some(local_socket), peer_local_socket, Some(peer_port))
-        }
-        Some(TransportHeader::Udp(udp)) => {
-            let port = if direction == Direction::Outbound {
-                udp.source_port
-            } else {
-                udp.destination_port
-            };
-            let peer_port = if direction == Direction::Outbound {
-                udp.destination_port
-            } else {
-                udp.source_port
-            };
-            let local_socket = LocalSocket {
-                ip: local_ip,
-                port,
-                protocol: TransportProtocol::Udp,
-            };
-            let peer_local_socket = (src_local && dst_local).then_some(LocalSocket {
-                ip: dst,
-                port: udp.destination_port,
-                protocol: TransportProtocol::Udp,
-            });
-            (Some(local_socket), peer_local_socket, Some(peer_port))
-        }
-        _ => (None, None, None),
-    };
-
-    let tcp_payload = if is_tcp {
-        let payload = headers.payload.slice();
-        (!payload.is_empty()).then_some(payload)
-    } else {
-        None
-    };
-
-    Ok(PayloadParseOutcome::accepted(
-        Flow {
-            direction,
-            peer,
-            peer_port,
-            bytes,
-            local_socket,
-            peer_local_socket,
-            domain: None,
-        },
-        tcp_payload,
-    ))
-}
-
-/// 在 [`parse`] 基础上调用 L7 域名解析 seam，并配合流表实现连接级缓存。
-///
-/// 行为（spec Q12 / 有限重试 / 流表边界）：
-/// - 非 TCP、非出站、无 payload → 跳过解析（`flow.domain` 留 None）。
-/// - `flow_table` 为 None（测试用）：每次出站 TCP 有 payload 都调用 `parser`，
-///   不缓存。
-/// - `flow_table` 为 Some：
-///   - 无法构造 FlowKey（local_socket/peer_port 缺失，或非 TCP）→ 直接调 parser、
-///     不写表（边界情况，TCP+出站正常路径不会触发）；
-///   - 流表命中 [`FlowEntry::Resolved`] → `flow.domain = Some(domain)`，跳过 parser；
-///   - 流表命中 [`FlowEntry::NoDomain`] 且未达到重试上限 → 调 parser；
-///   - 流表命中 [`FlowEntry::NoDomain`] 且已达到重试上限 → 跳过 parser，
-///     `flow.domain` 留 None；
-///   - 流表未命中 → 调 parser：`Some(domain)` 写 [`FlowEntry::Resolved`]，
-///     `None` 写 [`FlowEntry::NoDomain`]。
-///
-/// [`parse`]: parse
-#[cfg(test)]
-pub(crate) fn parse_with_domain_parser(
-    link_type: pcap::Linktype,
-    data: &[u8],
-    local_ips: &HashSet<IpAddr>,
-    parser: &dyn DomainParser,
-    flow_table: Option<&FlowTable>,
-) -> Result<Option<Flow>> {
-    Ok(parse_with_domain_parser_outcome(link_type, data, local_ips, parser, flow_table)?.flow)
-}
-
-fn parse_with_domain_parser_outcome(
-    link_type: pcap::Linktype,
-    data: &[u8],
-    local_ips: &HashSet<IpAddr>,
-    parser: &dyn DomainParser,
-    flow_table: Option<&FlowTable>,
-) -> Result<FlowParseOutcome> {
-    let parsed = parse_with_payload(link_type, data, local_ips)?;
-    let Some((mut flow, payload)) = parsed.parsed else {
-        return Ok(FlowParseOutcome::discarded(parsed.disposition));
-    };
-    if flow.direction != Direction::Outbound {
-        // Q8 双向统计：Inbound 回包不解析 payload（Q1 出站视角），但查流表补
-        // domain，使对端回包累计到该域名的 in_bytes。NoDomain 或未命中则 domain 留 None。
-        if let Some(table) = flow_table
-            && let Some(key) = flow_key_from(&flow)
-            && let Some(FlowEntry::Resolved(domain)) = table.lookup(&key)
-        {
-            flow.domain = Some(domain);
-        }
-        return Ok(FlowParseOutcome::accepted(flow));
-    }
-    let Some(payload) = payload else {
-        return Ok(FlowParseOutcome::accepted(flow));
-    };
-
-    // 尝试构造 5-tuple 键；非 TCP / 缺端口时退化为“不查表、直接解析”。
-    let key = flow_key_from(&flow);
-
-    let mut retrying_no_domain = false;
-    if let (Some(table), Some(key)) = (flow_table, key.as_ref()) {
-        match table.lookup(key) {
-            Some(FlowEntry::Resolved(domain)) => {
-                flow.domain = Some(domain);
-                return Ok(FlowParseOutcome::accepted(flow));
-            }
-            Some(FlowEntry::NoDomain { attempts }) if attempts < MAX_NO_DOMAIN_PARSE_ATTEMPTS => {
-                retrying_no_domain = true;
-            }
-            Some(FlowEntry::NoDomain { .. }) => {
-                return Ok(FlowParseOutcome::accepted(flow));
-            }
-            None => {} // 尚未解析过，落入下方解析。
-        }
-    }
-
-    let resolved = parser.parse_domain(payload);
-
-    if let (Some(table), Some(key)) = (flow_table, key) {
-        match &resolved {
-            Some(domain) => table.insert_resolved(key, domain.clone()),
-            None if retrying_no_domain => table.record_no_domain_attempt(key),
-            None => table.insert_no_domain(key),
-        }
-    }
-
-    if let Some(domain) = resolved {
-        flow.domain = Some(domain);
-    }
-    Ok(FlowParseOutcome::accepted(flow))
-}
-
-/// 从 [`Flow`] 构造 [`FlowKey`]；非 TCP 或缺端口返回 None。
-///
-/// 出站方向：local_socket 为本机端，peer/peer_port 为远端。
-fn flow_key_from(flow: &Flow) -> Option<FlowKey> {
-    let socket = flow.local_socket?;
-    if socket.protocol != TransportProtocol::Tcp {
-        return None;
-    }
-    let peer_port = flow.peer_port?;
-    Some(FlowKey {
-        local_ip: socket.ip,
-        local_port: socket.port,
-        peer_ip: flow.peer,
-        peer_port,
-    })
-}
-
-fn packet_format(link_type: pcap::Linktype) -> Result<PacketFormat> {
-    if link_type == pcap::Linktype::ETHERNET {
-        Ok(PacketFormat::Ethernet)
-    } else if matches!(link_type, pcap::Linktype::RAW | LINUX_DLT_RAW) {
-        Ok(PacketFormat::Raw)
-    } else if link_type == pcap::Linktype::IPV4 {
-        Ok(PacketFormat::Ipv4)
-    } else if link_type == pcap::Linktype::IPV6 {
-        Ok(PacketFormat::Ipv6)
-    } else if link_type == pcap::Linktype::NULL {
-        Ok(PacketFormat::Null)
-    } else if link_type == pcap::Linktype::LOOP {
-        Ok(PacketFormat::Loop)
-    } else if link_type == pcap::Linktype::LINUX_SLL {
-        Ok(PacketFormat::LinuxSll)
-    } else if link_type == pcap::Linktype::LINUX_SLL2 {
-        Ok(PacketFormat::LinuxSll2)
-    } else {
-        Err(anyhow!("Unsupported data link type: {}", link_type.0))
-    }
-}
-
-fn ip_payload(format: PacketFormat, data: &[u8]) -> Option<IpPayload<'_>> {
-    match format {
-        PacketFormat::Raw => Some(IpPayload {
-            packet: data,
-            expected_version: None,
-            link_len: 0,
-            sll_packet_type: None,
-        }),
-        PacketFormat::Ipv4 => Some(IpPayload {
-            packet: data,
-            expected_version: Some(IpVersion::V4),
-            link_len: 0,
-            sll_packet_type: None,
-        }),
-        PacketFormat::Ipv6 => Some(IpPayload {
-            packet: data,
-            expected_version: Some(IpVersion::V6),
-            link_len: 0,
-            sll_packet_type: None,
-        }),
-        PacketFormat::Null => {
-            let family = ip_version_from_family_header(data.get(..4)?.try_into().ok()?)?;
-            Some(IpPayload {
-                packet: data.get(4..)?,
-                expected_version: Some(family),
-                link_len: 4,
-                sll_packet_type: None,
-            })
-        }
-        PacketFormat::Loop => {
-            let family = ip_version_from_family_header(data.get(..4)?.try_into().ok()?)?;
-            Some(IpPayload {
-                packet: data.get(4..)?,
-                expected_version: Some(family),
-                link_len: 4,
-                sll_packet_type: None,
-            })
-        }
-        PacketFormat::LinuxSll => {
-            let packet_type = u16::from_be_bytes(data.get(..2)?.try_into().ok()?);
-            let ether_type = u16::from_be_bytes(data.get(14..16)?.try_into().ok()?);
-            Some(IpPayload {
-                packet: data.get(16..)?,
-                expected_version: Some(ip_version_from_ether_type(ether_type)?),
-                link_len: 16,
-                sll_packet_type: Some(sll_packet_type(packet_type)),
-            })
-        }
-        PacketFormat::LinuxSll2 => {
-            let ether_type = u16::from_be_bytes(data.get(..2)?.try_into().ok()?);
-            let packet_type = *data.get(10)?;
-            Some(IpPayload {
-                packet: data.get(20..)?,
-                expected_version: Some(ip_version_from_ether_type(ether_type)?),
-                link_len: 20,
-                sll_packet_type: Some(sll_packet_type(u16::from(packet_type))),
-            })
-        }
-        PacketFormat::Ethernet => None,
-    }
-}
-
-fn sll_packet_type(packet_type: u16) -> SllPacketType {
-    match packet_type {
-        0 => SllPacketType::Host,
-        4 => SllPacketType::Outgoing,
-        _ => SllPacketType::Other,
-    }
-}
-
-fn ip_version(data: &[u8]) -> Option<IpVersion> {
-    match data.first()? >> 4 {
-        4 => Some(IpVersion::V4),
-        6 => Some(IpVersion::V6),
-        _ => None,
-    }
-}
-
-fn ip_version_from_ether_type(ether_type: u16) -> Option<IpVersion> {
-    match EtherType(ether_type) {
-        EtherType::IPV4 => Some(IpVersion::V4),
-        EtherType::IPV6 => Some(IpVersion::V6),
-        _ => None,
-    }
-}
-
-fn ip_version_from_family_header(header: [u8; 4]) -> Option<IpVersion> {
-    ip_version_from_address_family(u32::from_be_bytes(header))
-        .or_else(|| ip_version_from_address_family(u32::from_le_bytes(header)))
-}
-
-fn ip_version_from_address_family(family: u32) -> Option<IpVersion> {
-    match family {
-        2 => Some(IpVersion::V4),
-        10 | 23 | 24 | 28 | 30 => Some(IpVersion::V6),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -1288,11 +385,11 @@ mod tests {
         assert_eq!(parser.call_count(), 1);
     }
 
-    // ── 流表 + parser 协作（04 票接线） ──────────────────────────────
+    // ── flow table + parser cooperation ─────────────────────────────
 
     #[test]
     fn flow_table_hit_resolved_skips_parser_and_sets_domain() {
-        // 首包：parser 返回 "cached.example" → 流表写入 Resolved。
+        // First packet: the parser returns "cached.example" -> the table stores Resolved.
         let table = FlowTable::new();
         let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
         let packet = outbound_tcp_ethernet_frame(b"GET / HTTP/1.1\r\nHost: ignored\r\n\r\n");
@@ -1308,7 +405,7 @@ mod tests {
         .expect("outbound TCP flow");
         assert_eq!(first.domain.as_deref(), Some("cached.example"));
 
-        // 第二个相同 5-tuple 的包：命中 Resolved，跳过 parser，返回缓存域名。
+        // Second packet with the same 5-tuple: hits Resolved, skips the parser, returns the cached domain.
         let second_parser = RecordingParser::new(Some(Arc::from("would-not-be-used.com")));
         let flow = parse_with_domain_parser(
             pcap::Linktype::ETHERNET,
@@ -1326,13 +423,13 @@ mod tests {
 
     #[test]
     fn flow_table_hit_no_domain_retries_and_can_resolve() {
-        // 首次解析失败后，后续相同 5-tuple 的 payload 应允许有限重试。
+        // After the first parse fails, later payloads on the same 5-tuple should allow bounded retries.
         let parser = RecordingParser::new(Some(Arc::from("would-be.com")));
         let table = FlowTable::new();
         let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
         let packet = outbound_tcp_ethernet_frame(b"\x16\x03\x01\x00\x00");
 
-        // 第一包解析失败 → 流表写入一次失败记录。
+        // First packet's parse fails -> the table stores a one-attempt failure record.
         let first = parse_with_domain_parser(
             pcap::Linktype::ETHERNET,
             &packet,
@@ -1349,7 +446,7 @@ mod tests {
             Some(crate::flow_table::FlowEntry::NoDomain { attempts: 1 })
         ));
 
-        // 第二包相同 5-tuple：重试 parser 并解析成功。
+        // Second packet, same 5-tuple: the parser is retried and succeeds.
         let flow = parse_with_domain_parser(
             pcap::Linktype::ETHERNET,
             &packet,
@@ -1417,7 +514,7 @@ mod tests {
         assert_eq!(flow.domain.as_deref(), Some("first-packet.example"));
         assert_eq!(parser.call_count(), 1);
 
-        // 流表应已写入 Resolved。
+        // The table should now hold Resolved.
         let key = flow_key_from(&flow).expect("TCP flow has a 5-tuple key");
         match table.lookup(&key) {
             Some(crate::flow_table::FlowEntry::Resolved(d)) => {
@@ -1454,13 +551,13 @@ mod tests {
 
     #[test]
     fn flow_table_distinct_five_tuples_are_independent() {
-        // 两条不同连接（不同 peer IP）应各自走首包解析一次。
+        // Two distinct connections (different peer IPs) should each get one first-packet parse.
         let parser = RecordingParser::new(Some(Arc::from("example.com")));
         let table = FlowTable::new();
         let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
         let packet_a = outbound_tcp_ethernet_frame(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
 
-        // 第二个包改 peer IP（构造不同 5-tuple）。
+        // The second packet changes the peer IP (building a different 5-tuple).
         let mut transport = fixed_transport(TransportProtocol::Tcp, Direction::Outbound);
         transport.extend_from_slice(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
         let packet_b = add_link_header(
@@ -1468,7 +565,7 @@ mod tests {
             IpVersion::V4,
             ipv4_packet_between(
                 [192, 0, 2, 10],
-                [203, 0, 113, 99], // 不同 peer IP
+                [203, 0, 113, 99], // different peer IP
                 ip_protocol(TransportProtocol::Tcp),
                 (20 + transport.len()) as u16,
                 &transport,
@@ -1497,8 +594,10 @@ mod tests {
 
     #[test]
     fn inbound_flow_looks_up_flow_table_to_restore_domain() {
-        // Q8 双向统计：Outbound 首包填表后，Inbound 回包查表补 domain，
-        // 使对端回包累计到该域名的 in_bytes；Inbound 不解析 payload（Q1 出站视角）。
+        // Bidirectional accounting: after the outbound first packet fills
+        // the table, the inbound reply looks the domain up so peer replies
+        // accumulate into that domain's in_bytes; inbound does not parse the
+        // payload (outbound perspective).
         let table = FlowTable::new();
         let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
 
@@ -1530,15 +629,15 @@ mod tests {
         assert_eq!(
             inbound_flow.domain.as_deref(),
             Some("example.com"),
-            "Inbound 回包应查流表补 domain（Q8 双向统计）"
+            "Inbound 回包应查流表补 domain（双向统计）"
         );
         assert_eq!(inbound_parser.call_count(), 0, "Inbound 不应解析 payload");
     }
 
-    /// 测试桩：记录调用次数并可配置返回结果。
+    /// Test stub: records the call count with a configurable result.
     ///
-    /// 该桩用于在 capture 层 seam 测试中验证调用时机与 payload 透传；
-    /// 真实 TLS/HTTP 解析在 02/03 票实现。
+    /// Used by capture-layer seam tests to verify call timing and payload
+    /// pass-through.
     struct RecordingParser {
         calls: std::sync::Mutex<usize>,
         result: Option<Arc<str>>,
@@ -2319,19 +1418,23 @@ mod tests {
         }
     }
 
-    /// 出站域名解析路径的性能基准（09 票）。
+    /// Performance benchmarks for the outbound domain-parsing path.
     ///
-    /// 默认 `#[ignore]` 不进 CI 回归；触发方式：
-    /// `cargo test --release perf_benches -- --ignored --nocapture`。
+    /// `#[ignore]`d by default, out of CI regression; to run:
+    /// `cargo test --release perf_benches -- --ignored --nocapture`.
     ///
-    /// 每个测试用 `std::time::Instant` 测吞吐并 `eprintln!` 输出，宽松下限
-    /// 用 `assert!` 守住——若架构退化（如 FlowKey hash 退化到 O(N) 查表）
-    /// 会被抓到；但偶发的机器/负载波动不会误报。
+    /// Each test measures throughput with `std::time::Instant` and prints
+    /// via `eprintln!`, guarded by lenient `assert!` lower bounds — an
+    /// architectural regression (e.g. FlowKey hashing degrading to O(N)
+    /// lookups) gets caught, while occasional machine/load noise does not
+    /// trip it.
     ///
-    /// 三个场景对应 spec 的性能预算：
-    /// - 每包热路径：FlowTable::lookup（moka W-TinyLFU O(1) 查表）；
-    /// - 每连接开销：首包 TLS ClientHello 解析（tls-parser）；
-    /// - 高并发连接：流表接近 65536 上限时的 lookup 行为。
+    /// The three scenarios map to the performance budget:
+    /// - per-packet hot path: FlowTable::lookup (moka W-TinyLFU O(1));
+    /// - per-connection cost: first-packet TLS ClientHello parsing
+    ///   (tls-parser);
+    /// - high-concurrency connections: lookup behavior as the table nears
+    ///   the 65536 cap.
     mod perf_benches {
         use std::sync::Arc;
         use std::time::{Duration, Instant};
@@ -2341,10 +1444,12 @@ mod tests {
         use crate::domain_parse_tls::test_fixtures;
         use crate::flow_table::{FlowEntry, FlowKey, FlowTable};
 
-        /// 场景 1：每包热路径——单连接后续包命中 Resolved 流表项。
+        /// Scenario 1: per-packet hot path — later packets of a single
+        /// connection hit the Resolved flow-table entry.
         ///
-        /// 模拟"首包已解析、后续大量包走查表"的稳态。spec 性能预算：
-        /// moka lookup O(1)，远小于 pcap 抓包。
+        /// Simulates the steady state of "first packet parsed, the rest go
+        /// through the table". Budget: moka lookup is O(1), far below the
+        /// pcap capture cost.
         #[test]
         #[ignore = "性能基准：cargo test --release perf_benches -- --ignored --nocapture"]
         fn flow_table_lookup_per_packet_throughput() {
@@ -2354,7 +1459,7 @@ mod tests {
             let packet =
                 outbound_tcp_ethernet_frame(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
 
-            // 首包填表（一次解析）
+            // First packet fills the table (one parse)
             parse_with_domain_parser(
                 pcap::Linktype::ETHERNET,
                 &packet,
@@ -2365,7 +1470,7 @@ mod tests {
             .expect("supported data link");
             assert_eq!(parser.call_count(), 1, "首包应触发解析");
 
-            // 后续 N 包——应全部命中 Resolved，不再调 parser
+            // The next N packets — all should hit Resolved; the parser is not called again
             const N: usize = 100_000;
             let start = Instant::now();
             for _ in 0..N {
@@ -2392,25 +1497,28 @@ mod tests {
                 "flow_table_lookup_per_packet: N={N} elapsed={elapsed:?} ns/packet={ns_per_packet:.1} packets/sec={packets_per_sec:.0}"
             );
 
-            // 宽松下限：>100k packets/sec 表示查表 O(1)（含 L3/L4 parse + flow_key + moka get）。
-            // 1 CPU/1G 服务器目标：网卡突发 100k pps 也远超 flowlens 处理能力，
-            // flowlens 限速瓶颈是 pcap 抓包（系统调用）而非查表。
+            // Lenient lower bound: >100k packets/sec indicates an O(1)
+            // lookup (incl. L3/L4 parse + flow_key + moka get).
+            // 1 CPU/1GB server target: even a 100k pps NIC burst far
+            // exceeds flowlens' capacity — the bottleneck is pcap capture
+            // (syscalls), not the lookup.
             assert!(
                 packets_per_sec > 100_000.0,
                 "查表吞吐 {packets_per_sec:.0} packets/sec 应大于 100k（O(1) lookup）"
             );
         }
 
-        /// 场景 2：每连接首包解析开销。
+        /// Scenario 2: per-connection first-packet parse cost.
         ///
-        /// 模拟"每条新连接的首包都要走完整 TLS 解析"。spec 性能预算：
-        /// 每连接一次解析，开销远小于 pcap 抓包和进程表刷新。
+        /// Simulates "every new connection's first packet goes through a
+        /// full TLS parse". Budget: one parse per connection, far below the
+        /// pcap capture and process-table refresh costs.
         #[test]
         #[ignore = "性能基准：cargo test --release perf_benches -- --ignored --nocapture"]
         fn first_packet_tls_parse_throughput() {
             let parser = CompositeDomainParser::new();
             let local_ips = HashSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
-            // 用真实的 TLS ClientHello（含 SNI）payload，包在出站 TCP 帧里。
+            // A real TLS ClientHello (with SNI) payload wrapped in an outbound TCP frame.
             let packet = outbound_tcp_ethernet_frame(&test_fixtures::tls_client_hello_with_sni(
                 "example.com",
             ));
@@ -2418,7 +1526,7 @@ mod tests {
             const N: usize = 10_000;
             let start = Instant::now();
             for _ in 0..N {
-                // 每次新建 FlowTable（= 不缓存），强制首包解析路径。
+                // A fresh FlowTable each time (= no caching) forces the first-packet parse path.
                 let table = FlowTable::new();
                 let flow = parse_with_domain_parser(
                     pcap::Linktype::ETHERNET,
@@ -2439,31 +1547,34 @@ mod tests {
                 "first_packet_tls_parse: N={N} elapsed={elapsed:?} ns/parse={ns_per_parse:.1} parses/sec={parses_per_sec:.0}"
             );
 
-            // 宽松下限：>1k parses/sec 表示单次解析在毫秒级以下
-            // （1 CPU 也能跟上千新连接/秒，远超典型服务器的外连速率）。
+            // Lenient lower bound: >1k parses/sec means a single parse is
+            // well under a millisecond (1 CPU keeps up with thousands of
+            // new connections/sec, far beyond typical server rates).
             assert!(
                 parses_per_sec > 1_000.0,
                 "首包解析吞吐 {parses_per_sec:.0} parses/sec 应大于 1k"
             );
         }
 
-        /// 场景 3：流表接近容量上限时的 lookup 性能。
+        /// Scenario 3: lookup performance as the table nears capacity.
         ///
-        /// 模拟高并发连接（spec 边界 65536）。预填接近容量的条目，
-        /// 再测 hot key lookup 吞吐——验证 W-TinyLFU 在大表下仍 O(1)。
+        /// Simulates high-concurrency connections (65536 boundary). Pre-fill
+        /// near-capacity entries, then measure hot-key lookup throughput —
+        /// verifying W-TinyLFU stays O(1) on a large table.
         #[test]
         #[ignore = "性能基准：cargo test --release perf_benches -- --ignored --nocapture"]
         fn flow_table_near_capacity_lookup_throughput() {
             const CAPACITY: u64 = 65_536;
-            // 预填条目数：moka 默认 window ratio 约下 1% 的 window + 99% probationary，
-            // 预填 60k 已能逼近真实工作集大小，又能在合理时间内完成。
+            // Pre-fill size: moka's default window ratio is roughly a 1%
+            // window + 99% probationary; 60k gets close to the real working
+            // set while still finishing in reasonable time.
             const PRE_FILL: u64 = 60_000;
             const LOOKUPS: usize = 100_000;
 
             let table = FlowTable::with_capacity_and_tti(CAPACITY, Duration::from_secs(3600));
             let domain: Arc<str> = Arc::from("example.com");
 
-            // 预填条目（不同 peer_ip + local_port 组合）
+            // Pre-fill entries (distinct peer_ip + local_port combinations)
             for i in 0..PRE_FILL {
                 let key = FlowKey {
                     local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
@@ -2475,7 +1586,7 @@ mod tests {
             }
             table.run_pending_tasks();
 
-            // 构造一个已命中的 hot key 反复 lookup
+            // Build one already-present hot key and look it up repeatedly
             let hot_key = FlowKey {
                 local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
                 local_port: 10_000,
@@ -2499,7 +1610,7 @@ mod tests {
                 "flow_table_near_capacity_lookup: capacity={CAPACITY} prefilled={PRE_FILL} lookups={LOOKUPS} elapsed={elapsed:?} ns/lookup={ns_per_lookup:.1} lookups/sec={lookups_per_sec:.0}"
             );
 
-            // 宽松下限：>100k lookups/sec，与空表场景 1 基本一致（W-TinyLFU 仍 O(1) hash）。
+            // Lenient lower bound: >100k lookups/sec, in line with the empty-table scenario 1 (W-TinyLFU is still an O(1) hash).
             assert!(
                 lookups_per_sec > 100_000.0,
                 "大表查表吞吐 {lookups_per_sec:.0} lookups/sec 应大于 100k"

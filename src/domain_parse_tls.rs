@@ -1,10 +1,12 @@
-//! TLS ClientHello 域名解析器（02 票）。
+//! TLS ClientHello domain parser.
 //!
-//! 从 TCP payload 识别 TLS handshake ClientHello，用 [`tls_parser`] 提取 SNI；
-//! 检测 ECH（encrypted_server_name / encrypted_client_hello）extension，存在时
-//! 返回 `None`（无法解密真实 SNI，走 NoDomain）。
+//! Identifies TLS handshake ClientHello records in TCP payloads and extracts
+//! the SNI with [`tls_parser`]. When an ECH extension
+//! (encrypted_server_name / encrypted_client_hello) is present the parser
+//! returns `None` (the real SNI cannot be decrypted, so the flow falls back
+//! to NoDomain).
 //!
-//! 04 票起由 [`CompositeDomainParser`] 在 TLS handshake ContentType 分支调用。
+//! Called by [`CompositeDomainParser`] on the TLS handshake ContentType branch.
 //!
 //! [`CompositeDomainParser`]: crate::domain_parse_composite::CompositeDomainParser
 
@@ -17,28 +19,34 @@ use tls_parser::{
 
 use crate::domain_parse::DomainParser;
 
-/// RFC 9849 `encrypted_client_hello` extension type code。
+/// RFC 9849 `encrypted_client_hello` extension type code.
 ///
-/// tls-parser 0.12 只注册了 draft-ietf-tls-esni 的 [`DRAFT_ENCRYPTED_SERVER_NAME_TYPE`]
-/// （0xFFCE），不识别 RFC 9849 的 0xFE0D；真实世界 ECH 流量（现代浏览器）使用
-/// 0xFE0D，解析后落到 [`TlsExtension::Unknown`] 分支，需手动对照类型码。
+/// tls-parser 0.12 only registers the draft-ietf-tls-esni code
+/// [`DRAFT_ENCRYPTED_SERVER_NAME_TYPE`] (0xFFCE) and does not recognize the
+/// RFC 9849 code 0xFE0D. Real-world ECH traffic (modern browsers) uses
+/// 0xFE0D, which parses into the [`TlsExtension::Unknown`] branch, so the
+/// type code has to be compared by hand.
 const RFC9849_ECH_EXTENSION_TYPE: u16 = 0xFE0D;
 
-/// draft-ietf-tls-esni 的 `encrypted_server_name` extension type code。
+/// draft-ietf-tls-esni `encrypted_server_name` extension type code.
 ///
-/// tls-parser 0.12 注册此码点并将其解析为 [`TlsExtension::EncryptedServerName`]。
-/// 若 extension 数据残缺导致解析失败，整个 extensions 列表解析会失败（不回退为
-/// `Unknown`），调用方得到 `None`——符合"解析错误返回 None"的规格。
+/// tls-parser 0.12 registers this code point and parses it into
+/// [`TlsExtension::EncryptedServerName`]. If truncated extension data makes
+/// parsing fail, the whole extensions list fails to parse (it does not fall
+/// back to `Unknown`) and the caller gets `None` — matching the contract
+/// that parse errors return `None`.
 const DRAFT_ENCRYPTED_SERVER_NAME_TYPE: u16 = 0xFFCE;
 
-/// TLS ClientHello 的域名解析器。
+/// Domain parser for TLS ClientHello records.
 ///
-/// 行为契约：
-/// - 仅处理 TLS handshake ClientHello（ContentType=22, HandshakeType=0x01）；
-/// - 检测到 ECH extension（`EncryptedServerName` 变体，或 `Unknown(0xFFCE)`，
-///   或 `Unknown(0xFE0D)`）时返回 `None`，即使同时存在外层 SNI；
-/// - 否则返回首个 `host_name` 类型的 SNI 条目；
-/// - 非 ClientHello（ApplicationData 等）、无 SNI、解析错误、残缺字节返回 `None`。
+/// Behavior contract:
+/// - Handles only TLS handshake ClientHello (ContentType=22, HandshakeType=0x01).
+/// - Returns `None` when an ECH extension is detected (the
+///   `EncryptedServerName` variant, `Unknown(0xFFCE)` or `Unknown(0xFE0D)`),
+///   even if an outer SNI is also present.
+/// - Otherwise returns the first `host_name` SNI entry.
+/// - Non-ClientHello records (ApplicationData etc.), missing SNI, parse
+///   errors and truncated bytes all return `None`.
 pub struct TlsDomainParser;
 
 impl TlsDomainParser {
@@ -73,8 +81,8 @@ impl DomainParser for TlsDomainParser {
     }
 }
 
-/// 是否含 ECH 相关 extension（draft `EncryptedServerName`、`Unknown(0xFFCE)`
-/// 或 `Unknown(0xFE0D)`）。
+/// Whether any ECH-related extension is present (draft `EncryptedServerName`,
+/// `Unknown(0xFFCE)` or `Unknown(0xFE0D)`).
 fn has_ech(extensions: &[TlsExtension<'_>]) -> bool {
     extensions.iter().any(|ext| match ext {
         TlsExtension::EncryptedServerName { .. } => true,
@@ -85,7 +93,7 @@ fn has_ech(extensions: &[TlsExtension<'_>]) -> bool {
     })
 }
 
-/// 从 extensions 提取首个 `host_name` 类型的 SNI 条目；无效 UTF-8 跳过。
+/// Extract the first `host_name` SNI entry from the extensions; skip invalid UTF-8.
 fn extract_sni(extensions: &[TlsExtension<'_>]) -> Option<Arc<str>> {
     for ext in extensions {
         if let TlsExtension::SNI(entries) = ext {
@@ -101,15 +109,17 @@ fn extract_sni(extensions: &[TlsExtension<'_>]) -> Option<Arc<str>> {
     None
 }
 
-/// 共享的 TLS ClientHello wire 构造器（测试 fixture）。
+/// Shared TLS ClientHello wire-format builders (test fixtures).
 ///
-/// 手工构造 TLS 记录字节，避免依赖外部 pcap 文件；所有 fixture 使用 TLS 1.2
-/// ClientHello 骨架（TLS 1.3 的 SNI/ECH 字段位置一致）。供本模块 tests、
-/// `domain_parse_composite::tests`、`capture::tests::perf_benches` 共用——
-/// 任何 TLS wire 构造需求都通过此模块统一，避免 3 处复制。
+/// Builds TLS record bytes by hand so tests need no external pcap files. All
+/// fixtures use a TLS 1.2 ClientHello skeleton (SNI/ECH fields sit at the
+/// same offsets in TLS 1.3). Shared by this module's tests,
+/// `domain_parse_composite::tests` and `capture::tests::perf_benches` — any
+/// TLS wire-format construction goes through this module instead of being
+/// copied in three places.
 #[cfg(test)]
 pub mod test_fixtures {
-    /// 构造 TLS record：`content_type(1) | version(2) | length(2) | payload`。
+    /// Build a TLS record: `content_type(1) | version(2) | length(2) | payload`.
     pub fn tls_record(content_type: u8, payload: &[u8]) -> Vec<u8> {
         let mut record = Vec::with_capacity(5 + payload.len());
         record.push(content_type);
@@ -119,12 +129,12 @@ pub mod test_fixtures {
         record
     }
 
-    /// 构造 ContentType=Handshake(0x16) 的 TLS record，payload 为 handshake msg。
+    /// Build a TLS record with ContentType=Handshake(0x16); the payload is a handshake message.
     pub fn tls_record_handshake(handshake_msg: &[u8]) -> Vec<u8> {
         tls_record(0x16, handshake_msg)
     }
 
-    /// 构造 handshake 消息：`msg_type(1) | length(3) | body`。
+    /// Build a handshake message: `msg_type(1) | length(3) | body`.
     pub fn handshake_msg(msg_type: u8, body: &[u8]) -> Vec<u8> {
         let len = body.len() as u32;
         let mut msg = Vec::with_capacity(4 + body.len());
@@ -136,24 +146,24 @@ pub mod test_fixtures {
         msg
     }
 
-    /// 构造 ClientHello body（handshake type=0x01 的 payload），可选 SNI 和
-    /// 额外 extensions。
+    /// Build a ClientHello body (the payload of handshake type=0x01), with an
+    /// optional SNI and extra extensions.
     pub fn client_hello_body(sni: Option<&str>, extra_extensions: &[Vec<u8>]) -> Vec<u8> {
         let mut body = Vec::new();
         // version: TLS 1.2
         body.extend_from_slice(&[0x03, 0x03]);
-        // random: 32 个零
+        // random: 32 zero bytes
         body.extend_from_slice(&[0u8; 32]);
-        // session_id: 空
+        // session_id: empty
         body.push(0x00);
-        // cipher_suites: 一个套件
+        // cipher_suites: a single suite
         body.extend_from_slice(&[0x00, 0x02]); // length=2
         body.extend_from_slice(&[0x00, 0x2F]); // TLS_RSA_WITH_AES_128_CBC_SHA
         // compression_methods: null
         body.push(0x01); // length=1
         body.push(0x00); // null
 
-        // 组装 extensions
+        // assemble the extensions
         let mut extensions_buf = Vec::new();
         if let Some(name) = sni {
             extensions_buf.extend_from_slice(&sni_extension(name));
@@ -167,11 +177,11 @@ pub mod test_fixtures {
             body.extend_from_slice(&extensions_buf);
         }
 
-        // 包装成 handshake msg (type=0x01)
+        // wrap into a handshake msg (type=0x01)
         handshake_msg(0x01, &body)
     }
 
-    /// 构造 SNI extension（type=0x0000，单个 host_name 条目）。
+    /// Build an SNI extension (type=0x0000, a single host_name entry).
     pub fn sni_extension(hostname: &str) -> Vec<u8> {
         let name = hostname.as_bytes();
         let name_len = name.len();
@@ -188,7 +198,7 @@ pub mod test_fixtures {
         ext
     }
 
-    /// 构造任意 extension：`type(2) | length(2) | data`。
+    /// Build an arbitrary extension: `type(2) | length(2) | data`.
     pub fn build_raw_extension(ext_type: u16, data: &[u8]) -> Vec<u8> {
         let mut ext = Vec::with_capacity(4 + data.len());
         ext.extend_from_slice(&ext_type.to_be_bytes());
@@ -197,9 +207,9 @@ pub mod test_fixtures {
         ext
     }
 
-    /// 构造合法的 draft-ietf-tls-esni EncryptedServerName 数据。
+    /// Build valid draft-ietf-tls-esni EncryptedServerName data.
     ///
-    /// 字段顺序（来自 tls-parser 源码 parse_tls_extension_encrypted_server_name）：
+    /// Field order (from the tls-parser source, parse_tls_extension_encrypted_server_name):
     /// ciphersuite(2) | group(2) | key_share<2+> | record_digest<2+> | encrypted_sni<2+>
     pub fn valid_draft_ech_data() -> Vec<u8> {
         let mut data = Vec::new();
@@ -211,16 +221,18 @@ pub mod test_fixtures {
         data
     }
 
-    /// 构造含 SNI 的完整 TLS ClientHello handshake record（便捷封装）。
+    /// Build a complete TLS ClientHello handshake record carrying an SNI (convenience wrapper).
     pub fn tls_client_hello_with_sni(name: &str) -> Vec<u8> {
         let body = client_hello_body(Some(name), &[]);
         tls_record_handshake(&body)
     }
 
-    /// 构造含 ECH extension（RFC 9849 0xFE0D）的完整 TLS ClientHello handshake record。
+    /// Build a complete TLS ClientHello handshake record with an ECH extension
+    /// (RFC 9849 0xFE0D).
     ///
-    /// 用于测试 ECH 路径——外层 SNI 用掩护域名 "cover.example"。需要 draft
-    /// (0xFFCE) 或自定义字节时直接组合 `client_hello_body` + `build_raw_extension`。
+    /// Used to exercise the ECH path — the outer SNI is the cover domain
+    /// "cover.example". For the draft code point (0xFFCE) or custom bytes,
+    /// combine `client_hello_body` + `build_raw_extension` directly.
     pub fn tls_client_hello_with_ech() -> Vec<u8> {
         let ech_ext = build_raw_extension(0xFE0D, &[0xDE, 0xAD, 0xBE, 0xEF]);
         let body = client_hello_body(Some("cover.example"), &[ech_ext]);
@@ -233,7 +245,7 @@ mod tests {
     use super::test_fixtures::*;
     use super::*;
 
-    // ── 成功路径 ────────────────────────────────────────────────────────
+    // ── success paths ────────────────────────────────────────────────
 
     #[test]
     fn parses_sni_from_client_hello_with_sni() {
@@ -268,7 +280,7 @@ mod tests {
         assert_eq!(domain.as_ref(), "example.com");
     }
 
-    // ── ECH 路径 ───────────────────────────────────────────────────────
+    // ── ECH paths ────────────────────────────────────────────────────
 
     #[test]
     fn returns_none_for_draft_encrypted_server_name_extension() {
@@ -288,15 +300,15 @@ mod tests {
 
     #[test]
     fn ech_takes_precedence_over_sni() {
-        // RFC 9849 §4: ECH 客户端应同时提供外层 SNI 作为掩护域名。
-        // 本解析器必须在 ECH 存在时丢弃外层 SNI。
+        // RFC 9849 §4: ECH clients should also send an outer SNI as cover.
+        // The parser must drop the outer SNI whenever ECH is present.
         let ech = build_raw_extension(0xFE0D, &[0x00, 0x01, 0x02]);
         let record = tls_record_handshake(&client_hello_body(Some("cover.example"), &[ech]));
 
         assert!(TlsDomainParser::new().parse_domain(&record).is_none());
     }
 
-    // ── 失败路径 ───────────────────────────────────────────────────────
+    // ── failure paths ────────────────────────────────────────────────
 
     #[test]
     fn returns_none_for_client_hello_without_extensions() {
@@ -339,7 +351,7 @@ mod tests {
 
     #[test]
     fn returns_none_for_truncated_handshake_body() {
-        // Record header 声明 64 字节 payload，但只给 5 字节。
+        // The record header declares a 64-byte payload but only 5 bytes follow.
         let mut record = vec![0x16, 0x03, 0x01, 0x00, 0x40];
         record.extend_from_slice(&[0x01, 0x00, 0x00, 0x3F, 0x03]);
 
@@ -355,7 +367,7 @@ mod tests {
 
     #[test]
     fn returns_none_for_non_handshake_record_with_handshake_bytes_in_payload() {
-        // ApplicationData record 的 payload 碰巧以 0x01 开头也不应被当成 ClientHello。
+        // An ApplicationData payload that happens to start with 0x01 must not be treated as a ClientHello.
         let payload = [0x01, 0x00, 0x00, 0x10, 0x03, 0x03, 0x00, 0x00];
         let record = tls_record(0x17, &payload);
 

@@ -174,7 +174,7 @@ fn plain_snapshot_with_window(
             .map(|pid| pid.to_string())
             .unwrap_or_else(|| "-".to_string());
         let path = process.path().unwrap_or("-");
-        // ADR 0013：single = 全部独占；mixed = 含共享字节。
+        // ADR 0013: single = all-exclusive; mixed = contains shared bytes.
         let attr = if process.is_mixed() {
             "mixed"
         } else {
@@ -275,7 +275,8 @@ struct JsonTotals {
     out_bytes: u64,
 }
 
-/// ADR 0013 记录层守恒：总计 = 独占 + 共享 + 系统 + 未归属（每字节恰计一次）。
+/// ADR 0013 record-layer conservation: total = exclusive + shared + system +
+/// unattributed (each byte counted exactly once).
 #[derive(Serialize)]
 struct JsonAttributionSummary {
     exclusive_recv: u64,
@@ -333,7 +334,8 @@ struct JsonProc {
     attribution: JsonProcAttribution,
 }
 
-/// ADR 0013：进程归属构成。inclusive 口径：进程 recv/sent = exclusive + shared 之和。
+/// ADR 0013: process attribution breakdown. Inclusive basis: process
+/// recv/sent = exclusive + shared.
 #[derive(Serialize)]
 struct JsonProcAttribution {
     exclusive_recv: u64,
@@ -341,7 +343,8 @@ struct JsonProcAttribution {
     shared_recv: u64,
     shared_sent: u64,
     shared_with: Vec<String>,
-    /// 独占通道证据来源（snapshot / probe / history，ADR 0013 第三刀）。
+    /// Evidence source of the exclusive channel (snapshot / probe / history,
+    /// ADR 0013 history engine).
     evidence: Vec<String>,
 }
 
@@ -608,7 +611,8 @@ mod tests {
 
         let rendered = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
 
-        // ADR 0013：未归属从排名表移出，作为固定行渲染，无 Attr/时间列。
+        // ADR 0013: unattributed is out of the ranking table, rendered as a
+        // fixed row without Attr/time columns.
         assert!(rendered.contains("<unattributed traffic>\t-\t40 B\t60 B\t100 B\t-\t-\t-\t-"));
         assert!(rendered.contains("<system traffic (no socket)>\t-\t0 B\t0 B\t0 B\t-\t-\t-\t-"));
     }
@@ -623,7 +627,8 @@ mod tests {
         let frame = build_json_frame("eth0", &chrono::Local::now(), Instant::now(), &stats, 10);
         let value = serde_json::to_value(frame).unwrap();
 
-        // ADR 0013：未归属不再出现在 top_processes，改由守恒摘要承载。
+        // ADR 0013: unattributed does not appear in top_processes; the
+        // conservation summary carries it.
         assert!(value["top_processes"].as_array().unwrap().is_empty());
         assert_eq!(value["attribution"]["unattributed_recv"], 40);
         assert_eq!(value["attribution"]["unattributed_sent"], 60);

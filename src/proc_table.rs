@@ -116,7 +116,8 @@ pub(crate) enum LookupOutcome<'a> {
         process: &'a ProcInfo,
         v4_mapped: bool,
     },
-    /// 同一 (ip, port, protocol) 存在多个候选进程；候选集供共享归属使用（ADR 0013）。
+    /// Multiple candidate processes for the same (ip, port, protocol); the
+    /// candidate set feeds shared attribution (ADR 0013).
     Ambiguous {
         processes: Vec<&'a ProcInfo>,
     },
@@ -147,7 +148,8 @@ impl ProcTable {
         self.generation
     }
 
-    /// 历史区间日志的数据源（ADR 0013 第三刀）：当前代全部 socket→PID 映射。
+    /// Data source for the history interval log (ADR 0013 history engine):
+    /// all socket→PID mappings of the current generation.
     pub(crate) fn iter_entries(&self) -> impl Iterator<Item = (SocketKey, &ProcInfo)> {
         self.entries
             .iter()
@@ -1152,7 +1154,8 @@ mod tests {
             )
             .unwrap();
         match table.lookup_outcome(ip, 443, TransportProtocol::Tcp) {
-            // 歧义现在是独立 variant（ADR 0013），计数口径与 attribution.rs 一致。
+            // Ambiguity is a distinct variant (ADR 0013); the counting basis
+            // matches attribution.rs.
             LookupOutcome::Ambiguous { .. } => {
                 table.record_lookup_miss_bytes(LookupMissReason::Ambiguous, 20)
             }
