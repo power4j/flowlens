@@ -53,7 +53,9 @@ struct PendingAttribution {
     direction: Direction,
     bytes: u64,
     observed_at: DateTime<Utc>,
-    /// 歧义候选（ADR 0013 共享归属）：push 时从歧义 lookup 捕获；终结时 >= 2 即共享归属。
+    /// Ambiguous candidates (ADR 0013 shared attribution): captured from the
+    /// ambiguous lookup at push time; at settlement, >= 2 means shared
+    /// attribution.
     candidates: Vec<ObservedProcess>,
     pending_since: Instant,
 }
@@ -81,7 +83,8 @@ pub(crate) struct PendingAttributor {
     window: Duration,
     capacity: usize,
     last_generation: Option<u64>,
-    /// socket→PID 区间日志（ADR 0013 第三刀），追回已消失连接的归属。
+    /// socket→PID interval log (ADR 0013 history engine), recovering
+    /// attribution for vanished connections.
     history: AttributionHistory,
     probe: Option<ProcessProbe>,
     probe_state: HashMap<LocalSocket, ProbeState>,
@@ -474,7 +477,8 @@ impl PendingAttributor {
             return;
         }
         self.last_generation = generation;
-        // ADR 0013 第三刀：每代刷新先落区间日志，再解析 pending。
+        // ADR 0013 history engine: on each generation refresh, record the
+        // interval log first, then settle pending items.
         if let Ok(table) = proc_table.read() {
             self.history.update(Utc::now(), table.iter_entries());
         }
@@ -600,7 +604,8 @@ impl PendingAttributor {
         } = observation;
         let Some(socket) = socket else {
             proc_table::record_no_local_socket(proc_table);
-            // 无本地套接字 = 系统流量（ADR 0013），不再混入未归属。
+            // No local socket = system traffic (ADR 0013), kept out of
+            // unattributed.
             stats.record_system(direction, bytes, observed_at);
             return;
         };
@@ -692,8 +697,10 @@ impl PendingAttributor {
             } else {
                 self.pending_expired_bytes += pending.bytes;
             }
-            // ADR 0013 第三刀：候选不足时先做历史追回（含 PID 启动时间硬门槛）；
-            // 唯一命中 → 独占（evidence=history），多候选 → 共享，追不回 → 未归属。
+            // ADR 0013 history engine: with too few candidates, try history
+            // recovery first (with the PID start-time hard gate); a single
+            // hit -> exclusive (evidence=history), multiple -> shared, none
+            // recoverable -> unattributed.
             let mut candidates = std::mem::take(&mut pending.candidates);
             if candidates.len() < 2 {
                 candidates = self
@@ -747,14 +754,14 @@ impl From<ProbeProcess> for ObservedProcess {
     }
 }
 
-/// lookup 三态（ADR 0013）：唯一命中 / 歧义候选集 / 未命中。
+/// The three lookup outcomes (ADR 0013): unique hit / ambiguous candidate set / miss.
 enum LookupResolved {
     Exclusive(ObservedProcess),
     Ambiguous(Vec<ObservedProcess>),
     Miss,
 }
 
-/// 按 (pid, path) 去重合并歧义候选。
+/// Merge ambiguous candidates, deduplicating by (pid, path).
 fn merge_candidates(current: &mut Vec<ObservedProcess>, extra: Vec<ObservedProcess>) {
     for candidate in extra {
         if !current
@@ -787,7 +794,8 @@ fn lookup_process(
             }))
         }
         LookupOutcome::Ambiguous { processes } => {
-            // 先把借用收紧为 owned，再 drop(table)（candidates 借用自 table）。
+            // Tighten the borrow into owned values before drop(table)
+            // (candidates borrow from table).
             let candidates = processes
                 .iter()
                 .map(|process| ObservedProcess {
@@ -1186,8 +1194,9 @@ mod tests {
         );
 
         let snapshot = stats.snapshot(10);
-        // 终局歧义 → 共享归属：两个候选各全额计入 40 B（inclusive 投影），
-        // 记录层 shared 只计 40 B 一次，未归属为 0（ADR 0013）。
+        // Final ambiguity -> shared attribution: both candidates get the full
+        // 40 B (inclusive projection), the record layer counts shared 40 B
+        // once, unattributed is 0 (ADR 0013).
         assert_eq!(snapshot.processes.len(), 2);
         for process in snapshot.processes.iter() {
             assert_eq!(process.attribution.shared.sent, 40);
@@ -1202,14 +1211,16 @@ mod tests {
         assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
     }
 
-    /// ADR 0013 第三刀：上一代曾观测到的 socket 消失后，pending 终结时由
-    /// 区间日志追回，独占归属且 evidence = history。
+    /// ADR 0013 history engine: a socket observed in a previous generation
+    /// disappears; at settlement the interval log recovers it as exclusive
+    /// attribution with evidence = history.
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn vanished_socket_is_recovered_from_history() {
         let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
         let mut table = ProcTable::default();
-        // 用当前测试进程的 PID：存活且启动早于流观测时间，过启动时间硬门槛。
+        // Use the current test process's PID: alive and started before the
+        // flow's observation time, so it passes the start-time hard gate.
         table.insert_for_test(
             local_ip,
             49_152,
@@ -1223,7 +1234,8 @@ mod tests {
         let mut attributor = PendingAttributor::default();
         let started = Instant::now();
 
-        // 上一代灌入区间日志，随后 socket 从当前代表中消失。
+        // Populate the interval log from the previous generation, then drop
+        // the socket from the current table.
         attributor
             .history
             .update(Utc::now(), proc_table.read().unwrap().iter_entries());
@@ -1255,7 +1267,8 @@ mod tests {
         );
     }
 
-    /// ADR 0013 硬门槛：区间命中的 PID 无法验证启动时间 → 降级未归属，绝不归属。
+    /// ADR 0013 hard gate: an interval hit whose PID start time cannot be
+    /// verified is demoted to unattributed, never attributed.
     #[test]
     fn history_candidate_with_unverifiable_pid_is_refused() {
         let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
@@ -1296,8 +1309,10 @@ mod tests {
         assert_eq!(snapshot.attribution.unattributed.sent, 40);
     }
 
-    /// ADR 0013 记录层守恒：总计 = 独占 + 共享 + 系统 + 未归属（非环回流量，
-    /// 每条 flow 恰好一个 endpoint 记录，通道总和不重不漏）。
+    /// ADR 0013 record-layer conservation: total = exclusive + shared +
+    /// system + unattributed (non-loopback traffic; each flow records
+    /// exactly one endpoint, and the channel totals neither miss nor
+    /// double-count).
     #[test]
     fn conservation_identity_holds_across_all_channels() {
         let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
@@ -1325,7 +1340,7 @@ mod tests {
         let mut attributor = PendingAttributor::default();
         let started = Instant::now();
 
-        // 独占：唯一命中。
+        // Exclusive: unique hit.
         attributor.record_flow(
             &mut stats,
             socket_flow(local_ip, 8443, 5001, 100),
@@ -1333,7 +1348,7 @@ mod tests {
             started,
             observed_at(),
         );
-        // 共享：歧义候选，窗口耗尽后共享归属。
+        // Shared: ambiguous candidates, shared attribution after the window expires.
         attributor.record_flow(
             &mut stats,
             socket_flow(local_ip, 9443, 5002, 40),
@@ -1341,7 +1356,7 @@ mod tests {
             started,
             observed_at(),
         );
-        // 系统：无本地套接字（ICMP 类）。
+        // System: no local socket (ICMP-like).
         attributor.record_flow(
             &mut stats,
             Flow {
@@ -1357,7 +1372,7 @@ mod tests {
             started,
             observed_at(),
         );
-        // 未归属：无候选且超时。
+        // Unattributed: no candidates and timed out.
         attributor.record_flow(
             &mut stats,
             socket_flow(local_ip, 10443, 5003, 5),
@@ -1377,10 +1392,10 @@ mod tests {
         assert_eq!(summary.shared.sent, 40);
         assert_eq!(summary.system.sent, 10);
         assert_eq!(summary.unattributed.sent, 5);
-        // 守恒：四通道记录层总和 == 接口字节（无环回双 endpoint）。
+        // Conservation: the four-channel record-layer total == interface bytes (no loopback double endpoint).
         assert_eq!(summary.total(), 155);
         assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
-        // 共享字节投影：两个候选各 +40，但记录层只计 40 一次。
+        // Shared-byte projection: both candidates get +40 each, but the record layer counts 40 once.
         let shared_procs: Vec<&ProcessSnapshot> = snapshot
             .processes
             .iter()
