@@ -1435,7 +1435,7 @@ fn draw_overview(
     mode: LayoutMode,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    // Row-based layout (ticket 07): every row is either a full-width panel or two
+    // Row-based layout: every row is either a full-width panel or two
     // equal 50/50 columns. Wide/Standard use three rows; Compact stacks five rows.
     //
     // Height allocation:
@@ -1650,7 +1650,8 @@ fn process_table(
     let compact = mode == LayoutMode::Compact;
     let rows = process_rows(snapshot, compact, now);
     let header_style = Style::default().fg(palette::muted());
-    // ADR 0013（2026-08-19 修订）：Attr 列——列头与其他列头一致用词，值仍单字母。
+    // ADR 0013: the Attr column — its header uses words consistent with the
+    // other headers, the values stay single letters.
     let table = if compact {
         Table::new(
             rows,
@@ -1723,8 +1724,9 @@ fn process_rows(
         .iter()
         .map(|process| {
             let name = Cell::from(process_name_span(process, 40));
-            // ADR 0013（2026-08-19 修订）：Attr 列值单字母，E = exclusive-only（全部独占），
-            // M = mixed（含共享字节）；构成明细与图例在详情页。
+            // ADR 0013: Attr values are single letters, E = exclusive-only,
+            // M = mixed (includes shared bytes); the breakdown and legend
+            // live on the detail page.
             let traffic = if snapshot.ranking.window == RankWindow::Cumulative {
                 crate::stats::ProcTraffic {
                     recv: process.recv,
@@ -1790,7 +1792,8 @@ fn draw_processes(
     now: chrono::DateTime<chrono::Utc>,
 ) {
     let compact = matches!(mode, LayoutMode::Compact);
-    // ADR 0013：top 式布局——守恒摘要固定在上，主表独立滚动。
+    // ADR 0013: top-style layout — the conservation summary is pinned at
+    // the top, the main table scrolls independently.
     let summary_lines = attribution_summary_lines(snapshot, compact);
     let summary_height = summary_lines.len() as u16 + 1;
     let view_h = area.height.saturating_sub(3 + summary_height) as usize;
@@ -1838,10 +1841,12 @@ fn draw_processes(
     );
 }
 
-/// ADR 0013 记录层守恒摘要（已结算口径）：总计 = 独占 + 共享 + 系统 + 未归属。
-/// 宽屏三行（守恒行 + System + Unattributed）；紧凑两行（System 并入守恒行）。
+/// ADR 0013 record-layer conservation summary (settled basis): total =
+/// exclusive + shared + system + unattributed.
+/// Wide screens use three lines (conservation + System + Unattributed);
+/// compact uses two (System folded into the conservation line).
 fn attribution_summary_lines(snapshot: &TrafficSnapshot, compact: bool) -> Vec<Line<'static>> {
-    // 摘要与表格同用启动以来累计口径。
+    // The summary uses the same since-start totals as the table.
     let attribution = &snapshot.attribution;
     let muted = Style::default().fg(palette::muted());
     let mut lines = vec![Line::from(vec![
@@ -1864,7 +1869,8 @@ fn attribution_summary_lines(snapshot: &TrafficSnapshot, compact: bool) -> Vec<L
             ("Unattributed", &attribution.unattributed),
         ]
     };
-    // 数值列取各行最大宽度，保证 System/Unattributed 行的列纵向对齐。
+    // Value columns take the widest value across rows so the
+    // System/Unattributed columns align vertically.
     let value_width = channels
         .iter()
         .flat_map(|(_, traffic)| [traffic.recv, traffic.sent, traffic.total()])
@@ -1892,7 +1898,8 @@ fn channel_summary_line(
     };
     let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
     Line::from(vec![
-        // 标签列宽按最长标签（Unattributed）+ 2 空隙，避免零间距贴住数值列。
+        // Label column padded to the longest label (Unattributed) + 2, so
+        // it never touches the value columns.
         Span::styled(format!("{label:<14}"), label_style),
         Span::styled("Recv ", muted),
         Span::raw(value(traffic.recv)),
@@ -2070,7 +2077,8 @@ fn draw_process_detail(
     lines.push(Line::from(
         "Shared traffic is included in Total and may appear in multiple processes.",
     ));
-    // ADR 0013：列表 Attr 列图例（承诺落在详情页 Attribution 区域）。
+    // ADR 0013: the list's Attr column legend lives in the detail page's
+    // Attribution area.
     lines.push(Line::from(Span::styled(
         "  Attr: E = exclusive only, M = mixed (includes shared)",
         Style::default().fg(palette::muted()),
@@ -4017,7 +4025,7 @@ mod tests {
             .unwrap();
 
         let rendered = rendered_lines(&terminal).join("\n");
-        // 守恒摘要使用 lifetime，而不是 5 分钟窗口。
+        // The conservation summary uses lifetime totals, not the 5-minute window.
         assert!(rendered.contains("Total 1.93 KB"));
         assert!(rendered.contains("Exclusive 1.66 KB"));
         assert!(rendered.contains("Shared 150 B"));
@@ -4025,7 +4033,7 @@ mod tests {
         assert!(rendered.contains("Unattributed 100 B"));
         assert!(rendered.contains("1.66 KB"));
         assert!(rendered.contains("150 B"));
-        // Attr 列：表头用词，值单字母（E = exclusive-only，M = mixed）
+        // Attr column: worded header, single-letter values (E = exclusive-only, M = mixed)
         assert!(rendered.contains("Attr"));
         assert!(rendered.contains(" E "));
         assert!(rendered.contains(" M "));
