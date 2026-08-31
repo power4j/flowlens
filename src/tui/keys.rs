@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use super::state::*;
-use super::{
+use super::pages::settings::{
     DIAGNOSTICS_ROW, PALETTE_CHOICES, PALETTE_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS,
 };
+use super::state::*;
 use crate::capture::InterfaceInfo;
 use crate::palette;
 use crate::session::Activation;

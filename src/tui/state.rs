@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use ratatui::layout::Rect;
 
-use super::InterfaceSelector;
+use super::selector::InterfaceSelector;
 use crate::capture::InterfaceInfo;
 use crate::diagnostics::DiagnosticsWriter;
 use crate::palette;
