@@ -4,12 +4,11 @@
 //! Capture and aggregation run in the traffic pipeline.
 
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -28,409 +27,40 @@ use crate::report::{fmt_elapsed, hostname, human_bytes, truncate};
 use crate::session::{Activation, TrafficSession};
 use crate::stats::{IpSnapshot, ProcessSnapshot, RankWindow, TrafficSnapshot};
 
+#[cfg(test)]
+use crossterm::event::KeyEvent;
+
+mod keys;
+mod state;
+
+use keys::*;
+use state::*;
+
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Number of selectable rows in the settings overlay.
 const SETTINGS_SELECTABLE_ROWS: usize = 3;
+
 /// Settings row index for the palette choice.
 const PALETTE_ROW: usize = 0;
+
 /// Settings row index for the diagnostics toggle.
 const DIAGNOSTICS_ROW: usize = 1;
+
 /// Settings row index for the ranking window.
 const RANK_WINDOW_ROW: usize = 2;
 
-/// Which page is active.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Page {
-    Overview,
-    Processes,
-    Ips,
-    Domains,
-    About,
-}
-
-impl Page {
-    const ALL: [Page; 5] = [
-        Page::Overview,
-        Page::Processes,
-        Page::Ips,
-        Page::Domains,
-        Page::About,
-    ];
-
-    fn index(self) -> usize {
-        match self {
-            Page::Overview => 0,
-            Page::Processes => 1,
-            Page::Ips => 2,
-            Page::Domains => 3,
-            Page::About => 4,
-        }
-    }
-}
-
-/// Focus within the IPs page (left/right split).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IpFocus {
-    Inbound,
-    Outbound,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum KeyOutcome {
-    Quit,
-    Changed,
-    Ignored,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LayoutMode {
-    Compact,
-    Standard,
-    Wide,
-}
-
-impl LayoutMode {
-    fn from_area(area: Rect) -> Self {
-        match area.width {
-            120.. => Self::Wide,
-            80.. => Self::Standard,
-            _ => Self::Compact,
-        }
-    }
-}
-
 const MIN_TERMINAL_WIDTH: u16 = 60;
+
 const MIN_TERMINAL_HEIGHT: u16 = 16;
+
 const PENDING_STATUS_SLOT_WIDTH: usize = 12;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TrackingPause {
-    OutsideTopN,
-    Stale,
-}
-
-impl TrackingPause {
-    fn message(self) -> &'static str {
-        match self {
-            Self::OutsideTopN => "Tracking paused: process is no longer in Top-N.",
-            Self::Stale => "Tracking paused: process data is stale.",
-        }
-    }
-}
-
-struct ProcessDetail {
-    process: ProcessSnapshot,
-    paused: Option<TrackingPause>,
-    pause_notice: Option<TrackingPause>,
-}
 
 struct InterfaceSelector {
     selected: usize,
     can_cancel: bool,
     activating: Option<String>,
     error: Option<String>,
-}
-
-impl ProcessDetail {
-    fn pause(&mut self, reason: TrackingPause) {
-        if self.paused != Some(reason) {
-            self.pause_notice = Some(reason);
-        }
-        self.paused = Some(reason);
-    }
-}
-
-/// Persistent UI state across refreshes.
-struct AppState {
-    page: Page,
-    proc_scroll: usize,
-    process_detail: Option<ProcessDetail>,
-    ip_in_scroll: usize,
-    ip_out_scroll: usize,
-    ip_focus: IpFocus,
-    domain_scroll: usize,
-    /// Monotonic view height, updated each draw for clamping scrolls.
-    proc_view_height: usize,
-    ip_in_view_height: usize,
-    ip_out_view_height: usize,
-    domain_view_height: usize,
-    interface_selector: Option<InterfaceSelector>,
-    /// Whether the settings overlay is open.
-    settings_open: bool,
-    /// User-facing palette selection, adjusted in the settings overlay.
-    palette_choice: palette::PaletteChoice,
-    /// Terminal color tier detected at startup; `Auto` follows this.
-    detected_tier: palette::ColorTier,
-    diagnostics_error: Option<String>,
-    /// Actual diagnostics state: true while a writer is open. Kept in sync
-    /// with `DiagnosticsRuntime::writer` and the shared enable flag.
-    diagnostics_enabled: bool,
-    /// Draft diagnostics state edited in the settings overlay. Copied from
-    /// the actual state when the overlay opens and committed only when it
-    /// closes, so h/l toggling never touches the writer mid-edit.
-    diagnostics_draft: bool,
-    /// Basename of the currently open diagnostics output file.
-    diagnostics_file: Option<String>,
-    /// Path reserved for a future writer while the overlay is open, when the
-    /// actual state is OFF. Never turned into a real file except by a final
-    /// ON commit; discarded when the final state is OFF.
-    diagnostics_pending_path: Option<PathBuf>,
-    /// Selected settings row (0 = Palette, 1 = Diagnostics, 2 = Rank window).
-    settings_selection: usize,
-    /// Actual ranking window used by the pipeline.
-    rank_window: RankWindow,
-    /// Draft ranking window committed when the settings overlay closes.
-    rank_window_draft: RankWindow,
-    /// Waiting for a second confirmation before leaving the TUI.
-    quit_confirm: bool,
-}
-
-impl AppState {
-    fn new() -> Self {
-        Self {
-            page: Page::Overview,
-            proc_scroll: 0,
-            process_detail: None,
-            ip_in_scroll: 0,
-            ip_out_scroll: 0,
-            ip_focus: IpFocus::Inbound,
-            domain_scroll: 0,
-            proc_view_height: 1,
-            ip_in_view_height: 1,
-            ip_out_view_height: 1,
-            domain_view_height: 1,
-            interface_selector: None,
-            settings_open: false,
-            palette_choice: palette::PaletteChoice::Auto,
-            detected_tier: palette::detect_tier(),
-            diagnostics_error: None,
-            diagnostics_enabled: false,
-            diagnostics_draft: false,
-            diagnostics_file: None,
-            diagnostics_pending_path: None,
-            settings_selection: 0,
-            rank_window: RankWindow::Cumulative,
-            rank_window_draft: RankWindow::Cumulative,
-            quit_confirm: false,
-        }
-    }
-
-    fn startup(interfaces: &[InterfaceInfo]) -> Self {
-        let mut state = Self::new();
-        state.open_interface_selector(interfaces, None, false);
-        state
-    }
-
-    fn open_interface_selector(
-        &mut self,
-        interfaces: &[InterfaceInfo],
-        active: Option<&str>,
-        can_cancel: bool,
-    ) {
-        let selected = active
-            .and_then(|active| {
-                interfaces
-                    .iter()
-                    .position(|interface| interface.name == active)
-            })
-            .or_else(|| {
-                interfaces
-                    .iter()
-                    .position(|interface| interface.is_default_route)
-            })
-            .unwrap_or(0);
-        self.interface_selector = Some(InterfaceSelector {
-            selected,
-            can_cancel,
-            activating: None,
-            error: None,
-        });
-    }
-
-    /// Reset the view after a successful interface switch while preserving the
-    /// actual diagnostics state, so an open writer, its file name and any
-    /// pending error survive the reset instead of being silently disabled.
-    fn reset_after_interface_switch(&mut self) {
-        let diagnostics_enabled = self.diagnostics_enabled;
-        let diagnostics_draft = self.diagnostics_draft;
-        let diagnostics_file = self.diagnostics_file.clone();
-        let diagnostics_error = self.diagnostics_error.clone();
-        *self = AppState::new();
-        self.diagnostics_enabled = diagnostics_enabled;
-        self.diagnostics_draft = diagnostics_draft;
-        self.diagnostics_file = diagnostics_file;
-        self.diagnostics_error = diagnostics_error;
-        self.rank_window = RankWindow::Cumulative;
-        self.rank_window_draft = RankWindow::Cumulative;
-    }
-
-    fn update_process_detail(&mut self, snapshot: &TrafficSnapshot) {
-        let Some(detail) = self.process_detail.as_mut() else {
-            return;
-        };
-        let matching_process = snapshot
-            .processes
-            .iter()
-            .find(|process| process.same_identity_as(&detail.process));
-        if let Some(process) = matching_process {
-            detail.process = process.clone();
-        }
-        if !snapshot.process_data_fresh {
-            detail.pause(TrackingPause::Stale);
-        } else if matching_process.is_some() {
-            detail.paused = None;
-            detail.pause_notice = None;
-        } else {
-            detail.pause(TrackingPause::OutsideTopN);
-        }
-    }
-}
-
-fn handle_tui_key<F>(
-    state: &mut AppState,
-    key: KeyEvent,
-    snapshot: &mut Arc<TrafficSnapshot>,
-    interfaces: &[InterfaceInfo],
-    active: Option<&str>,
-    mut activate: F,
-) -> KeyOutcome
-where
-    F: FnMut(&str) -> anyhow::Result<Activation>,
-{
-    if key.kind == KeyEventKind::Release {
-        return KeyOutcome::Ignored;
-    }
-
-    if state.quit_confirm {
-        return handle_quit_confirm_key(state, key);
-    }
-    if is_quit_request(key) {
-        return request_quit(state);
-    }
-
-    if let Some(selector) = state.interface_selector.as_mut() {
-        if selector.activating.is_some() {
-            return KeyOutcome::Ignored;
-        }
-        match key.code {
-            KeyCode::Esc if selector.can_cancel => {
-                state.interface_selector = None;
-                KeyOutcome::Changed
-            }
-            KeyCode::Esc => KeyOutcome::Ignored,
-            KeyCode::Down | KeyCode::Char('j') => {
-                selector.selected = (selector.selected + 1).min(interfaces.len().saturating_sub(1));
-                selector.error = None;
-                KeyOutcome::Changed
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                selector.selected = selector.selected.saturating_sub(1);
-                selector.error = None;
-                KeyOutcome::Changed
-            }
-            KeyCode::Enter => {
-                let Some(interface) = interfaces.get(selector.selected) else {
-                    return KeyOutcome::Ignored;
-                };
-                let interface_name = interface.name.clone();
-                match activate(&interface_name) {
-                    Ok(Activation::Activated) => {
-                        state.reset_after_interface_switch();
-                        *snapshot = Arc::new(TrafficSnapshot::default());
-                    }
-                    Ok(Activation::Pending) => {
-                        selector.activating = Some(interface_name);
-                    }
-                    Ok(Activation::Unchanged) => state.interface_selector = None,
-                    Err(error) => {
-                        selector.error =
-                            Some(format!("Failed to activate {interface_name}: {error}"));
-                    }
-                }
-                KeyOutcome::Changed
-            }
-            _ => KeyOutcome::Ignored,
-        }
-    } else if state.settings_open {
-        match key.code {
-            // `o` and Esc close the overlay; the draft is committed by
-            // `DiagnosticsRuntime::reconcile` on the next loop iteration.
-            KeyCode::Esc | KeyCode::Char('o') => {
-                state.settings_open = false;
-                KeyOutcome::Changed
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.settings_selection = state.settings_selection.saturating_sub(1);
-                KeyOutcome::Changed
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.settings_selection =
-                    (state.settings_selection + 1).min(SETTINGS_SELECTABLE_ROWS - 1);
-                KeyOutcome::Changed
-            }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
-                if state.settings_selection == PALETTE_ROW {
-                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
-                    state.palette_choice = if forward {
-                        next_palette_choice(state.palette_choice)
-                    } else {
-                        prev_palette_choice(state.palette_choice)
-                    };
-                    palette::set_active_tier(palette::resolve(
-                        state.palette_choice,
-                        state.detected_tier,
-                    ));
-                } else if state.settings_selection == DIAGNOSTICS_ROW {
-                    // Only the draft changes here; the writer and the shared
-                    // enable flag are touched once, when the overlay closes
-                    // (see `DiagnosticsRuntime::reconcile`).
-                    state.diagnostics_draft = !state.diagnostics_draft;
-                    // After a write failure forced diagnostics off mid-edit,
-                    // the reserved path was cleared; re-reserve one when the
-                    // draft moves back ON so the overlay keeps showing it.
-                    if state.diagnostics_draft {
-                        state
-                            .diagnostics_pending_path
-                            .get_or_insert_with(crate::diagnostics::default_output_path);
-                    }
-                } else if state.settings_selection == RANK_WINDOW_ROW {
-                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
-                    state.rank_window_draft = if forward {
-                        state.rank_window_draft.next()
-                    } else {
-                        state.rank_window_draft.prev()
-                    };
-                } else {
-                    return KeyOutcome::Ignored;
-                }
-                KeyOutcome::Changed
-            }
-            // Enter has no action in the settings overlay.
-            KeyCode::Enter => KeyOutcome::Ignored,
-            // The overlay swallows all other keys so page shortcuts do not
-            // leak through while it is open.
-            _ => KeyOutcome::Ignored,
-        }
-    } else if key.code == KeyCode::Char('o') {
-        state.settings_open = true;
-        state.settings_selection = 0;
-        state.rank_window_draft = state.rank_window;
-        // Start editing from the actual diagnostics state, and reserve one
-        // pending output path up front when diagnostics are currently off.
-        // Repeated in-overlay toggles reuse it; no file is created here.
-        state.diagnostics_draft = state.diagnostics_enabled;
-        if !state.diagnostics_enabled {
-            state
-                .diagnostics_pending_path
-                .get_or_insert_with(crate::diagnostics::default_output_path);
-        }
-        KeyOutcome::Changed
-    } else if key.code == KeyCode::Char('i') {
-        state.open_interface_selector(interfaces, active, true);
-        KeyOutcome::Changed
-    } else {
-        handle_key(state, key, snapshot)
-    }
 }
 
 fn finish_tui_activation(
@@ -455,106 +85,6 @@ fn finish_tui_activation(
                 selector.error = Some(format!("Failed to activate {interface}: {error}"));
             }
         }
-    }
-}
-
-/// Runtime side of the diagnostics toggle: the open writer plus the shared
-/// enable flag that gates pipeline-side collection.
-struct DiagnosticsRuntime {
-    writer: Option<DiagnosticsWriter>,
-    enabled: Arc<AtomicBool>,
-    rank_window: Arc<AtomicU8>,
-}
-
-impl DiagnosticsRuntime {
-    #[cfg(test)]
-    fn new(writer: Option<DiagnosticsWriter>, enabled: Arc<AtomicBool>) -> Self {
-        Self::new_with_rank(
-            writer,
-            enabled,
-            Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
-        )
-    }
-
-    fn new_with_rank(
-        writer: Option<DiagnosticsWriter>,
-        enabled: Arc<AtomicBool>,
-        rank_window: Arc<AtomicU8>,
-    ) -> Self {
-        Self {
-            writer,
-            enabled,
-            rank_window,
-        }
-    }
-
-    /// Apply the settings-overlay draft to the actual diagnostics state once
-    /// the overlay is closed. While the overlay is open the draft lives only
-    /// in `state`, so rapid h/l toggling never opens or closes the writer.
-    /// Returns true when a redraw is required.
-    fn reconcile(&mut self, state: &mut AppState) -> bool {
-        if state.settings_open {
-            return false;
-        }
-        if state.rank_window_draft != state.rank_window {
-            state.rank_window = state.rank_window_draft;
-            self.rank_window
-                .store(state.rank_window.to_u8(), Ordering::Release);
-            return true;
-        }
-        if state.diagnostics_draft == state.diagnostics_enabled {
-            // No runtime change (final state matches the actual one). Discard
-            // any path reserved while the overlay was open, e.g. a final OFF
-            // state; it is only ever materialized by an ON commit below.
-            state.diagnostics_pending_path.take();
-            return false;
-        }
-        if state.diagnostics_draft {
-            // Actual OFF -> draft ON: create the writer exactly once, at the
-            // path reserved when the overlay opened.
-            let path = state
-                .diagnostics_pending_path
-                .take()
-                .unwrap_or_else(crate::diagnostics::default_output_path);
-            match DiagnosticsWriter::create(&path) {
-                Ok(writer) => {
-                    state.diagnostics_file = writer.file_name();
-                    state.diagnostics_error = None;
-                    state.diagnostics_enabled = true;
-                    self.writer = Some(writer);
-                    self.enabled.store(true, Ordering::Relaxed);
-                }
-                Err(error) => {
-                    // The actual state stays OFF; revert the draft so the
-                    // failed intent is not retried every loop iteration.
-                    state.diagnostics_draft = false;
-                    state.diagnostics_error = Some(format!("Diagnostics unavailable: {error}"));
-                }
-            }
-        } else {
-            // Actual ON -> draft OFF: stop writing and clear the file name.
-            self.writer = None;
-            state.diagnostics_file = None;
-            state.diagnostics_enabled = false;
-            self.enabled.store(false, Ordering::Relaxed);
-        }
-        true
-    }
-
-    /// Disable diagnostics after a write failure. The actual state, the
-    /// settings draft and the shared flag are all turned off together, and
-    /// any reserved path is cleared, so the next `reconcile` has nothing to
-    /// commit and never re-opens the writer. The error stays visible in the
-    /// status bar; the user can re-open the settings overlay and manually
-    /// turn diagnostics back on.
-    fn note_write_failure(&mut self, state: &mut AppState, error: io::Error) {
-        self.writer = None;
-        state.diagnostics_enabled = false;
-        state.diagnostics_draft = false;
-        state.diagnostics_file = None;
-        state.diagnostics_pending_path = None;
-        self.enabled.store(false, Ordering::Relaxed);
-        state.diagnostics_error = Some(format!("Diagnostics disabled: {error}"));
     }
 }
 
@@ -740,140 +270,6 @@ where
     Ok(false)
 }
 
-fn is_quit_request(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-        || matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))
-}
-
-fn request_quit(state: &mut AppState) -> KeyOutcome {
-    state.quit_confirm = true;
-    KeyOutcome::Changed
-}
-
-fn handle_quit_confirm_key(state: &mut AppState, key: KeyEvent) -> KeyOutcome {
-    if is_quit_request(key)
-        || matches!(
-            key.code,
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
-        )
-    {
-        return KeyOutcome::Quit;
-    }
-    if matches!(
-        key.code,
-        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
-    ) {
-        state.quit_confirm = false;
-        return KeyOutcome::Changed;
-    }
-    KeyOutcome::Ignored
-}
-
-fn handle_key(state: &mut AppState, key: KeyEvent, snapshot: &TrafficSnapshot) -> KeyOutcome {
-    if state.quit_confirm {
-        return handle_quit_confirm_key(state, key);
-    }
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Char('Q') => request_quit(state),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => request_quit(state),
-        KeyCode::Esc if state.process_detail.is_some() => {
-            state.process_detail = None;
-            KeyOutcome::Changed
-        }
-        KeyCode::Esc => request_quit(state),
-        KeyCode::Enter if state.page == Page::Processes && state.process_detail.is_none() => {
-            let Some(process) = snapshot.processes.get(state.proc_scroll) else {
-                return KeyOutcome::Ignored;
-            };
-            let mut detail = ProcessDetail {
-                process: process.clone(),
-                paused: None,
-                pause_notice: None,
-            };
-            if !snapshot.process_data_fresh {
-                detail.pause(TrackingPause::Stale);
-            }
-            state.process_detail = Some(detail);
-            KeyOutcome::Changed
-        }
-        _ if state.process_detail.is_some() => KeyOutcome::Ignored,
-        KeyCode::Char('1') => {
-            state.page = Page::Overview;
-            KeyOutcome::Changed
-        }
-        KeyCode::Char('2') => {
-            state.page = Page::Processes;
-            KeyOutcome::Changed
-        }
-        KeyCode::Char('3') => {
-            state.page = Page::Ips;
-            KeyOutcome::Changed
-        }
-        KeyCode::Char('4') => {
-            state.page = Page::Domains;
-            KeyOutcome::Changed
-        }
-        KeyCode::Char('5') => {
-            state.page = Page::About;
-            KeyOutcome::Changed
-        }
-        KeyCode::Tab => {
-            if state.page == Page::Ips {
-                state.ip_focus = match state.ip_focus {
-                    IpFocus::Inbound => IpFocus::Outbound,
-                    IpFocus::Outbound => IpFocus::Inbound,
-                };
-                KeyOutcome::Changed
-            } else {
-                KeyOutcome::Ignored
-            }
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            state.page = prev_page(state.page);
-            KeyOutcome::Changed
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            state.page = next_page(state.page);
-            KeyOutcome::Changed
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            scroll(state, 1);
-            KeyOutcome::Changed
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            scroll(state, -1);
-            KeyOutcome::Changed
-        }
-        KeyCode::PageDown => {
-            scroll(state, state.current_view_height() as isize);
-            KeyOutcome::Changed
-        }
-        KeyCode::PageUp => {
-            scroll(state, -(state.current_view_height() as isize));
-            KeyOutcome::Changed
-        }
-        KeyCode::Home => {
-            scroll_to_top(state);
-            KeyOutcome::Changed
-        }
-        KeyCode::End => {
-            scroll_to_bottom(state, snapshot);
-            KeyOutcome::Changed
-        }
-        _ => KeyOutcome::Ignored,
-    }
-}
-
-fn prev_page(p: Page) -> Page {
-    let idx = p.index();
-    Page::ALL[(idx + Page::ALL.len() - 1) % Page::ALL.len()]
-}
-
-fn next_page(p: Page) -> Page {
-    let idx = p.index();
-    Page::ALL[(idx + 1) % Page::ALL.len()]
-}
-
 /// Palette choices in the order the settings overlay cycles through them.
 const PALETTE_CHOICES: [palette::PaletteChoice; 4] = [
     palette::PaletteChoice::Auto,
@@ -881,23 +277,6 @@ const PALETTE_CHOICES: [palette::PaletteChoice; 4] = [
     palette::PaletteChoice::SixteenColor,
     palette::PaletteChoice::Monochrome,
 ];
-
-fn next_palette_choice(choice: palette::PaletteChoice) -> palette::PaletteChoice {
-    let idx = PALETTE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0);
-    PALETTE_CHOICES[(idx + 1) % PALETTE_CHOICES.len()]
-}
-
-fn prev_palette_choice(choice: palette::PaletteChoice) -> palette::PaletteChoice {
-    let idx = PALETTE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0);
-    let len = PALETTE_CHOICES.len();
-    PALETTE_CHOICES[(idx + len - 1) % len]
-}
 
 /// User-visible label for a palette choice, as shown in the settings overlay.
 fn palette_choice_label(choice: palette::PaletteChoice) -> &'static str {
@@ -917,78 +296,6 @@ fn color_tier_label(tier: palette::ColorTier) -> &'static str {
         palette::ColorTier::Monochrome => "monochrome",
     }
 }
-
-impl AppState {
-    fn current_view_height(&self) -> usize {
-        match self.page {
-            Page::Processes => self.proc_view_height,
-            Page::Ips => match self.ip_focus {
-                IpFocus::Inbound => self.ip_in_view_height,
-                IpFocus::Outbound => self.ip_out_view_height,
-            },
-            Page::Domains => self.domain_view_height,
-            _ => 1,
-        }
-    }
-}
-
-fn scroll(state: &mut AppState, delta: isize) {
-    match state.page {
-        Page::Processes => {
-            state.proc_scroll = (state.proc_scroll as isize + delta).max(0) as usize;
-        }
-        Page::Ips => match state.ip_focus {
-            IpFocus::Inbound => {
-                state.ip_in_scroll = (state.ip_in_scroll as isize + delta).max(0) as usize;
-            }
-            IpFocus::Outbound => {
-                state.ip_out_scroll = (state.ip_out_scroll as isize + delta).max(0) as usize;
-            }
-        },
-        Page::Domains => {
-            state.domain_scroll = (state.domain_scroll as isize + delta).max(0) as usize;
-        }
-        _ => {}
-    }
-}
-
-fn scroll_to_top(state: &mut AppState) {
-    match state.page {
-        Page::Processes => state.proc_scroll = 0,
-        Page::Ips => match state.ip_focus {
-            IpFocus::Inbound => state.ip_in_scroll = 0,
-            IpFocus::Outbound => state.ip_out_scroll = 0,
-        },
-        Page::Domains => state.domain_scroll = 0,
-        _ => {}
-    }
-}
-
-fn scroll_to_bottom(state: &mut AppState, snapshot: &TrafficSnapshot) {
-    match state.page {
-        Page::Processes => {
-            let len = snapshot.processes.len();
-            state.proc_scroll = len.saturating_sub(state.proc_view_height);
-        }
-        Page::Ips => match state.ip_focus {
-            IpFocus::Inbound => {
-                let len = snapshot.inbound_ips.len();
-                state.ip_in_scroll = len.saturating_sub(state.ip_in_view_height);
-            }
-            IpFocus::Outbound => {
-                let len = snapshot.outbound_ips.len();
-                state.ip_out_scroll = len.saturating_sub(state.ip_out_view_height);
-            }
-        },
-        Page::Domains => {
-            let len = snapshot.outbound_domains.len();
-            state.domain_scroll = len.saturating_sub(state.domain_view_height);
-        }
-        _ => {}
-    }
-}
-
-// ── drawing ──
 
 #[cfg(test)]
 fn draw(
@@ -2818,7 +2125,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use std::path::PathBuf;
+
     use crate::stats::{IpSnapshot, OutboundDomainSnapshot, ProcessSnapshot, TrafficSnapshot};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn interfaces() -> Vec<crate::capture::InterfaceInfo> {
         vec![
