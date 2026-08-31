@@ -1,8 +1,6 @@
 //! Packet parsing: frame classification, IP payload extraction, and flow key derivation.
 
 use std::collections::HashSet;
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::net::IpAddr;
 
 use anyhow::{Result, anyhow};
@@ -12,6 +10,7 @@ use super::{Flow, LocalSocket, TransportProtocol};
 use crate::domain_parse::DomainParser;
 use crate::flow_table::{FlowEntry, FlowKey, FlowTable, MAX_NO_DOMAIN_PARSE_ATTEMPTS};
 use crate::stats::Direction;
+// rust-pcap exposes normalized LINKTYPE_RAW (101), while live Linux handles use DLT_RAW (12).
 pub(crate) const LINUX_DLT_RAW: pcap::Linktype = pcap::Linktype(12);
 
 #[derive(Clone, Copy, Eq, PartialEq)]

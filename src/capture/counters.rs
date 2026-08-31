@@ -1,8 +1,6 @@
 //! Capture counters and non-local endpoint sampling diagnostics.
 
 use std::collections::HashSet;
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

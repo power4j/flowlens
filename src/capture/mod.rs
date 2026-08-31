@@ -1,5 +1,3 @@
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -58,8 +56,6 @@ impl InterfaceInfo {
         }
     }
 }
-
-// rust-pcap exposes normalized LINKTYPE_RAW (101), while live Linux handles use DLT_RAW (12).
 
 /// A parsed one-way traffic record.
 pub struct Flow {
