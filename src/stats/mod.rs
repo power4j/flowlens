@@ -1,760 +1,23 @@
 use crate::capture::Flow;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-// Keep per-direction peer history bounded while retaining high-volume behavior.
-const MAX_IP_DIMENSION_ENTRIES: usize = 16_384;
-const IP_DIMENSION_PRUNE_BATCH: usize = 256;
-const IP_DIMENSION_TARGET_ENTRIES: usize = MAX_IP_DIMENSION_ENTRIES - IP_DIMENSION_PRUNE_BATCH;
-const IP_WINDOW_BUCKETS: usize = 5;
-const IP_BUCKET_SECONDS: i64 = 60;
-const IP_IDLE_WINDOWS: i64 = 3;
-const IP_OBSERVATION_BUCKETS: u8 = 2;
-const IP_HEAVY_SHARE_PERCENT: usize = 70;
-const IP_RISING_SHARE_PERCENT: usize = 20;
-const IP_HEAVY_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * IP_HEAVY_SHARE_PERCENT / 100;
-const IP_RISING_RESERVATION: usize = IP_DIMENSION_TARGET_ENTRIES * IP_RISING_SHARE_PERCENT / 100;
-const IP_OBSERVATION_RESERVATION: usize =
-    IP_DIMENSION_TARGET_ENTRIES - IP_HEAVY_RESERVATION - IP_RISING_RESERVATION;
-const RANKING_BUCKET_SECONDS: i64 = 1;
-const RANKING_MAX_WINDOW_SECONDS: i64 = 5 * 60;
-const MAX_RANKING_PROCESS_ENTRIES: usize = 1_000;
-const MAX_RANKING_IP_ENTRIES: usize = 4_096;
-const MAX_RANKING_DOMAIN_ENTRIES: usize = 4_096;
+mod ranking;
+mod snapshot;
+
+pub use ranking::*;
+pub use snapshot::*;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Direction {
     Inbound,
     Outbound,
 }
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum RankingWindow {
-    #[default]
-    Cumulative,
-    Seconds(u32),
-}
+
 pub type RankWindow = RankingWindow;
-impl RankingWindow {
-    pub const FIVE_SECONDS: Self = Self::Seconds(5);
-    pub const TEN_SECONDS: Self = Self::Seconds(10);
-    pub const THIRTY_SECONDS: Self = Self::Seconds(30);
-    pub const SIXTY_SECONDS: Self = Self::Seconds(60);
-    pub const FIVE_MINUTES: Self = Self::Seconds(300);
-    pub const fn seconds(self) -> Option<u32> {
-        match self {
-            Self::Cumulative => None,
-            Self::Seconds(seconds) => Some(seconds),
-        }
-    }
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Cumulative => "cumulative",
-            Self::Seconds(5) => "5s",
-            Self::Seconds(10) => "10s",
-            Self::Seconds(30) => "30s",
-            Self::Seconds(60) => "60s",
-            Self::Seconds(300) => "5m",
-            Self::Seconds(_) => "custom",
-        }
-    }
-    pub fn next(self) -> Self {
-        match self {
-            Self::Cumulative => Self::FIVE_SECONDS,
-            Self::Seconds(5) => Self::TEN_SECONDS,
-            Self::Seconds(10) => Self::THIRTY_SECONDS,
-            Self::Seconds(30) => Self::SIXTY_SECONDS,
-            Self::Seconds(60) => Self::FIVE_MINUTES,
-            Self::Seconds(300) | Self::Seconds(_) => Self::Cumulative,
-        }
-    }
-    pub fn prev(self) -> Self {
-        match self {
-            Self::Cumulative => Self::FIVE_MINUTES,
-            Self::Seconds(5) => Self::Cumulative,
-            Self::Seconds(10) => Self::FIVE_SECONDS,
-            Self::Seconds(30) => Self::TEN_SECONDS,
-            Self::Seconds(60) => Self::THIRTY_SECONDS,
-            Self::Seconds(300) | Self::Seconds(_) => Self::SIXTY_SECONDS,
-        }
-    }
-    pub fn to_u8(self) -> u8 {
-        match self {
-            Self::Cumulative => 0,
-            Self::Seconds(5) => 1,
-            Self::Seconds(10) => 2,
-            Self::Seconds(30) => 3,
-            Self::Seconds(60) => 4,
-            Self::Seconds(300) => 5,
-            Self::Seconds(_) => 0,
-        }
-    }
-    pub fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::FIVE_SECONDS,
-            2 => Self::TEN_SECONDS,
-            3 => Self::THIRTY_SECONDS,
-            4 => Self::SIXTY_SECONDS,
-            5 => Self::FIVE_MINUTES,
-            _ => Self::Cumulative,
-        }
-    }
-}
-impl std::fmt::Display for RankingWindow {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.label())
-    }
-}
-impl Serialize for RankingWindow {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.label())
-    }
-}
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RankingMetric {
-    #[default]
-    TotalBytes,
-    AverageThroughput,
-}
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct RankingSnapshot {
-    pub window: RankingWindow,
-    pub metric: RankingMetric,
-    pub coverage_seconds: Option<u32>,
-}
-#[derive(Clone, Copy, Debug, Default)]
-struct RankingBucket {
-    epoch: i64,
-    traffic: ProcTraffic,
-}
-#[derive(Clone, Default)]
-struct RankingEntityWindow {
-    buckets: Vec<RankingBucket>,
-    last_seen_epoch: i64,
-}
-impl RankingEntityWindow {
-    fn record(&mut self, direction: Direction, epoch: i64, bytes: u64) {
-        self.last_seen_epoch = epoch;
-        if let Some(bucket) = self.buckets.iter_mut().find(|bucket| bucket.epoch == epoch) {
-            Self::add_to_traffic(&mut bucket.traffic, direction, bytes);
-        } else {
-            let mut bucket = RankingBucket {
-                epoch,
-                traffic: ProcTraffic::default(),
-            };
-            Self::add_to_traffic(&mut bucket.traffic, direction, bytes);
-            self.buckets.push(bucket);
-        }
-    }
-    fn add_to_traffic(traffic: &mut ProcTraffic, direction: Direction, bytes: u64) {
-        match direction {
-            Direction::Inbound => traffic.recv = traffic.recv.saturating_add(bytes),
-            Direction::Outbound => traffic.sent = traffic.sent.saturating_add(bytes),
-        }
-    }
-    fn prune(&mut self, epoch: i64) {
-        let oldest = epoch - (RANKING_MAX_WINDOW_SECONDS - RANKING_BUCKET_SECONDS);
-        self.buckets
-            .retain(|bucket| bucket.epoch >= oldest && bucket.epoch <= epoch);
-    }
-    fn traffic(&self, epoch: i64, window_seconds: u32) -> ProcTraffic {
-        let oldest = epoch - (i64::from(window_seconds) - RANKING_BUCKET_SECONDS);
-        self.buckets
-            .iter()
-            .filter(|bucket| bucket.epoch >= oldest && bucket.epoch <= epoch)
-            .fold(ProcTraffic::default(), |mut total, bucket| {
-                total.recv = total.recv.saturating_add(bucket.traffic.recv);
-                total.sent = total.sent.saturating_add(bucket.traffic.sent);
-                total
-            })
-    }
-}
-fn ip_sort_key(ip: IpAddr) -> (u8, [u8; 16]) {
-    match ip {
-        IpAddr::V4(address) => {
-            let mut bytes = [0; 16];
-            bytes[12..].copy_from_slice(&address.octets());
-            (0, bytes)
-        }
-        IpAddr::V6(address) => (1, address.octets()),
-    }
-}
-fn evict_oldest_ranking_entity<K>(store: &mut HashMap<K, RankingEntityWindow>) -> bool
-where
-    K: Clone + Eq + std::hash::Hash,
-{
-    let Some(oldest) = store
-        .iter()
-        .min_by_key(|(_, entry)| entry.last_seen_epoch)
-        .map(|(key, _)| key)
-        .cloned()
-    else {
-        return false;
-    };
-    store.remove(&oldest).is_some()
-}
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum IpTier {
-    Heavy,
-    Rising,
-    #[default]
-    Observation,
-}
-#[derive(Clone, Copy, Debug, Default)]
-struct IpBucket {
-    epoch: i64,
-    bytes: u64,
-}
-#[derive(Clone, Copy, Debug, Default)]
-struct IpWindowState {
-    buckets: [IpBucket; IP_WINDOW_BUCKETS],
-    last_bucket_epoch: i64,
-    observed_buckets: u8,
-    tier: IpTier,
-    tier_changed_epoch: i64,
-}
-impl IpWindowState {
-    fn new(epoch: i64, bytes: u64) -> Self {
-        let mut state = Self {
-            buckets: [IpBucket::default(); IP_WINDOW_BUCKETS],
-            last_bucket_epoch: epoch,
-            observed_buckets: 1,
-            tier: IpTier::Observation,
-            tier_changed_epoch: epoch,
-        };
-        state.record(epoch, bytes);
-        state
-    }
-    fn record(&mut self, epoch: i64, bytes: u64) {
-        if epoch != self.last_bucket_epoch {
-            self.last_bucket_epoch = epoch;
-            self.observed_buckets = self
-                .observed_buckets
-                .saturating_add(1)
-                .min(IP_WINDOW_BUCKETS as u8);
-        }
-        let slot = epoch.rem_euclid(IP_WINDOW_BUCKETS as i64) as usize;
-        if self.buckets[slot].epoch != epoch {
-            self.buckets[slot] = IpBucket { epoch, bytes: 0 };
-        }
-        self.buckets[slot].bytes = self.buckets[slot].bytes.saturating_add(bytes);
-    }
-    fn current_bucket_bytes(&self, epoch: i64) -> u64 {
-        self.buckets
-            .iter()
-            .find(|bucket| bucket.epoch == epoch)
-            .map_or(0, |bucket| bucket.bytes)
-    }
-    fn window_bytes(&self, epoch: i64) -> u64 {
-        let oldest = epoch - (IP_WINDOW_BUCKETS as i64 - 1);
-        self.buckets
-            .iter()
-            .filter(|bucket| bucket.epoch >= oldest && bucket.epoch <= epoch)
-            .map(|bucket| bucket.bytes)
-            .sum()
-    }
-    fn previous_window_bytes(&self, epoch: i64) -> u64 {
-        let oldest = epoch - (IP_WINDOW_BUCKETS as i64 - 1);
-        self.buckets
-            .iter()
-            .filter(|bucket| bucket.epoch >= oldest && bucket.epoch < epoch)
-            .map(|bucket| bucket.bytes)
-            .sum()
-    }
-    fn surge_bytes(&self, epoch: i64) -> u64 {
-        self.current_bucket_bytes(epoch)
-            .saturating_mul((IP_WINDOW_BUCKETS - 1) as u64)
-            .saturating_sub(self.previous_window_bytes(epoch))
-    }
-    fn idle_windows(&self, epoch: i64) -> i64 {
-        (epoch - self.last_bucket_epoch).max(0) / IP_WINDOW_BUCKETS as i64
-    }
-}
-#[derive(Default)]
-struct IpDiagnosticsCounters {
-    promotions: u64,
-    demotions: u64,
-    evictions_heavy: u64,
-    evictions_rising: u64,
-    evictions_observation: u64,
-}
-/// Bidirectional rolling window (ADR 0013 process windowing): reuses the IP
-/// dimension's epoch-bucket machinery — 60s buckets × `IP_WINDOW_BUCKETS` =
-/// a 5-minute rolling window, split by direction.
-#[derive(Clone, Copy, Debug, Default)]
-struct DirectionalWindows {
-    inbound: IpWindowState,
-    outbound: IpWindowState,
-}
-impl DirectionalWindows {
-    fn record(&mut self, direction: Direction, epoch: i64, bytes: u64) {
-        match direction {
-            Direction::Inbound => self.inbound.record(epoch, bytes),
-            Direction::Outbound => self.outbound.record(epoch, bytes),
-        }
-    }
-    fn window(&self, epoch: i64) -> ProcTraffic {
-        ProcTraffic {
-            recv: self.inbound.window_bytes(epoch),
-            sent: self.outbound.window_bytes(epoch),
-        }
-    }
-}
-/// Proc traffic with recv/sent breakdown.
-#[derive(Default, Clone, Copy, Debug)]
-pub struct ProcTraffic {
-    /// Recv (inbound) bytes.
-    pub recv: u64,
-    /// Sent (outbound) bytes.
-    pub sent: u64,
-}
-impl ProcTraffic {
-    pub fn total(&self) -> u64 {
-        self.recv.saturating_add(self.sent)
-    }
-}
-/// Attribution-channel summary (record-layer basis, ADR 0013): each byte is
-/// counted into exactly one channel. Conservation identity: total =
-/// exclusive + shared + system + unattributed (settled amounts only, no
-/// in-flight pending).
-#[derive(Clone, Copy, Default)]
-pub struct AttributionSummary {
-    pub exclusive: ProcTraffic,
-    pub shared: ProcTraffic,
-    pub system: ProcTraffic,
-    pub unattributed: ProcTraffic,
-}
-impl AttributionSummary {
-    pub fn total(&self) -> u64 {
-        self.exclusive
-            .total()
-            .saturating_add(self.shared.total())
-            .saturating_add(self.system.total())
-            .saturating_add(self.unattributed.total())
-    }
-}
-/// Process attribution breakdown (ADR 0013): exclusive and shared channels;
-/// the process row's recv/sent is their sum (inclusive).
-#[derive(Clone, Default)]
-pub struct ProcessAttribution {
-    pub exclusive: ProcTraffic,
-    pub shared: ProcTraffic,
-    /// Display names of the shared partners.
-    pub shared_with: Vec<Arc<str>>,
-    /// Evidence sources of the exclusive channel (ADR 0013 history engine);
-    /// shared-channel evidence is not tracked separately.
-    pub evidence: Evidence,
-}
-/// Attribution evidence sources (ADR 0013): bit flags, accumulated in
-/// arrival order per process.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct Evidence(u8);
-impl Evidence {
-    pub(crate) const SNAPSHOT: Evidence = Evidence(1 << 0);
-    pub(crate) const PROBE: Evidence = Evidence(1 << 1);
-    pub(crate) const HISTORY: Evidence = Evidence(1 << 2);
-    pub(crate) fn merge(self, other: Evidence) -> Evidence {
-        Evidence(self.0 | other.0)
-    }
-    /// Output values of JSON `attribution.evidence`.
-    pub fn labels(&self) -> Vec<&'static str> {
-        let mut labels = Vec::new();
-        if self.0 & Self::SNAPSHOT.0 != 0 {
-            labels.push("snapshot");
-        }
-        if self.0 & Self::PROBE.0 != 0 {
-            labels.push("probe");
-        }
-        if self.0 & Self::HISTORY.0 != 0 {
-            labels.push("history");
-        }
-        labels
-    }
-}
-#[derive(Clone)]
-pub struct ObservedProcess {
-    pub pid: u32,
-    pub name: Option<Arc<str>>,
-    pub path: Option<Arc<str>>,
-}
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ProcessKey {
-    pid: u32,
-    path: Option<Arc<str>>,
-}
-#[derive(Clone, Default)]
-pub struct TrafficSnapshot {
-    pub in_bytes: u64,
-    pub out_bytes: u64,
-    pub process_data_fresh: bool,
-    pub pending_attribution_bytes: u64,
-    /// Record-layer conservation summary (ADR 0013): total = exclusive +
-    /// shared + system + unattributed.
-    pub attribution: AttributionSummary,
-    pub ranking: RankingSnapshot,
-    pub processes: Arc<[ProcessSnapshot]>,
-    pub inbound_ips: Arc<[IpSnapshot]>,
-    pub outbound_ips: Arc<[IpSnapshot]>,
-    /// Outbound-domain dimension; consumers: TUI overview/detail pages and
-    /// the plain/JSON reports.
-    pub outbound_domains: Arc<[OutboundDomainSnapshot]>,
-    pub diagnostics: Option<Arc<DiagnosticsSnapshot>>,
-}
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct DiagnosticsSnapshot {
-    pub counters: DiagnosticsCounters,
-    pub gauges: DiagnosticsGauges,
-    pub ip: DiagnosticsIp,
-    pub capture: DiagnosticsCapture,
-    #[serde(skip)]
-    pub miss_samples: Vec<DiagnosticsMissSample>,
-}
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct DiagnosticsCapture {
-    pub local_ips: Vec<IpAddr>,
-    pub non_local_ipv4_samples: Vec<DiagnosticsEndpointSample>,
-    pub non_local_ipv6_samples: Vec<DiagnosticsEndpointSample>,
-}
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct DiagnosticsEndpointSample {
-    pub src: IpAddr,
-    pub dst: IpAddr,
-}
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct DiagnosticsCounters {
-    pub lookup_hits: u64,
-    pub lookup_misses: u64,
-    pub lookup_no_candidate: u64,
-    pub lookup_ambiguous: u64,
-    pub lookup_stale: u64,
-    pub lookup_no_candidate_bytes: u64,
-    pub lookup_ambiguous_bytes: u64,
-    pub lookup_stale_bytes: u64,
-    pub lookup_v4_mapped_hits: u64,
-    pub no_local_socket: u64,
-    pub refresh_requests: u64,
-    pub refresh_actual: u64,
-    pub refresh_success: u64,
-    pub refresh_failure: u64,
-    pub refresh_records: u64,
-    pub refresh_v4_mapped_records: u64,
-    pub probe_request_queued: u64,
-    pub probe_result_unique: u64,
-    pub probe_result_not_found: u64,
-    pub probe_result_ambiguous: u64,
-    pub probe_result_unavailable: u64,
-    pub probe_result_dropped: u64,
-    pub probe_result_late: u64,
-    pub probe_query_count: u64,
-    pub probe_query_ms: u128,
-    pub pending_expired_bytes: u64,
-    pub pending_capacity_bytes: u64,
-    pub probe_unique_pending_bytes: u64,
-    pub probe_not_found_pending_bytes: u64,
-    pub probe_ambiguous_pending_bytes: u64,
-    pub probe_unavailable_pending_bytes: u64,
-    pub ip_promotions: u64,
-    pub ip_demotions: u64,
-    pub ip_evictions_heavy: u64,
-    pub ip_evictions_rising: u64,
-    pub ip_evictions_observation: u64,
-    pub pcap_received: u64,
-    pub pcap_dropped: u64,
-    pub pcap_if_dropped: u64,
-    pub capture_read_packets: u64,
-    pub capture_read_bytes: u64,
-    pub capture_parse_error_packets: u64,
-    pub capture_parse_error_bytes: u64,
-    pub capture_non_ip_packets: u64,
-    pub capture_non_ip_bytes: u64,
-    pub capture_non_local_ipv4_packets: u64,
-    pub capture_non_local_ipv4_bytes: u64,
-    pub capture_non_local_ipv6_packets: u64,
-    pub capture_non_local_ipv6_bytes: u64,
-    pub capture_duplicate_outgoing_packets: u64,
-    pub capture_duplicate_outgoing_bytes: u64,
-    pub capture_flow_created_packets: u64,
-    pub capture_flow_created_bytes: u64,
-}
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct DiagnosticsGauges {
-    pub flow_table_entries: u64,
-    pub process_entries: usize,
-    pub domain_entries: usize,
-    pub last_refresh_ms: u128,
-    pub pending_records: usize,
-    pub pending_bytes: u64,
-    pub probe_last_query_ms: u128,
-}
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct DiagnosticsIp {
-    pub inbound_entries: usize,
-    pub outbound_entries: usize,
-    pub inbound_heavy_entries: usize,
-    pub inbound_rising_entries: usize,
-    pub inbound_observation_entries: usize,
-    pub outbound_heavy_entries: usize,
-    pub outbound_rising_entries: usize,
-    pub outbound_observation_entries: usize,
-}
-#[derive(Clone, Debug, Serialize)]
-pub struct DiagnosticsMissSample {
-    pub reason: String,
-    pub protocol: String,
-    pub local: String,
-    pub peer: String,
-}
-#[derive(Clone)]
-pub struct ProcessSnapshot {
-    identity: ProcessIdentity,
-    /// Inclusive total (exclusive + shared); the list and top-N sort key (lifetime).
-    pub recv: u64,
-    pub sent: u64,
-    pub attribution: ProcessAttribution,
-    /// Inclusive bytes within the 5-minute rolling window; kept for the
-    /// detail page and reports, not the primary list basis.
-    pub window: ProcTraffic,
-    /// Selected ranking window bytes before throughput normalization.
-    pub selected: ProcTraffic,
-    /// Traffic attributed to this process under the selected ranking window.
-    pub rank: ProcTraffic,
-    last_seen: DateTime<Utc>,
-}
-#[derive(Clone)]
-enum ProcessIdentity {
-    Attributed {
-        pid: u32,
-        name: Option<Arc<str>>,
-        path: Option<Arc<str>>,
-    },
-}
-impl ProcessSnapshot {
-    #[cfg(test)]
-    pub(crate) fn attributed(
-        pid: u32,
-        name: Option<Arc<str>>,
-        path: Option<Arc<str>>,
-        last_seen: DateTime<Utc>,
-        recv: u64,
-        sent: u64,
-    ) -> Self {
-        Self {
-            identity: ProcessIdentity::Attributed { pid, name, path },
-            attribution: ProcessAttribution {
-                exclusive: ProcTraffic { recv, sent },
-                shared: ProcTraffic::default(),
-                shared_with: Vec::new(),
-                evidence: Evidence::default(),
-            },
-            window: ProcTraffic::default(),
-            selected: ProcTraffic::default(),
-            rank: ProcTraffic::default(),
-            recv,
-            sent,
-            last_seen,
-        }
-    }
-    pub(crate) fn attributed_with_shared(
-        pid: u32,
-        name: Option<Arc<str>>,
-        path: Option<Arc<str>>,
-        last_seen: DateTime<Utc>,
-        exclusive: ProcTraffic,
-        shared: ProcTraffic,
-        shared_with: Vec<Arc<str>>,
-    ) -> Self {
-        Self {
-            identity: ProcessIdentity::Attributed { pid, name, path },
-            recv: exclusive.recv + shared.recv,
-            sent: exclusive.sent + shared.sent,
-            attribution: ProcessAttribution {
-                exclusive,
-                shared,
-                shared_with,
-                evidence: Evidence::default(),
-            },
-            window: ProcTraffic::default(),
-            selected: ProcTraffic::default(),
-            rank: ProcTraffic::default(),
-            last_seen,
-        }
-    }
-    pub(crate) fn pid(&self) -> Option<u32> {
-        match self.identity {
-            ProcessIdentity::Attributed { pid, .. } => Some(pid),
-        }
-    }
-    pub(crate) fn name(&self) -> Option<&str> {
-        match &self.identity {
-            ProcessIdentity::Attributed { name, .. } => name.as_deref(),
-        }
-    }
-    pub(crate) fn path(&self) -> Option<&str> {
-        match &self.identity {
-            ProcessIdentity::Attributed { path, .. } => path.as_deref(),
-        }
-    }
-    /// Attr column semantics for lists (ADR 0013): false = E (all
-    /// exclusive), true = M (contains shared bytes).
-    pub(crate) fn is_mixed(&self) -> bool {
-        self.attribution.shared.recv > 0 || self.attribution.shared.sent > 0
-    }
-    pub(crate) fn last_seen(&self) -> DateTime<Utc> {
-        self.last_seen
-    }
-    pub(crate) fn display_name(&self) -> &str {
-        match &self.identity {
-            ProcessIdentity::Attributed { name, .. } => name.as_deref().unwrap_or("?"),
-        }
-    }
-    pub(crate) fn total(&self) -> u64 {
-        self.recv.saturating_add(self.sent)
-    }
-    pub(crate) fn same_identity_as(&self, other: &Self) -> bool {
-        match (&self.identity, &other.identity) {
-            (
-                ProcessIdentity::Attributed {
-                    pid: left_pid,
-                    path: left_path,
-                    ..
-                },
-                ProcessIdentity::Attributed {
-                    pid: right_pid,
-                    path: right_path,
-                    ..
-                },
-            ) => left_pid == right_pid && left_path == right_path,
-        }
-    }
-}
-#[derive(Clone)]
-pub struct IpSnapshot {
-    pub ip: IpAddr,
-    pub bytes: u64,
-    pub selected_bytes: u64,
-    pub rank_bytes: u64,
-    last_seen: DateTime<Utc>,
-}
-impl IpSnapshot {
-    #[cfg(test)]
-    pub(crate) fn new(ip: IpAddr, bytes: u64, last_seen: DateTime<Utc>) -> Self {
-        Self::with_rank(ip, bytes, bytes, last_seen)
-    }
-    #[cfg(test)]
-    pub(crate) fn with_rank(
-        ip: IpAddr,
-        bytes: u64,
-        rank_bytes: u64,
-        last_seen: DateTime<Utc>,
-    ) -> Self {
-        Self::with_rank_and_selected(ip, bytes, rank_bytes, rank_bytes, last_seen)
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_rank_and_selected(
-        ip: IpAddr,
-        bytes: u64,
-        selected_bytes: u64,
-        rank_bytes: u64,
-        last_seen: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            ip,
-            bytes,
-            selected_bytes,
-            rank_bytes,
-            last_seen,
-        }
-    }
-    pub(crate) fn last_seen(&self) -> DateTime<Utc> {
-        self.last_seen
-    }
-}
-/// Snapshot item of the outbound-domain dimension, following the
-/// encapsulation style of ProcessSnapshot.
-/// Field semantics: host / in_bytes / out_bytes / total_bytes / last_seen.
-/// `in_bytes` / `out_bytes` are pub (like ProcessSnapshot::recv / sent);
-/// `host` / `last_seen` are private, exposed via accessors (like the
-/// process dimension).
-/// Consumers: TUI overview/detail pages and the plain/JSON reports.
-#[derive(Clone)]
-pub struct OutboundDomainSnapshot {
-    host: Arc<str>,
-    pub in_bytes: u64,
-    pub out_bytes: u64,
-    pub selected_in_bytes: u64,
-    pub selected_out_bytes: u64,
-    pub rank_in_bytes: u64,
-    pub rank_out_bytes: u64,
-    last_seen: DateTime<Utc>,
-}
-impl OutboundDomainSnapshot {
-    #[cfg(test)]
-    pub(crate) fn new(
-        host: Arc<str>,
-        in_bytes: u64,
-        out_bytes: u64,
-        last_seen: DateTime<Utc>,
-    ) -> Self {
-        Self::with_rank(host, in_bytes, out_bytes, in_bytes, out_bytes, last_seen)
-    }
-    #[cfg(test)]
-    pub(crate) fn with_rank(
-        host: Arc<str>,
-        in_bytes: u64,
-        out_bytes: u64,
-        rank_in_bytes: u64,
-        rank_out_bytes: u64,
-        last_seen: DateTime<Utc>,
-    ) -> Self {
-        Self::with_rank_and_selected(
-            host,
-            in_bytes,
-            out_bytes,
-            rank_in_bytes,
-            rank_out_bytes,
-            rank_in_bytes,
-            rank_out_bytes,
-            last_seen,
-        )
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_rank_and_selected(
-        host: Arc<str>,
-        in_bytes: u64,
-        out_bytes: u64,
-        selected_in_bytes: u64,
-        selected_out_bytes: u64,
-        rank_in_bytes: u64,
-        rank_out_bytes: u64,
-        last_seen: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            host,
-            in_bytes,
-            out_bytes,
-            selected_in_bytes,
-            selected_out_bytes,
-            rank_in_bytes,
-            rank_out_bytes,
-            last_seen,
-        }
-    }
-    pub(crate) fn host(&self) -> &str {
-        &self.host
-    }
-    pub(crate) fn last_seen(&self) -> DateTime<Utc> {
-        self.last_seen
-    }
-    #[cfg(test)]
-    pub(crate) fn total_bytes(&self) -> u64 {
-        self.in_bytes.saturating_add(self.out_bytes)
-    }
-}
+
 /// Cumulative stats since start.
 #[derive(Default)]
 pub struct Stats {
@@ -811,6 +74,7 @@ pub struct Stats {
     rank_start_epoch: Option<i64>,
     rank_window_evictions: u64,
 }
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StatsDiagnostics {
     pub inbound_ip_entries: usize,
@@ -829,6 +93,7 @@ pub(crate) struct StatsDiagnostics {
     pub ip_evictions_rising: u64,
     pub ip_evictions_observation: u64,
 }
+
 /// Per-domain bidirectional byte counters, following ProcTraffic's
 /// recv/sent split.
 #[derive(Default, Clone, Copy)]
@@ -838,6 +103,7 @@ struct DomainTraffic {
     /// Sent (outbound) bytes — locally originated packets accumulate here.
     sent: u64,
 }
+
 impl Stats {
     pub(crate) fn new_at(created_at: DateTime<Utc>) -> Self {
         Self {
@@ -1513,274 +779,68 @@ impl Stats {
         entries
     }
 }
-#[derive(Clone, Copy)]
-struct IpCandidate {
-    ip: IpAddr,
-    last_seen: DateTime<Utc>,
-    lifetime_bytes: u64,
-    current_bucket_bytes: u64,
-    window_bytes: u64,
-    surge_bytes: u64,
-    idle_windows: i64,
-    observed_buckets: u8,
-    tier: IpTier,
-    tier_changed_epoch: i64,
-}
-fn bucket_epoch(observed_at: DateTime<Utc>) -> i64 {
-    observed_at.timestamp().div_euclid(IP_BUCKET_SECONDS)
-}
-fn average_rank_bytes(bytes: u64, window: RankWindow, coverage_seconds: u64) -> u64 {
-    if window == RankWindow::Cumulative {
-        bytes
-    } else {
-        bytes.checked_div(coverage_seconds).unwrap_or_default()
-    }
-}
-fn average_rank_traffic(
-    traffic: ProcTraffic,
-    window: RankWindow,
-    coverage_seconds: u64,
-) -> ProcTraffic {
-    ProcTraffic {
-        recv: average_rank_bytes(traffic.recv, window, coverage_seconds),
-        sent: average_rank_bytes(traffic.sent, window, coverage_seconds),
-    }
-}
-fn collect_ip_candidates(
-    bytes_by_ip: &HashMap<IpAddr, u64>,
-    last_seen_by_ip: &HashMap<IpAddr, DateTime<Utc>>,
-    windows_by_ip: &HashMap<IpAddr, IpWindowState>,
-    epoch: i64,
-) -> Vec<IpCandidate> {
-    bytes_by_ip
-        .iter()
-        .filter_map(|(ip, lifetime_bytes)| {
-            let state = windows_by_ip.get(ip)?;
-            let last_seen = last_seen_by_ip.get(ip)?;
-            Some(IpCandidate {
-                ip: *ip,
-                last_seen: *last_seen,
-                lifetime_bytes: *lifetime_bytes,
-                current_bucket_bytes: state.current_bucket_bytes(epoch),
-                window_bytes: state.window_bytes(epoch),
-                surge_bytes: state.surge_bytes(epoch),
-                idle_windows: state.idle_windows(epoch),
-                observed_buckets: state.observed_buckets,
-                tier: state.tier,
-                tier_changed_epoch: state.tier_changed_epoch,
-            })
-        })
-        .collect()
-}
-fn desired_ip_tiers(candidates: &[IpCandidate]) -> HashMap<IpAddr, IpTier> {
-    let eligible = candidates
-        .iter()
-        .filter(|candidate| {
-            candidate.observed_buckets >= IP_OBSERVATION_BUCKETS
-                && candidate.idle_windows < IP_IDLE_WINDOWS
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    let rising_target = eligible.len() * IP_RISING_SHARE_PERCENT / 100;
-    let rising_target = rising_target.min(IP_RISING_RESERVATION);
-    let rising_ips = select_rising_ips(&eligible, rising_target);
-    let mut heavy = eligible
-        .iter()
-        .filter(|candidate| !rising_ips.contains(&candidate.ip))
-        .copied()
-        .collect::<Vec<_>>();
-    heavy.sort_unstable_by_key(|candidate| std::cmp::Reverse(candidate.lifetime_bytes));
-    let heavy_target = heavy.len().min(IP_HEAVY_RESERVATION);
-    let heavy_ips = heavy
-        .iter()
-        .take(heavy_target)
-        .map(|candidate| candidate.ip)
-        .collect::<HashSet<_>>();
-    candidates
-        .iter()
-        .map(|candidate| {
-            let tier = if candidate.observed_buckets < IP_OBSERVATION_BUCKETS {
-                IpTier::Observation
-            } else if heavy_ips.contains(&candidate.ip) {
-                IpTier::Heavy
-            } else if rising_ips.contains(&candidate.ip) {
-                IpTier::Rising
-            } else {
-                IpTier::Observation
-            };
-            (candidate.ip, tier)
-        })
-        .collect()
-}
-fn select_rising_ips(candidates: &[IpCandidate], target: usize) -> HashSet<IpAddr> {
-    if target == 0 || candidates.is_empty() {
-        return HashSet::new();
-    }
-    let mut by_window = candidates.to_vec();
-    by_window.sort_unstable_by_key(|candidate| {
-        (
-            std::cmp::Reverse(candidate.window_bytes),
-            std::cmp::Reverse(candidate.surge_bytes),
-        )
-    });
-    let mut by_surge = candidates.to_vec();
-    by_surge.sort_unstable_by_key(|candidate| {
-        (
-            std::cmp::Reverse(candidate.surge_bytes),
-            std::cmp::Reverse(candidate.window_bytes),
-        )
-    });
-    let mut selected = HashSet::new();
-    for candidate in by_window.iter().take(target) {
-        selected.insert(candidate.ip);
-    }
-    for candidate in by_surge.iter().take(target) {
-        selected.insert(candidate.ip);
-    }
-    if selected.len() <= target {
-        return selected;
-    }
-    let window_rank = by_window
-        .iter()
-        .enumerate()
-        .map(|(rank, candidate)| (candidate.ip, rank))
-        .collect::<HashMap<_, _>>();
-    let surge_rank = by_surge
-        .iter()
-        .enumerate()
-        .map(|(rank, candidate)| (candidate.ip, rank))
-        .collect::<HashMap<_, _>>();
-    let mut ranked = selected.into_iter().collect::<Vec<_>>();
-    ranked.sort_unstable_by_key(|ip| {
-        let window = window_rank[ip];
-        let surge = surge_rank[ip];
-        (window.min(surge), window.max(surge), window, surge)
-    });
-    ranked.truncate(target);
-    ranked.into_iter().collect()
-}
-fn ip_tier_counts(windows_by_ip: &HashMap<IpAddr, IpWindowState>) -> (usize, usize, usize) {
-    windows_by_ip.values().fold((0, 0, 0), |mut counts, state| {
-        match state.tier {
-            IpTier::Heavy => counts.0 += 1,
-            IpTier::Rising => counts.1 += 1,
-            IpTier::Observation => counts.2 += 1,
-        }
-        counts
-    })
-}
-fn rebalance_ip_dimension(
-    bytes_by_ip: &mut HashMap<IpAddr, u64>,
-    last_seen_by_ip: &mut HashMap<IpAddr, DateTime<Utc>>,
-    windows_by_ip: &mut HashMap<IpAddr, IpWindowState>,
-    epoch: i64,
-    diagnostics: &mut IpDiagnosticsCounters,
-    refresh_tiers: bool,
-) {
-    if bytes_by_ip.is_empty() {
-        return;
-    }
-    let candidates = collect_ip_candidates(bytes_by_ip, last_seen_by_ip, windows_by_ip, epoch);
-    if refresh_tiers {
-        let desired = desired_ip_tiers(&candidates);
-        for candidate in &candidates {
-            let Some(state) = windows_by_ip.get_mut(&candidate.ip) else {
-                continue;
-            };
-            let desired_tier = desired[&candidate.ip];
-            let idle = candidate.idle_windows >= IP_IDLE_WINDOWS;
-            let held = epoch.saturating_sub(candidate.tier_changed_epoch) < 2;
-            let next_tier = if candidate.observed_buckets < IP_OBSERVATION_BUCKETS || idle {
-                IpTier::Observation
-            } else if candidate.tier != desired_tier && held {
-                candidate.tier
-            } else {
-                desired_tier
-            };
-            if state.tier != next_tier {
-                if tier_rank(next_tier) > tier_rank(state.tier) {
-                    diagnostics.promotions += 1;
-                } else {
-                    diagnostics.demotions += 1;
-                }
-                state.tier = next_tier;
-                state.tier_changed_epoch = epoch;
-            }
-        }
-    }
-    if bytes_by_ip.len() <= MAX_IP_DIMENSION_ENTRIES {
-        return;
-    }
-    let counts = ip_tier_counts(windows_by_ip);
-    let current = if refresh_tiers {
-        collect_ip_candidates(bytes_by_ip, last_seen_by_ip, windows_by_ip, epoch)
-    } else {
-        candidates
-    };
-    let mut victims = current
-        .into_iter()
-        .filter(|candidate| {
-            let minimum = match candidate.tier {
-                IpTier::Heavy => IP_HEAVY_RESERVATION,
-                IpTier::Rising => IP_RISING_RESERVATION,
-                IpTier::Observation => IP_OBSERVATION_RESERVATION,
-            };
-            let count = match candidate.tier {
-                IpTier::Heavy => counts.0,
-                IpTier::Rising => counts.1,
-                IpTier::Observation => counts.2,
-            };
-            count > minimum
-                || (candidate.tier == IpTier::Heavy && candidate.idle_windows >= IP_IDLE_WINDOWS)
-        })
-        .collect::<Vec<_>>();
-    victims.sort_unstable_by_key(|candidate| {
-        let tier = candidate.tier;
-        let (primary, secondary) = match tier {
-            IpTier::Heavy => (candidate.lifetime_bytes, candidate.window_bytes),
-            IpTier::Rising => (candidate.window_bytes, candidate.surge_bytes),
-            IpTier::Observation => (candidate.current_bucket_bytes, candidate.window_bytes),
-        };
-        (
-            tier_rank(tier),
-            if tier == IpTier::Heavy && candidate.idle_windows >= IP_IDLE_WINDOWS {
-                0
-            } else {
-                1
-            },
-            primary,
-            secondary,
-            candidate.last_seen,
-        )
-    });
-    let remove_count = bytes_by_ip
-        .len()
-        .saturating_sub(IP_DIMENSION_TARGET_ENTRIES);
-    for candidate in victims.into_iter().take(remove_count) {
-        bytes_by_ip.remove(&candidate.ip);
-        last_seen_by_ip.remove(&candidate.ip);
-        windows_by_ip.remove(&candidate.ip);
-        match candidate.tier {
-            IpTier::Heavy => diagnostics.evictions_heavy += 1,
-            IpTier::Rising => diagnostics.evictions_rising += 1,
-            IpTier::Observation => diagnostics.evictions_observation += 1,
-        }
-    }
-}
-fn tier_rank(tier: IpTier) -> u8 {
-    match tier {
-        IpTier::Observation => 0,
-        IpTier::Rising => 1,
-        IpTier::Heavy => 2,
-    }
-}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::capture::Flow;
+
     use chrono::Duration;
+
     use std::net::{IpAddr, Ipv4Addr};
+
     use std::sync::Arc;
+
+    // ── outbound-domain dimension ────────────────────────────────────
+
+    fn flow(direction: Direction, peer: [u8; 4], bytes: u64) -> Flow {
+        flow_ip(direction, ip(peer), bytes)
+    }
+
+    fn flow_ip(direction: Direction, peer: IpAddr, bytes: u64) -> Flow {
+        Flow {
+            direction,
+            peer,
+            peer_port: None,
+            bytes,
+            local_socket: None,
+            peer_local_socket: None,
+            domain: None,
+        }
+    }
+
+    fn flow_with_domain(
+        direction: Direction,
+        peer: [u8; 4],
+        bytes: u64,
+        domain: Option<Arc<str>>,
+    ) -> Flow {
+        Flow {
+            direction,
+            peer: ip(peer),
+            peer_port: None,
+            bytes,
+            local_socket: None,
+            peer_local_socket: None,
+            domain,
+        }
+    }
+
+    fn ip(octets: [u8; 4]) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
+    fn unique_ip(index: usize) -> IpAddr {
+        let index = index as u32;
+        IpAddr::V4(Ipv4Addr::new(
+            10,
+            ((index >> 16) & 0xff) as u8,
+            ((index >> 8) & 0xff) as u8,
+            (index & 0xff) as u8,
+        ))
+    }
+
     #[test]
     fn unattributed_flow_appears_in_attribution_summary() {
         let mut stats = Stats::default();
@@ -1797,6 +857,7 @@ mod tests {
         assert_eq!(snapshot.attribution.unattributed.recv, 40);
         assert_eq!(snapshot.attribution.unattributed.sent, 0);
     }
+
     #[test]
     fn unattributed_flow_does_not_compete_for_top_n() {
         let mut stats = Stats::default();
@@ -1818,11 +879,13 @@ mod tests {
         assert_eq!(snapshot.processes[0].recv, 10);
         assert_eq!(snapshot.attribution.unattributed.recv, 100);
     }
+
     #[test]
     fn empty_snapshot_has_no_unattributed_process() {
         let snapshot = Stats::default().snapshot(10);
         assert!(snapshot.processes.is_empty());
     }
+
     #[test]
     fn diagnostics_snapshot_reports_current_dimension_cardinality() {
         let mut stats = Stats::default();
@@ -1854,6 +917,7 @@ mod tests {
         assert_eq!(diagnostics.outbound_observation_ip_entries, 1);
         assert_eq!(diagnostics.ip_promotions, 0);
     }
+
     #[test]
     fn ip_dimensions_are_bounded_per_direction() {
         let mut stats = Stats::default();
@@ -1874,6 +938,7 @@ mod tests {
         assert!(diagnostics.inbound_ip_entries <= MAX_IP_DIMENSION_ENTRIES);
         assert!(diagnostics.outbound_ip_entries <= MAX_IP_DIMENSION_ENTRIES);
     }
+
     #[test]
     fn ip_dimension_prunes_lowest_traffic_without_changing_totals() {
         let mut stats = Stats::default();
@@ -1921,23 +986,7 @@ mod tests {
             entry.ip == unique_ip(MAX_IP_DIMENSION_ENTRIES + IP_DIMENSION_PRUNE_BATCH - 1)
         }));
     }
-    #[test]
-    fn ip_window_tracks_recent_bytes_and_surge() {
-        let mut stats = Stats::default();
-        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
-        let second = first + Duration::minutes(1);
-        let third = first + Duration::minutes(2);
-        let peer = unique_ip(7);
-        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 100), None, first);
-        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 50), None, second);
-        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 300), None, third);
-        let state = stats.in_ip_windows.get(&peer).unwrap();
-        assert_eq!(state.current_bucket_bytes(bucket_epoch(third)), 300);
-        assert_eq!(state.window_bytes(bucket_epoch(third)), 450);
-        assert_eq!(state.previous_window_bytes(bucket_epoch(third)), 150);
-        assert_eq!(state.surge_bytes(bucket_epoch(third)), 1_050);
-        assert_eq!(state.observed_buckets, 3);
-    }
+
     #[test]
     fn ip_tier_promotion_waits_for_two_buckets() {
         let mut stats = Stats::default();
@@ -1958,33 +1007,7 @@ mod tests {
         assert_eq!(diagnostics.inbound_observation_ip_entries, 0);
         assert_eq!(diagnostics.ip_promotions, 1);
     }
-    #[test]
-    fn rising_tier_keeps_recent_candidates_when_heavy_capacity_is_unused() {
-        let mut stats = Stats::default();
-        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
-        let second = first + Duration::minutes(1);
-        let third = first + Duration::minutes(2);
-        for index in 0..100 {
-            stats.record_flow_at(
-                flow_ip(Direction::Inbound, unique_ip(index), 10),
-                None,
-                first,
-            );
-        }
-        for index in 0..100 {
-            let bytes = if index == 0 { 10_000 } else { 10 };
-            stats.record_flow_at(
-                flow_ip(Direction::Inbound, unique_ip(index), bytes),
-                None,
-                second,
-            );
-        }
-        stats.record_flow_at(flow_ip(Direction::Inbound, unique_ip(0), 1), None, third);
-        let diagnostics = stats.diagnostics_snapshot();
-        assert_eq!(diagnostics.inbound_rising_ip_entries, 20);
-        assert_eq!(diagnostics.inbound_heavy_ip_entries, 80);
-        assert_eq!(stats.in_ip_windows[&unique_ip(0)].tier, IpTier::Rising);
-    }
+
     #[test]
     fn idle_heavy_ip_is_demoted_after_three_windows() {
         let mut stats = Stats::default();
@@ -2006,11 +1029,13 @@ mod tests {
         assert_eq!(diagnostics.inbound_heavy_ip_entries, 0);
         assert!(diagnostics.ip_demotions >= 1);
     }
+
     #[test]
     fn snapshot_defaults_to_no_pending_attribution() {
         let snapshot = Stats::default().snapshot(10);
         assert_eq!(snapshot.pending_attribution_bytes, 0);
     }
+
     #[test]
     fn same_pid_with_different_paths_has_distinct_traffic_history() {
         let mut stats = Stats::default();
@@ -2045,6 +1070,7 @@ mod tests {
         assert_eq!((old.recv, old.sent), (40, 0));
         assert_eq!((new.recv, new.sent), (0, 60));
     }
+
     #[test]
     fn last_seen_advances_only_when_flow_is_recorded() {
         let mut stats = Stats::default();
@@ -2075,6 +1101,7 @@ mod tests {
         );
         assert_eq!(updated.processes[0].last_seen(), second);
     }
+
     #[test]
     fn process_buckets_partition_captured_traffic() {
         let mut stats = Stats::default();
@@ -2109,6 +1136,7 @@ mod tests {
         assert_eq!(summary.unattributed.sent, 20);
         assert_eq!(summary.total(), snapshot.in_bytes + snapshot.out_bytes);
     }
+
     /// Lists and top-N use lifetime totals: historical heavyweights outside
     /// the window keep their rank.
     #[test]
@@ -2143,6 +1171,7 @@ mod tests {
         assert_eq!(snapshot.processes[1].sent, 10);
         assert_eq!(snapshot.processes[1].window.sent, 10);
     }
+
     #[test]
     fn zero_window_shared_candidates_remain_in_top_processes() {
         let mut stats = Stats::default();
@@ -2187,6 +1216,7 @@ mod tests {
         assert_eq!(snapshot.processes[0].recv, 1000);
         assert_eq!(snapshot.processes[1].recv, 1000);
     }
+
     /// ADR 0013 process windowing: window-basis conservation — the four
     /// channel sums inside the window equal exactly the bytes recorded in
     /// the window; once entries slide out they decay to 0 and the lifetime
@@ -2231,6 +1261,7 @@ mod tests {
         assert_eq!(window.unattributed.recv, 0);
         assert_eq!(window.exclusive.recv, 1);
     }
+
     #[test]
     fn snapshot_returns_ranked_top_n() {
         let mut stats = Stats::default();
@@ -2306,6 +1337,7 @@ mod tests {
             &process_name
         ));
     }
+
     #[test]
     fn recent_ranking_slides_forward_without_changing_cumulative_totals() {
         let mut stats = Stats::default();
@@ -2360,6 +1392,7 @@ mod tests {
         assert_eq!(recent.outbound_domains[0].host(), "recent.example");
         assert_eq!(recent.outbound_domains[0].rank_in_bytes, 100);
     }
+
     #[test]
     fn recent_ranking_uses_actual_coverage_during_preheat() {
         let mut stats = Stats::default();
@@ -2386,6 +1419,7 @@ mod tests {
         assert_eq!(snapshot.outbound_ips[0].rank_bytes, 125);
         assert_eq!(snapshot.outbound_domains[0].rank_out_bytes, 125);
     }
+
     #[test]
     fn recent_ranking_stores_are_bounded() {
         let mut stats = Stats::default();
@@ -2417,6 +1451,7 @@ mod tests {
         assert_eq!(stats.rank_domain.len(), MAX_RANKING_DOMAIN_ENTRIES);
         assert!(stats.rank_window_evictions >= 3);
     }
+
     #[test]
     fn ip_top_n_keeps_lifetime_byte_ranking() {
         let mut stats = Stats::default();
@@ -2431,6 +1466,7 @@ mod tests {
         assert_eq!(snapshot.inbound_ips[0].ip, historical);
         assert_eq!(snapshot.inbound_ips[0].bytes, 1_001);
     }
+
     #[test]
     fn add_proc_reuses_shared_name() {
         let mut stats = Stats::default();
@@ -2457,6 +1493,7 @@ mod tests {
             &name
         ));
     }
+
     #[test]
     fn ip_last_seen_is_direction_specific_and_snapshot_does_not_refresh() {
         let mut stats = Stats::default();
@@ -2479,8 +1516,6 @@ mod tests {
         assert_eq!(updated.inbound_ips[0].last_seen(), third);
         assert_eq!(updated.outbound_ips[0].last_seen(), second);
     }
-
-    // ── outbound-domain dimension ────────────────────────────────────
 
     #[test]
     fn domain_flow_aggregates_bidirectionally() {
@@ -2515,6 +1550,7 @@ mod tests {
         assert_eq!(domain.out_bytes, 100);
         assert_eq!(domain.total_bytes(), 340);
     }
+
     #[test]
     fn outbound_domain_snapshots_are_ranked_by_total_bytes() {
         let mut stats = Stats::default();
@@ -2546,6 +1582,7 @@ mod tests {
                 .any(|domain| domain.host() == "b.example")
         );
     }
+
     #[test]
     fn unidentified_flows_do_not_enter_domain_dimension() {
         let mut stats = Stats::default();
@@ -2559,6 +1596,7 @@ mod tests {
         assert_eq!(snapshot.in_bytes, 50);
         assert_eq!(snapshot.out_bytes, 100);
     }
+
     #[test]
     fn domain_last_seen_advances_only_when_flow_is_recorded() {
         let mut stats = Stats::default();
@@ -2595,6 +1633,7 @@ mod tests {
             (60, 40)
         );
     }
+
     #[test]
     fn domain_dimension_does_not_conserve_with_interface_totals() {
         let mut stats = Stats::default();
@@ -2634,6 +1673,7 @@ mod tests {
         assert_eq!(domain_total, 150);
         assert!(domain_total < snapshot.in_bytes + snapshot.out_bytes);
     }
+
     #[test]
     fn ranking_epoch_is_monotonic_when_observation_clock_moves_backwards() {
         let created: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
@@ -2664,6 +1704,7 @@ mod tests {
         assert_eq!(snapshot.processes[0].selected.sent, 300);
         assert_eq!(snapshot.processes[0].rank.sent, 30);
     }
+
     #[test]
     fn ranking_coverage_starts_at_store_creation_and_is_zero_before_first_bucket() {
         let created: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
@@ -2676,6 +1717,7 @@ mod tests {
         assert_eq!(snapshot.ranking.coverage_seconds, Some(0));
         assert!(snapshot.processes.is_empty());
     }
+
     #[test]
     fn delayed_first_flow_uses_elapsed_time_since_store_creation_for_coverage() {
         let created: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
@@ -2695,6 +1737,7 @@ mod tests {
         assert_eq!(snapshot.processes[0].selected.sent, 300);
         assert_eq!(snapshot.processes[0].rank.sent, 15);
     }
+
     #[test]
     fn process_ties_use_the_complete_process_key() {
         let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
@@ -2714,6 +1757,7 @@ mod tests {
         assert_eq!(snapshot.processes[0].path(), Some("/srv/a-worker"));
         assert_eq!(snapshot.processes[1].path(), Some("/srv/z-worker"));
     }
+
     #[test]
     fn ip_ties_use_normalized_address_bytes() {
         let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
@@ -2734,6 +1778,7 @@ mod tests {
         assert_eq!(snapshot.inbound_ips[0].ip, lower_byte);
         assert_eq!(snapshot.inbound_ips[1].ip, higher_byte);
     }
+
     #[test]
     fn domain_ties_use_lexicographic_host_order() {
         let observed_at: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
@@ -2754,46 +1799,50 @@ mod tests {
         assert_eq!(snapshot.outbound_domains[0].host(), "a.example");
         assert_eq!(snapshot.outbound_domains[1].host(), "z.example");
     }
-    fn flow(direction: Direction, peer: [u8; 4], bytes: u64) -> Flow {
-        flow_ip(direction, ip(peer), bytes)
+
+    #[test]
+    fn ip_window_tracks_recent_bytes_and_surge() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+        let peer = unique_ip(7);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 100), None, first);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 50), None, second);
+        stats.record_flow_at(flow_ip(Direction::Inbound, peer, 300), None, third);
+        let state = stats.in_ip_windows.get(&peer).unwrap();
+        assert_eq!(state.current_bucket_bytes(bucket_epoch(third)), 300);
+        assert_eq!(state.window_bytes(bucket_epoch(third)), 450);
+        assert_eq!(state.previous_window_bytes(bucket_epoch(third)), 150);
+        assert_eq!(state.surge_bytes(bucket_epoch(third)), 1_050);
+        assert_eq!(state.observed_buckets, 3);
     }
-    fn flow_ip(direction: Direction, peer: IpAddr, bytes: u64) -> Flow {
-        Flow {
-            direction,
-            peer,
-            peer_port: None,
-            bytes,
-            local_socket: None,
-            peer_local_socket: None,
-            domain: None,
+
+    #[test]
+    fn rising_tier_keeps_recent_candidates_when_heavy_capacity_is_unused() {
+        let mut stats = Stats::default();
+        let first: DateTime<Utc> = "2026-07-15T08:00:00Z".parse().unwrap();
+        let second = first + Duration::minutes(1);
+        let third = first + Duration::minutes(2);
+        for index in 0..100 {
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), 10),
+                None,
+                first,
+            );
         }
-    }
-    fn flow_with_domain(
-        direction: Direction,
-        peer: [u8; 4],
-        bytes: u64,
-        domain: Option<Arc<str>>,
-    ) -> Flow {
-        Flow {
-            direction,
-            peer: ip(peer),
-            peer_port: None,
-            bytes,
-            local_socket: None,
-            peer_local_socket: None,
-            domain,
+        for index in 0..100 {
+            let bytes = if index == 0 { 10_000 } else { 10 };
+            stats.record_flow_at(
+                flow_ip(Direction::Inbound, unique_ip(index), bytes),
+                None,
+                second,
+            );
         }
-    }
-    fn ip(octets: [u8; 4]) -> IpAddr {
-        IpAddr::V4(Ipv4Addr::from(octets))
-    }
-    fn unique_ip(index: usize) -> IpAddr {
-        let index = index as u32;
-        IpAddr::V4(Ipv4Addr::new(
-            10,
-            ((index >> 16) & 0xff) as u8,
-            ((index >> 8) & 0xff) as u8,
-            (index & 0xff) as u8,
-        ))
+        stats.record_flow_at(flow_ip(Direction::Inbound, unique_ip(0), 1), None, third);
+        let diagnostics = stats.diagnostics_snapshot();
+        assert_eq!(diagnostics.inbound_rising_ip_entries, 20);
+        assert_eq!(diagnostics.inbound_heavy_ip_entries, 80);
+        assert_eq!(stats.in_ip_windows[&unique_ip(0)].tier, IpTier::Rising);
     }
 }
