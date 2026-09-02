@@ -10,6 +10,7 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Changed
 
+- Packet capture now uses the pcap 2.5.0 batch `dispatch` reader by default, reducing per-packet read overhead on high-PPS interfaces. The per-packet `next_packet()` baseline remains selectable with `--read-mode next` for A/B comparison and rollback.
 - Process, IP, and outbound-domain rankings can now use sliding-window average throughput while interface totals remain cumulative. Finite-window rankings also show their current coverage while warming up.
 
 ### Fixed
