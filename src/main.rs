@@ -101,15 +101,19 @@ fn run_tui_mode(
     proc_table: proc_table::SharedProcTable,
     top_n: usize,
 ) -> ExitCode {
-    let mut session =
-        match session::TrafficSession::discover(proc_table, top_n, cli.flow_table, cli.diagnostics)
-        {
-            Ok(session) => session,
-            Err(error) => {
-                eprintln!("Failed to enumerate interfaces: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let mut session = match session::TrafficSession::discover(
+        proc_table,
+        top_n,
+        cli.flow_table,
+        cli.diagnostics,
+        cli.read_mode,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("Failed to enumerate interfaces: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(selector) = cli.interface.as_deref()
         && let Err(error) = session.activate(selector)
     {
@@ -148,13 +152,15 @@ fn run_capture_mode(
 
     let started_wall = chrono::Local::now();
     let started_at = Instant::now();
-    let mut source = match CaptureSource::open(interface_selector, cli.flow_table) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to open interface: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let mut source =
+        match CaptureSource::open_with_read_mode(interface_selector, cli.flow_table, cli.read_mode)
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to open interface: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     let interface = source.interface_name().to_string();
     match &cli.output {
         Some(path) => {
@@ -405,6 +411,9 @@ struct Cli {
     /// Write diagnostics JSONL records to this file (default: flowlens-<timestamp>-<pid>.log)
     #[arg(long = "diagnostics-output")]
     diagnostics_output: Option<String>,
+    /// Packet read mode: dispatch (batch, default) or next (per-packet baseline).
+    #[arg(long, value_enum, default_value_t = capture::CaptureReadMode::default(), hide = true)]
+    read_mode: capture::CaptureReadMode,
 }
 
 fn positive_u64(s: &str) -> Result<u64, String> {

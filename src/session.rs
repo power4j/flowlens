@@ -37,6 +37,7 @@ pub struct TrafficSession {
     proc_table: SharedProcTable,
     top_n: usize,
     flow_table_capacity: u64,
+    read_mode: crate::capture::CaptureReadMode,
     diagnostics_enabled: Arc<AtomicBool>,
     rank_window: Arc<AtomicU8>,
     active: Option<ActiveCapture>,
@@ -50,12 +51,14 @@ impl TrafficSession {
         top_n: usize,
         flow_table_capacity: u64,
         diagnostics_enabled: bool,
+        read_mode: crate::capture::CaptureReadMode,
     ) -> Result<Self> {
         Ok(Self {
             interfaces: crate::capture::interface_catalog()?,
             proc_table,
             top_n,
             flow_table_capacity,
+            read_mode,
             diagnostics_enabled: Arc::new(AtomicBool::new(diagnostics_enabled)),
             rank_window: Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             active: None,
@@ -84,10 +87,11 @@ impl TrafficSession {
         let proc_table = self.proc_table.clone();
         let top_n = self.top_n;
         let capacity = self.flow_table_capacity;
+        let read_mode = self.read_mode;
         let diagnostics_enabled = Arc::clone(&self.diagnostics_enabled);
         let rank_window = Arc::clone(&self.rank_window);
         self.activate_with(selector, move |name| {
-            let source = CaptureSource::open(name, capacity)?;
+            let source = CaptureSource::open_with_read_mode(name, capacity, read_mode)?;
             TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled, rank_window)
                 .map_err(anyhow::Error::from)
         })
@@ -97,10 +101,11 @@ impl TrafficSession {
         let proc_table = self.proc_table.clone();
         let top_n = self.top_n;
         let capacity = self.flow_table_capacity;
+        let read_mode = self.read_mode;
         let diagnostics_enabled = Arc::clone(&self.diagnostics_enabled);
         let rank_window = Arc::clone(&self.rank_window);
         self.begin_activate_with(selector, move |name| {
-            let source = CaptureSource::open(name, capacity)?;
+            let source = CaptureSource::open_with_read_mode(name, capacity, read_mode)?;
             TrafficPipeline::spawn(source, proc_table, top_n, diagnostics_enabled, rank_window)
                 .map_err(anyhow::Error::from)
         })
@@ -253,6 +258,7 @@ impl TrafficSession {
             proc_table,
             top_n,
             flow_table_capacity: crate::flow_table::DEFAULT_FLOW_TABLE_CAPACITY,
+            read_mode: crate::capture::CaptureReadMode::default(),
             diagnostics_enabled: Arc::new(AtomicBool::new(false)),
             rank_window: Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
             active: Some(ActiveCapture {
