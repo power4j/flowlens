@@ -11,6 +11,7 @@
 //!   refcap <device-or-index> [--interval 1] [--out FILE] [--seconds N]
 //!          [--snaplen 65535] [--buffer-size 2000000]
 //!          [--read-mode next|dispatch] [--batch-size 128]
+//!          [--breakloop-after N] [--breakloop-exit]
 //!
 //! Output is JSONL; one object per interval with per-interval deltas.
 
@@ -56,6 +57,15 @@ struct Cli {
     /// Packets per dispatch call when --read-mode dispatch.
     #[arg(long, default_value_t = DEFAULT_DISPATCH_BATCH)]
     batch_size: usize,
+    /// Call pcap breakloop() after this many seconds from a helper thread.
+    /// Diagnostic only; validates that breakloop interrupts a blocked
+    /// dispatch/next_packet on the target platform.
+    #[arg(long)]
+    breakloop_after: Option<u64>,
+    /// After breakloop returns an error, exit immediately (used to measure
+    /// the join latency precisely instead of waiting out --seconds).
+    #[arg(long)]
+    breakloop_exit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -165,11 +175,24 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
         None => Box::new(BufWriter::new(std::io::stdout())),
     };
 
+    // Breakloop probe: arm a helper thread that calls breakloop() after the
+    // requested delay. The handle is Send+Sync; calling breakloop() from
+    // another thread is the documented way to interrupt a blocked capture.
+    let breakloop_after = cli.breakloop_after;
+    let breakloop = cap.breakloop_handle();
+    if let Some(delay) = breakloop_after {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(delay));
+            breakloop.breakloop();
+        });
+    }
+
     let started = Instant::now();
     let mut last_emit = Instant::now();
     let mut totals = Totals::default();
     let mut last_stat: Option<pcap::Stat> = None;
     let mut dispatch: DispatchDeltas = DispatchDeltas::default();
+    let mut end_reason: &'static str = "timeout";
 
     loop {
         match cli.read_mode {
@@ -179,7 +202,20 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
                     count_frame(link, packet.data, wire_len, &mut totals);
                 }
                 Err(pcap::Error::TimeoutExpired) => {}
-                Err(error) => return Err(format!("capture error: {error}")),
+                Err(error) => {
+                    if breakloop_after.is_some() {
+                        // Expected when breakloop fired: record the observed
+                        // error (observation only, no string matching) and
+                        // treat it as the end of the probe.
+                        end_reason = "breakloop";
+                        eprintln!("refcap: capture returned after breakloop: {error}");
+                        if cli.breakloop_exit {
+                            break;
+                        }
+                    } else {
+                        return Err(format!("capture error: {error}"));
+                    }
+                }
             },
             ReadMode::Dispatch => {
                 let call_started = Instant::now();
@@ -194,7 +230,17 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
                             .max_call_ms
                             .max(call_started.elapsed().as_millis() as u64);
                     }
-                    Err(error) => return Err(format!("capture error: {error}")),
+                    Err(error) => {
+                        if breakloop_after.is_some() {
+                            end_reason = "breakloop";
+                            eprintln!("refcap: capture returned after breakloop: {error}");
+                            if cli.breakloop_exit {
+                                break;
+                            }
+                        } else {
+                            return Err(format!("capture error: {error}"));
+                        }
+                    }
                 }
             }
         }
@@ -223,6 +269,7 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
                     ReadMode::Next => "next",
                     ReadMode::Dispatch => "dispatch",
                 },
+                "end_reason": end_reason,
                 "dispatch_calls": dispatch.calls,
                 "dispatch_packets": dispatch.packets,
                 "dispatch_max_call_ms": dispatch.max_call_ms,
