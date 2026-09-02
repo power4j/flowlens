@@ -10,6 +10,7 @@
 //!   refcap --list
 //!   refcap <device-or-index> [--interval 1] [--out FILE] [--seconds N]
 //!          [--snaplen 65535] [--buffer-size 2000000]
+//!          [--read-mode next|dispatch] [--batch-size 128]
 //!
 //! Output is JSONL; one object per interval with per-interval deltas.
 
@@ -49,7 +50,21 @@ struct Cli {
     /// Capture kernel buffer size in bytes.
     #[arg(long, default_value_t = DEFAULT_BUFFER_SIZE)]
     buffer_size: i32,
+    /// Packet read mode: next (per-packet baseline) or dispatch (batch probe).
+    #[arg(long, value_enum, default_value_t = ReadMode::Next)]
+    read_mode: ReadMode,
+    /// Packets per dispatch call when --read-mode dispatch.
+    #[arg(long, default_value_t = DEFAULT_DISPATCH_BATCH)]
+    batch_size: usize,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum ReadMode {
+    Next,
+    Dispatch,
+}
+
+const DEFAULT_DISPATCH_BATCH: usize = 128;
 
 #[derive(Default)]
 struct Totals {
@@ -154,15 +169,34 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
     let mut last_emit = Instant::now();
     let mut totals = Totals::default();
     let mut last_stat: Option<pcap::Stat> = None;
+    let mut dispatch: DispatchDeltas = DispatchDeltas::default();
 
     loop {
-        match cap.next_packet() {
-            Ok(packet) => {
-                let wire_len = u64::from(packet.header.len);
-                count_frame(link, packet.data, wire_len, &mut totals);
+        match cli.read_mode {
+            ReadMode::Next => match cap.next_packet() {
+                Ok(packet) => {
+                    let wire_len = u64::from(packet.header.len);
+                    count_frame(link, packet.data, wire_len, &mut totals);
+                }
+                Err(pcap::Error::TimeoutExpired) => {}
+                Err(error) => return Err(format!("capture error: {error}")),
+            },
+            ReadMode::Dispatch => {
+                let call_started = Instant::now();
+                match cap.dispatch(Some(cli.batch_size), |packet| {
+                    let wire_len = u64::from(packet.header.len);
+                    count_frame(link, packet.data, wire_len, &mut totals);
+                }) {
+                    Ok(processed) => {
+                        dispatch.calls += 1;
+                        dispatch.packets += processed as u64;
+                        dispatch.max_call_ms = dispatch
+                            .max_call_ms
+                            .max(call_started.elapsed().as_millis() as u64);
+                    }
+                    Err(error) => return Err(format!("capture error: {error}")),
+                }
             }
-            Err(pcap::Error::TimeoutExpired) => {}
-            Err(error) => return Err(format!("capture error: {error}")),
         }
 
         let now = Instant::now();
@@ -185,10 +219,18 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
                 "dropped": deltas.dropped,
                 "if_dropped": deltas.if_dropped,
                 "received": deltas.received,
+                "read_mode": match cli.read_mode {
+                    ReadMode::Next => "next",
+                    ReadMode::Dispatch => "dispatch",
+                },
+                "dispatch_calls": dispatch.calls,
+                "dispatch_packets": dispatch.packets,
+                "dispatch_max_call_ms": dispatch.max_call_ms,
             });
             writeln!(writer, "{line}").map_err(|error| error.to_string())?;
             writer.flush().map_err(|error| error.to_string())?;
             totals = Totals::default();
+            dispatch = DispatchDeltas::default();
             last_emit = now;
             if cli.seconds.is_some_and(|seconds| uptime_secs >= seconds) {
                 break;
@@ -196,6 +238,15 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Per-interval dispatch-call deltas emitted in each JSONL line (0 in the
+/// per-packet baseline mode).
+#[derive(Clone, Copy, Debug, Default)]
+struct DispatchDeltas {
+    calls: u64,
+    packets: u64,
+    max_call_ms: u64,
 }
 
 /// Per-interval pcap statistics deltas emitted in each JSONL line.
