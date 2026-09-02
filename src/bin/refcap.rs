@@ -51,6 +51,10 @@ struct Cli {
     /// Capture kernel buffer size in bytes.
     #[arg(long, default_value_t = DEFAULT_BUFFER_SIZE)]
     buffer_size: i32,
+    /// Capture in promiscuous mode (needed to see locally-sent packets on
+    /// some Windows/Npcap adapters).
+    #[arg(long)]
+    promisc: bool,
     /// Packet read mode: next (per-packet baseline) or dispatch (batch probe).
     #[arg(long, value_enum, default_value_t = ReadMode::Next)]
     read_mode: ReadMode,
@@ -163,7 +167,7 @@ fn run(selector: &str, cli: &Cli) -> Result<(), String> {
         .timeout(150)
         .snaplen(cli.snaplen)
         .buffer_size(cli.buffer_size)
-        .promisc(false)
+        .promisc(cli.promisc)
         .open()
         .map_err(|error| error.to_string())?;
     let link = cap.get_datalink();
