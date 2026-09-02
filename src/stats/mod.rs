@@ -18,6 +18,17 @@ pub enum Direction {
 
 pub type RankWindow = RankingWindow;
 
+pub const DEFAULT_PROC_FLOWS: usize = 256;
+
+#[derive(Clone, Copy)]
+struct ProcFlowLimit(usize);
+
+impl Default for ProcFlowLimit {
+    fn default() -> Self {
+        Self(DEFAULT_PROC_FLOWS)
+    }
+}
+
 /// Cumulative stats since start.
 #[derive(Default)]
 pub struct Stats {
@@ -73,6 +84,8 @@ pub struct Stats {
     rank_epoch: Option<i64>,
     rank_start_epoch: Option<i64>,
     rank_window_evictions: u64,
+    proc_flows: HashMap<ProcessKey, HashMap<ProcFlowKey, ProcFlowTraffic>>,
+    proc_flow_limit: ProcFlowLimit,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -348,6 +361,27 @@ impl Stats {
             Direction::Outbound => self.add_out(flow.peer, flow.bytes, observed_at),
         }
     }
+    fn record_proc_flow(
+        &mut self,
+        process: ProcessKey,
+        conn: ProcFlowKey,
+        direction: Direction,
+        bytes: u64,
+        observed_at: DateTime<Utc>,
+    ) {
+        let traffic = self
+            .proc_flows
+            .entry(process)
+            .or_default()
+            .entry(conn)
+            .or_default();
+        match direction {
+            Direction::Inbound => traffic.recv = traffic.recv.saturating_add(bytes),
+            Direction::Outbound => traffic.sent = traffic.sent.saturating_add(bytes),
+        }
+        traffic.last_seen_epoch = observed_at.timestamp();
+    }
+
     pub(crate) fn record_process(
         &mut self,
         process: Option<ObservedProcess>,
@@ -366,6 +400,7 @@ impl Stats {
         bytes: u64,
         observed_at: DateTime<Utc>,
         evidence: Evidence,
+        conn: Option<ProcFlowKey>,
     ) {
         let key = ProcessKey {
             pid: process.pid,
@@ -377,7 +412,10 @@ impl Stats {
             .copied()
             .unwrap_or_default()
             .merge(evidence);
-        self.evidence_by_proc.insert(key, merged);
+        self.evidence_by_proc.insert(key.clone(), merged);
+        if let Some(conn) = conn {
+            self.record_proc_flow(key, conn, direction, bytes, observed_at);
+        }
         self.record_process(Some(process), direction, bytes, observed_at);
     }
     /// Flows of identified connections (domain=Some) accumulate into that
@@ -587,7 +625,7 @@ impl Stats {
                 let mut process = ProcessSnapshot::attributed_with_shared(
                     key.pid,
                     self.proc_names.get(&key).cloned(),
-                    key.path,
+                    key.path.clone(),
                     last_seen,
                     exclusive,
                     shared,
@@ -598,6 +636,32 @@ impl Stats {
                 }
                 debug_assert_eq!(process.recv, lifetime.recv);
                 debug_assert_eq!(process.sent, lifetime.sent);
+                let mut flows = self
+                    .proc_flows
+                    .get(&key)
+                    .map(|table| {
+                        table
+                            .iter()
+                            .map(|(flow_key, traffic)| ProcFlowSnapshot {
+                                local_ip: flow_key.local_ip,
+                                local_port: flow_key.local_port,
+                                remote_ip: flow_key.remote_ip,
+                                remote_port: flow_key.remote_port,
+                                protocol: flow_key.protocol,
+                                recv: traffic.recv,
+                                sent: traffic.sent,
+                                last_seen: DateTime::from_timestamp(traffic.last_seen_epoch, 0)
+                                    .unwrap_or(last_seen),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                flows.sort_by_key(|flow| std::cmp::Reverse(flow.total()));
+                let limit = self.proc_flow_limit.0;
+                if flows.len() > limit {
+                    flows.truncate(limit);
+                }
+                process.flows = flows.into();
                 process.window = window;
                 process.selected = rank;
                 process.rank = average_rank_traffic(rank, rank_window, coverage_secs);

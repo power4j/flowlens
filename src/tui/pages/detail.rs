@@ -261,6 +261,40 @@ pub(in crate::tui) fn draw_process_detail(
         "  Attr: E = exclusive only, M = mixed (includes shared)",
         Style::default().fg(palette::muted()),
     )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "IP Statistics (lifetime)",
+        Style::default()
+            .fg(palette::strong())
+            .add_modifier(Modifier::BOLD),
+    )));
+    if process.flows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No traffic observed",
+            Style::default().fg(palette::muted()),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Address (Src)  Port (Src)  Address (Dest)  Port (Dest)  Protocol  Bytes",
+            Style::default().fg(palette::muted()),
+        )));
+        for flow in process.flows.iter() {
+            let protocol = match flow.protocol {
+                crate::capture::TransportProtocol::Tcp => "TCP",
+                crate::capture::TransportProtocol::Udp => "UDP",
+            };
+            lines.push(Line::from(format!(
+                "{}  {}  {}  {}  {}  {}",
+                flow.local_ip,
+                flow.local_port,
+                flow.remote_ip,
+                flow.remote_port,
+                protocol,
+                human_bytes(flow.total()),
+            )));
+        }
+    }
+
     if detail.paused.is_some() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -303,7 +337,112 @@ pub(in crate::tui) fn relative_last_seen(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::TransportProtocol;
+    use crate::stats::ProcFlowSnapshot;
     use crate::tui::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn process_details_show_empty_connection_table() {
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![ProcessSnapshot::attributed(
+                7,
+                Some(Arc::from("curl")),
+                Some(Arc::from("/usr/bin/curl")),
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+                40,
+                60,
+            )]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_at(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                )
+            })
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("IP Statistics (lifetime)"));
+        assert!(rendered.contains("No traffic observed"));
+        assert!(!rendered.contains("IP Statistics (lifetime) 0"));
+        assert!(!rendered.contains("IP Statistics (lifetime) 1"));
+    }
+
+    #[test]
+    fn process_details_render_exclusive_connection_rows_as_lifetime_bytes() {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            Some(Arc::from("/usr/bin/curl")),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+            40,
+            60,
+        );
+        process.flows = vec![ProcFlowSnapshot {
+            local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            local_port: 49_152,
+            remote_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+            remote_port: 443,
+            protocol: TransportProtocol::Tcp,
+            recv: 0,
+            sent: 40,
+            last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+        }]
+        .into();
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_at(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                )
+            })
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("IP Statistics (lifetime)"));
+        assert!(rendered.contains("Address (Src)"));
+        assert!(rendered.contains("Bytes"));
+        assert!(rendered.contains("192.0.2.10"));
+        assert!(rendered.contains("198.51.100.5"));
+        assert!(rendered.contains("TCP"));
+        assert!(rendered.contains("40 B"));
+        assert!(!rendered.contains("40 B/s"));
+        assert!(!rendered.contains("No traffic observed"));
+    }
 
     #[test]
     fn processes_page_shows_pending_attribution_in_the_border() {

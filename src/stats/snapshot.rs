@@ -1,6 +1,7 @@
 //! Immutable traffic snapshots published to consumers.
 
 use super::ranking::RankingSnapshot;
+use crate::capture::{LocalSocket, TransportProtocol};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::net::IpAddr;
@@ -95,6 +96,53 @@ pub struct ObservedProcess {
 pub(crate) struct ProcessKey {
     pub(crate) pid: u32,
     pub(crate) path: Option<Arc<str>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ProcFlowKey {
+    pub(crate) local_ip: IpAddr,
+    pub(crate) local_port: u16,
+    pub(crate) remote_ip: IpAddr,
+    pub(crate) remote_port: u16,
+    pub(crate) protocol: TransportProtocol,
+}
+
+impl ProcFlowKey {
+    pub(crate) fn from_endpoint(local: LocalSocket, remote_ip: IpAddr, remote_port: u16) -> Self {
+        Self {
+            local_ip: local.ip,
+            local_port: local.port,
+            remote_ip,
+            remote_port,
+            protocol: local.protocol,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProcFlowTraffic {
+    pub(crate) recv: u64,
+    pub(crate) sent: u64,
+    pub(crate) last_seen_epoch: i64,
+}
+
+#[derive(Clone)]
+pub struct ProcFlowSnapshot {
+    pub(crate) local_ip: IpAddr,
+    pub(crate) local_port: u16,
+    pub(crate) remote_ip: IpAddr,
+    pub(crate) remote_port: u16,
+    pub(crate) protocol: TransportProtocol,
+    pub recv: u64,
+    pub sent: u64,
+    #[allow(dead_code)]
+    pub(crate) last_seen: DateTime<Utc>,
+}
+
+impl ProcFlowSnapshot {
+    pub(crate) fn total(&self) -> u64 {
+        self.recv.saturating_add(self.sent)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -242,6 +290,7 @@ pub struct ProcessSnapshot {
     /// Traffic attributed to this process under the selected ranking window.
     pub rank: ProcTraffic,
     pub(crate) last_seen: DateTime<Utc>,
+    pub(crate) flows: Arc<[ProcFlowSnapshot]>,
 }
 
 #[derive(Clone)]
@@ -277,6 +326,7 @@ impl ProcessSnapshot {
             recv,
             sent,
             last_seen,
+            flows: Arc::from([]),
         }
     }
     pub(crate) fn attributed_with_shared(
@@ -302,6 +352,7 @@ impl ProcessSnapshot {
             selected: ProcTraffic::default(),
             rank: ProcTraffic::default(),
             last_seen,
+            flows: Arc::from([]),
         }
     }
     pub(crate) fn pid(&self) -> Option<u32> {

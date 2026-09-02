@@ -10,7 +10,7 @@ use crate::proc_table::{self, LookupMissReason, LookupOutcome, SharedProcTable};
 use crate::process_probe::{
     ConnectionMatch, ProbeProcess, ProbeRequestId, ProbeRequestOutcome, ProbeResult, ProcessProbe,
 };
-use crate::stats::{Direction, Evidence, ObservedProcess, Stats};
+use crate::stats::{Direction, Evidence, ObservedProcess, ProcFlowKey, Stats};
 
 pub(crate) const PENDING_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(1);
 pub(crate) const PENDING_ATTRIBUTION_CAPACITY: usize = 1_024;
@@ -246,6 +246,7 @@ impl PendingAttributor {
                                 pending.bytes,
                                 pending.observed_at,
                                 Evidence::PROBE,
+                                None,
                             );
                         } else {
                             retained.push_back(pending);
@@ -289,6 +290,7 @@ impl PendingAttributor {
                             pending.bytes,
                             pending.observed_at,
                             Evidence::PROBE,
+                            None,
                         );
                         continue;
                     }
@@ -493,6 +495,7 @@ impl PendingAttributor {
                         pending.bytes,
                         pending.observed_at,
                         Evidence::SNAPSHOT,
+                        None,
                     );
                 }
                 Some(LookupResolved::Ambiguous(candidates)) => {
@@ -623,6 +626,7 @@ impl PendingAttributor {
                     bytes,
                     observed_at,
                     Evidence::SNAPSHOT,
+                    Some(ProcFlowKey::from_endpoint(socket, peer_ip, peer_port)),
                 );
                 return;
             }
@@ -724,6 +728,7 @@ impl PendingAttributor {
                         pending.bytes,
                         pending.observed_at,
                         Evidence::HISTORY,
+                        None,
                     );
                 }
                 _ => {
@@ -1539,5 +1544,182 @@ mod tests {
         assert!(snapshot.processes.is_empty());
         assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.pending_bytes(), 60);
+    }
+
+    #[test]
+    fn exclusive_tcp_flow_appears_on_the_process_connection_table() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            Some(Arc::from("/usr/bin/curl")),
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+
+        let process = &stats.snapshot(10).processes[0];
+        assert_eq!(process.flows.len(), 1);
+        let flow = &process.flows[0];
+        assert_eq!(flow.local_ip, local_ip);
+        assert_eq!(flow.local_port, 49_152);
+        assert_eq!(flow.remote_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)));
+        assert_eq!(flow.remote_port, 443);
+        assert_eq!(flow.protocol, TransportProtocol::Tcp);
+        assert_eq!((flow.recv, flow.sent), (0, 40));
+    }
+
+    #[test]
+    fn exclusive_same_five_tuple_accumulates_on_the_connection_table() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 60),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+
+        let flows = &stats.snapshot(10).processes[0].flows;
+        assert_eq!(flows.len(), 1);
+        assert_eq!((flows[0].recv, flows[0].sent), (0, 100));
+    }
+
+    #[test]
+    fn exclusive_different_five_tuples_are_separate_connection_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 80, 25),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+
+        let mut ports = stats.snapshot(10).processes[0]
+            .flows
+            .iter()
+            .map(|flow| flow.remote_port)
+            .collect::<Vec<_>>();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn traffic_without_a_local_socket_does_not_create_connection_rows() {
+        let proc_table = Arc::new(RwLock::new(ProcTable::default()));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)),
+                peer_port: None,
+                bytes: 10,
+                local_socket: None,
+                peer_local_socket: None,
+                domain: None,
+            },
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.system.sent, 10);
+    }
+
+    #[test]
+    fn traffic_without_a_peer_port_does_not_create_connection_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+                peer_port: None,
+                bytes: 10,
+                local_socket: Some(LocalSocket {
+                    ip: local_ip,
+                    port: 49_152,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                peer_local_socket: None,
+                domain: None,
+            },
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 10);
     }
 }
