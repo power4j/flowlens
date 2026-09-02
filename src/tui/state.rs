@@ -418,6 +418,8 @@ mod tests {
         let pending = state.diagnostics_pending_path.clone().unwrap();
 
         send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('j'));
+        // Diagnostics is row 2 in the settings overlay; second j selects it.
         for _ in 0..6 {
             send_key(&mut state, KeyCode::Char('l'));
             assert_eq!(
@@ -443,6 +445,8 @@ mod tests {
 
         send_key(&mut state, KeyCode::Char('o'));
         send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('j'));
+        // Diagnostics is row 2 in the settings overlay; second j selects it.
         send_key(&mut state, KeyCode::Char('l')); // draft ON
         send_key(&mut state, KeyCode::Char('l')); // draft OFF
         send_key(&mut state, KeyCode::Char('l')); // draft ON again
@@ -488,6 +492,8 @@ mod tests {
 
         send_key(&mut state, KeyCode::Char('o')); // draft := actual (OFF)
         send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('j'));
+        // Diagnostics is row 2 in the settings overlay; second j selects it.
         send_key(&mut state, KeyCode::Char('l')); // draft ON
         send_key(&mut state, KeyCode::Char('l')); // draft OFF
         assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
@@ -526,6 +532,8 @@ mod tests {
             "no pending path is reserved while diagnostics are actually on"
         );
         send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('j'));
+        // Diagnostics is row 2 in the settings overlay; second j selects it.
         send_key(&mut state, KeyCode::Char('l')); // draft OFF
         assert!(!state.diagnostics_draft);
         send_key(&mut state, KeyCode::Char('l')); // draft ON again
@@ -679,6 +687,8 @@ mod tests {
             Some(pending.as_path())
         );
         send_key(&mut state, KeyCode::Char('j'));
+        send_key(&mut state, KeyCode::Char('j'));
+        // Diagnostics is row 2 in the settings overlay; second j selects it.
         send_key(&mut state, KeyCode::Char('l')); // draft ON
         assert!(state.diagnostics_draft);
         assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);

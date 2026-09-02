@@ -20,12 +20,12 @@ pub(in crate::tui) const PALETTE_CHOICES: [palette::PaletteChoice; 4] = [
 ];
 
 pub(in crate::tui) const SETTINGS_SELECTABLE_ROWS: usize = 3;
-/// Settings row index for the palette choice.
-pub(in crate::tui) const PALETTE_ROW: usize = 0;
-/// Settings row index for the diagnostics toggle.
-pub(in crate::tui) const DIAGNOSTICS_ROW: usize = 1;
 /// Settings row index for the ranking window.
-pub(in crate::tui) const RANK_WINDOW_ROW: usize = 2;
+pub(in crate::tui) const RANK_WINDOW_ROW: usize = 0;
+/// Settings row index for the palette choice.
+pub(in crate::tui) const PALETTE_ROW: usize = 1;
+/// Settings row index for the diagnostics toggle.
+pub(in crate::tui) const DIAGNOSTICS_ROW: usize = 2;
 /// User-visible label for a palette choice, as shown in the settings overlay.
 pub(in crate::tui) fn palette_choice_label(choice: palette::PaletteChoice) -> &'static str {
     match choice {
@@ -75,6 +75,18 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
     let rank_window_label = ranking_window_label(state.rank_window_draft);
     let selection_style = palette::selection_style();
     let palette_selected = state.settings_selection == PALETTE_ROW;
+    let mut rank_window_line = Line::from(vec![
+        Span::raw(settings_selection_prefix(
+            state.settings_selection == RANK_WINDOW_ROW,
+        )),
+        Span::styled(
+            "Rank window: ",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(rank_window_label, Style::default().fg(palette::accent())),
+    ]);
     let mut palette_line = Line::from(vec![
         Span::raw(settings_selection_prefix(palette_selected)),
         Span::styled(
@@ -104,23 +116,11 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         ),
         Span::styled(diagnostics_label, Style::default().fg(palette::accent())),
     ]);
-    let mut rank_window_line = Line::from(vec![
-        Span::raw(settings_selection_prefix(
-            state.settings_selection == RANK_WINDOW_ROW,
-        )),
-        Span::styled(
-            "Rank window: ",
-            Style::default()
-                .fg(palette::strong())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(rank_window_label, Style::default().fg(palette::accent())),
-    ]);
     if palette_selected {
         palette_line.style = selection_style;
     } else if state.settings_selection == DIAGNOSTICS_ROW {
         diagnostics_line.style = selection_style;
-    } else {
+    } else if state.settings_selection == RANK_WINDOW_ROW {
         rank_window_line.style = selection_style;
     }
     // File display follows the (actual, draft) matrix: the live file name is
@@ -151,24 +151,23 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         (false, false) => "(none)".to_string(),
     };
     let inner = block.inner(popup);
-    // Budget for the label: "File: " prefix plus a small right margin, so a
-    // long basename cannot overflow or misalign the overlay.
-    let label_width = inner.width.saturating_sub(8) as usize;
+    // Budget for the file hint: two-space indent, "File: " label, and a small
+    // right margin, so a long basename cannot overflow or misalign the overlay.
+    let label_width = inner.width.saturating_sub(10) as usize;
     let file_label = truncate_with_ellipsis(&file_text, label_width.max(1));
+    // The file hint is an indented, muted sub-line of the Diagnostics row: it
+    // never carries a selection marker and is never highlighted.
+    let file_line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("File: ", Style::default().fg(palette::muted())),
+        Span::styled(file_label, Style::default().fg(palette::muted())),
+    ]);
     let lines = vec![
         Line::from(""),
+        rank_window_line,
         palette_line,
         diagnostics_line,
-        rank_window_line,
-        Line::from(vec![
-            Span::styled(
-                "File: ",
-                Style::default()
-                    .fg(palette::strong())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(file_label, Style::default().fg(palette::muted())),
-        ]),
+        file_line,
         Line::from(""),
         Line::from(Span::styled(
             "j/k select  h/l change  o or Esc close",
@@ -215,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_overlay_renders_palette_row_and_hint() {
+    fn settings_overlay_renders_rows_and_hint() {
         let snapshot = TrafficSnapshot::default();
         let mut state = AppState::new();
         state.settings_open = true;
@@ -227,8 +226,57 @@ mod tests {
 
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Settings"));
+        assert!(rendered.contains("Rank window:"));
         assert!(rendered.contains("Palette:"));
         assert!(rendered.contains("j/k select  h/l change  o or Esc close"));
+    }
+
+    #[test]
+    fn settings_overlay_lays_out_rank_first_then_file_under_diagnostics() {
+        // Layout contract: Rank window is the first row, then Palette, then
+        // Diagnostics, with the file hint directly beneath Diagnostics. The
+        // file hint is a muted, non-selectable sub-line and must not carry a
+        // selection marker.
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        state.settings_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        let lines = rendered_lines(&terminal);
+        let text = lines.join("\n");
+        // Rank is the first rendered row line (across the popup interior).
+        let first_line = lines
+            .iter()
+            .find(|line| {
+                line.contains("Rank window:")
+                    || line.contains("Palette:")
+                    || line.contains("Diagnostics:")
+            })
+            .expect("a settings row exists");
+        assert!(
+            first_line.contains("Rank window:"),
+            "Rank window must be the first row, got: {first_line:?}"
+        );
+        // The file hint sits on the line right after Diagnostics and carries
+        // no selection marker.
+        let diag_idx = lines
+            .iter()
+            .position(|line| line.contains("Diagnostics:"))
+            .expect("Diagnostics row exists");
+        assert!(
+            lines[diag_idx + 1].contains("  File:"),
+            "File hint must directly follow the Diagnostics row"
+        );
+        assert!(
+            text.contains("  File: (none)"),
+            "file hint is indented and never a selectable row"
+        );
+        assert!(
+            !text.contains("> File:"),
+            "the file hint must not carry the selection marker"
+        );
     }
 
     #[test]
@@ -238,7 +286,7 @@ mod tests {
         assert!(state.settings_open);
         assert_eq!(state.settings_selection, 0);
 
-        // Down/j moves to Diagnostics and clamps at the bottom.
+        // Down/j moves to Palette then Diagnostics and clamps at the bottom.
         assert_eq!(
             send_key(&mut state, KeyCode::Char('j')),
             KeyOutcome::Changed
@@ -246,8 +294,10 @@ mod tests {
         assert_eq!(state.settings_selection, 1);
         assert_eq!(send_key(&mut state, KeyCode::Down), KeyOutcome::Changed);
         assert_eq!(state.settings_selection, 2);
+        assert_eq!(send_key(&mut state, KeyCode::Down), KeyOutcome::Changed);
+        assert_eq!(state.settings_selection, 2);
 
-        // Up/k moves back through Diagnostics to Palette and clamps at the top.
+        // Up/k moves back through Palette to Rank window and clamps at the top.
         assert_eq!(
             send_key(&mut state, KeyCode::Char('k')),
             KeyOutcome::Changed
@@ -266,18 +316,28 @@ mod tests {
         state.palette_choice = palette::PaletteChoice::Auto;
         send_key(&mut state, KeyCode::Char('o'));
 
-        // Palette row selected by default: h/l cycle the palette.
+        // Rank window row selected by default: h/l cycle the rank window.
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('l')),
+            KeyOutcome::Changed
+        );
+        assert_eq!(state.rank_window_draft, RankWindow::Cumulative.next());
+        assert!(!state.diagnostics_draft);
+
+        // Move down to Palette: h/l cycle the palette without touching
+        // diagnostics or the rank draft.
+        send_key(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.settings_selection, 1);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
         assert_eq!(state.palette_choice, palette::PaletteChoice::Truecolor);
-        assert!(!state.diagnostics_draft);
 
         // Select Diagnostics: h/l toggle only the draft; the actual state
         // (writer + shared flag) is committed when the overlay closes.
         send_key(&mut state, KeyCode::Char('j'));
-        assert_eq!(state.settings_selection, 1);
+        assert_eq!(state.settings_selection, 2);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
@@ -383,6 +443,7 @@ mod tests {
         let pending = state.diagnostics_pending_path.clone();
         assert!(pending.is_some());
 
+        send_key(&mut state, KeyCode::Char('j'));
         send_key(&mut state, KeyCode::Char('j')); // select the Diagnostics row
         for _ in 0..4 {
             send_key(&mut state, KeyCode::Char('l')); // draft ON
@@ -415,7 +476,9 @@ mod tests {
             height: 24,
         };
         let popup = centered_rect(area, 70, 11);
-        let render_styles = |selection: usize| {
+        // Layout rows (inside the bordered popup, after an initial blank line):
+        // y+2 = Rank window, y+3 = Palette, y+4 = Diagnostics.
+        let render_style = |x: u16, y: u16, selection: usize| {
             let mut state = AppState::new();
             state.settings_open = true;
             state.settings_selection = selection;
@@ -423,21 +486,23 @@ mod tests {
             terminal
                 .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
                 .unwrap();
-            let buffer = terminal.backend().buffer();
-            (
-                buffer[(popup.x + 1, popup.y + 2)].style(),
-                buffer[(popup.x + 1, popup.y + 3)].style(),
-            )
+            terminal.backend().buffer()[(popup.x + x, popup.y + y)].style()
         };
-        let (palette_top, diagnostics_top) = render_styles(0);
-        let (palette_bottom, diagnostics_bottom) = render_styles(1);
+        // Each row's highlight follows its own selection.
         assert_ne!(
-            palette_top, palette_bottom,
-            "palette row highlight should follow selection"
+            render_style(1, 2, 0),
+            render_style(1, 2, 2),
+            "rank window highlight should follow selection"
         );
         assert_ne!(
-            diagnostics_top, diagnostics_bottom,
-            "diagnostics row highlight should follow selection"
+            render_style(1, 3, 1),
+            render_style(1, 3, 0),
+            "palette highlight should follow selection"
+        );
+        assert_ne!(
+            render_style(1, 4, 2),
+            render_style(1, 4, 1),
+            "diagnostics highlight should follow selection"
         );
     }
 
@@ -462,16 +527,21 @@ mod tests {
             .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
             .unwrap();
         let rendered = rendered_lines(&terminal).join("\n");
-        assert!(rendered.contains("> Palette:"));
+        assert!(rendered.contains("> Rank window:"));
+        assert!(rendered.contains("  Palette:"));
         assert!(rendered.contains("  Diagnostics:"));
 
-        state.settings_selection = 1;
+        // Selecting Diagnostics (row 2) moves the marker to it; Rank window
+        // keeps a two-space padding and the file hint stays unpadded.
+        state.settings_selection = 2;
         terminal
             .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
             .unwrap();
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("> Diagnostics:"));
+        assert!(rendered.contains("  Rank window:"));
         assert!(rendered.contains("  Palette:"));
+        assert!(rendered.contains("  File: (none)"));
     }
 
     #[test]
@@ -533,9 +603,12 @@ mod tests {
         state.detected_tier = palette::ColorTier::Truecolor;
         state.palette_choice = palette::PaletteChoice::Auto;
 
-        // Open the overlay; the default choice is Auto.
+        // Open the overlay; the default selection is the first row (Rank
+        // window), so step down to Palette before cycling it.
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
+        send_key(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.settings_selection, PALETTE_ROW);
 
         // 'l' advances Auto -> Truecolor (no tier change since detected=Truecolor).
         assert_eq!(
