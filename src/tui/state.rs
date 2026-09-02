@@ -201,6 +201,7 @@ impl AppState {
             can_cancel,
             activating: None,
             error: None,
+            ip_popup: None,
         });
     }
 

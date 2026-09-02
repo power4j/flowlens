@@ -118,22 +118,13 @@ pub(super) fn draw_with_interfaces_at(
         .split(area);
 
     let interface_label = interface_display_label(interface, interfaces);
-    draw_header(
-        f,
-        chunks[0],
-        state.page,
-        &interface_label,
-        host,
-        started_at,
-        mode,
-        snapshot,
-    );
+    draw_header(f, chunks[0], state.page, host, started_at, mode, snapshot);
     let body = chunks[1].inner(Margin {
         horizontal: 1,
         vertical: 1,
     });
     match state.page {
-        Page::Overview => draw_overview(f, body, snapshot, mode, now),
+        Page::Overview => draw_overview(f, body, snapshot, Some(&interface_label), mode, now),
         Page::Processes => match state.process_detail.as_ref() {
             Some(detail) => draw_process_detail(f, body, detail, snapshot, now),
             None => draw_processes(f, body, state, snapshot, mode, now),
@@ -185,7 +176,6 @@ pub(super) fn draw_header(
     f: &mut ratatui::Frame,
     area: Rect,
     page: Page,
-    interface: &str,
     host: &str,
     started_at: Instant,
     mode: LayoutMode,
@@ -197,11 +187,50 @@ pub(super) fn draw_header(
         return;
     }
 
-    let runtime = runtime_line(interface, host, started_at, mode, snapshot);
-    let runtime_width = (runtime.width() as u16).min(area.width / 2);
+    let navigation_width = navigation.width() as u16;
+    let runtime = runtime_line(
+        host,
+        started_at,
+        mode,
+        snapshot,
+        area.width.saturating_sub(navigation_width),
+    );
+    let runtime_width = runtime.width() as u16;
+    let (navigation, runtime) =
+        if runtime_width > 0 && navigation_width.saturating_add(runtime_width) <= area.width {
+            (navigation, runtime)
+        } else {
+            // Keep the runtime fields visible when the full tab labels leave too
+            // little room. The compact tabs are still enough to identify the page.
+            let compact_navigation = navigation_line(page, LayoutMode::Compact);
+            let compact_width = compact_navigation.width() as u16;
+            let compact_runtime = runtime_line(
+                host,
+                started_at,
+                mode,
+                snapshot,
+                area.width.saturating_sub(compact_width),
+            );
+            let compact_runtime_width = compact_runtime.width() as u16;
+            if compact_runtime_width > 0
+                && compact_width.saturating_add(compact_runtime_width) <= area.width
+            {
+                (compact_navigation, compact_runtime)
+            } else {
+                (navigation, Line::default())
+            }
+        };
+    let runtime_width = runtime.width() as u16;
+    if runtime_width == 0 {
+        f.render_widget(Paragraph::new(navigation), area);
+        return;
+    }
     let chunks = Layout::default()
         .direction(LayoutDir::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(runtime_width)])
+        .constraints([
+            Constraint::Length(area.width - runtime_width),
+            Constraint::Length(runtime_width),
+        ])
         .split(area);
     f.render_widget(Paragraph::new(navigation), chunks[0]);
     f.render_widget(
@@ -244,46 +273,37 @@ pub(super) fn navigation_line(page: Page, mode: LayoutMode) -> Line<'static> {
 }
 
 pub(super) fn runtime_line(
-    interface: &str,
     host: &str,
     started_at: Instant,
     mode: LayoutMode,
     snapshot: &TrafficSnapshot,
+    available_width: u16,
 ) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            interface.to_string(),
-            Style::default().fg(palette::strong()),
-        ),
-    ];
-    if mode == LayoutMode::Wide {
-        spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(
-            host.to_string(),
-            Style::default().fg(palette::strong()),
-        ));
+    let up = fmt_elapsed(started_at.elapsed());
+    let rank = ranking_window_indicator(snapshot);
+    let time = chrono::Local::now().format("%H:%M:%S").to_string();
+    let base = format!(" up {up}  rank {rank}");
+    let with_time = format!("{base}  {time}");
+    let with_host = format!(" {host}  {with_time}");
+    let text = if mode == LayoutMode::Wide && display_width(&with_host) <= available_width as usize
+    {
+        with_host
+    } else if mode != LayoutMode::Compact && display_width(&with_time) <= available_width as usize {
+        with_time
+    } else if display_width(&base) <= available_width as usize {
+        base
+    } else {
+        String::new()
+    };
+    if text.is_empty() {
+        Line::default()
+    } else {
+        Line::from(Span::styled(text, Style::default().fg(palette::strong())))
     }
-    spans.push(Span::styled("  up ", Style::default().fg(palette::muted())));
-    spans.push(Span::styled(
-        fmt_elapsed(started_at.elapsed()),
-        Style::default().fg(palette::strong()),
-    ));
-    spans.push(Span::styled(
-        "  rank ",
-        Style::default().fg(palette::muted()),
-    ));
-    spans.push(Span::styled(
-        ranking_window_indicator(snapshot),
-        Style::default().fg(palette::accent()),
-    ));
-    if mode != LayoutMode::Compact {
-        spans.push(Span::styled(
-            format!("  {}", chrono::Local::now().format("%H:%M:%S")),
-            Style::default().fg(palette::muted()),
-        ));
-    }
-    Line::from(spans)
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars().count()
 }
 
 pub(super) fn ranking_window_label(window: RankWindow) -> String {
@@ -548,5 +568,46 @@ mod tests {
         assert!(!rendered.contains("private-interface"));
         assert!(!rendered.contains("private-host"));
         assert!(!rendered.contains("Traffic"));
+    }
+    #[test]
+    fn header_prioritizes_runtime_fields_when_full_tabs_do_not_fit() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        let host = "a-very-long-hostname";
+
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", host, Instant::now()))
+            .unwrap();
+
+        let first_line = rendered_lines(&terminal)[0].clone();
+        assert!(!first_line.contains(host));
+        assert!(first_line.contains("up"));
+        assert!(first_line.contains("rank"));
+        assert!(first_line.contains(':'));
+    }
+
+    #[test]
+    fn header_does_not_exceed_terminal_width() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "a-very-long-hostname",
+                    Instant::now(),
+                )
+            })
+            .unwrap();
+
+        let first_line = &rendered_lines(&terminal)[0];
+        assert_eq!(first_line.chars().count(), 60);
+        assert!(!first_line.contains("a-very-long-hostname"));
     }
 }

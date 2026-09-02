@@ -19,6 +19,7 @@ pub(in crate::tui) fn draw_overview(
     f: &mut ratatui::Frame,
     area: Rect,
     snapshot: &TrafficSnapshot,
+    interface: Option<&str>,
     mode: LayoutMode,
     now: chrono::DateTime<chrono::Utc>,
 ) {
@@ -43,7 +44,7 @@ pub(in crate::tui) fn draw_overview(
                     Constraint::Fill(1),
                 ])
                 .split(area);
-            draw_traffic(f, rows[0], snapshot);
+            draw_traffic(f, rows[0], snapshot, interface);
 
             // Force compact tables in the half-width preview columns so the
             // full five-column layout does not cramp at 50% width.
@@ -85,7 +86,7 @@ pub(in crate::tui) fn draw_overview(
                     Constraint::Fill(1),
                 ])
                 .split(area);
-            draw_traffic(f, rows[0], snapshot);
+            draw_traffic(f, rows[0], snapshot, interface);
             draw_process_preview(f, rows[2], snapshot, mode, now);
             draw_domain_preview(f, rows[4], snapshot, mode, now);
             draw_ip_preview(f, rows[6], snapshot, true, now);
@@ -94,10 +95,15 @@ pub(in crate::tui) fn draw_overview(
     }
 }
 
-pub(in crate::tui) fn draw_traffic(f: &mut ratatui::Frame, area: Rect, snapshot: &TrafficSnapshot) {
+pub(in crate::tui) fn draw_traffic(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    snapshot: &TrafficSnapshot,
+    interface: Option<&str>,
+) {
     let block = panel_block(
         "net",
-        "Traffic",
+        interface.unwrap_or("No interface"),
         None,
         palette::violet(),
         palette::border(),
@@ -189,13 +195,13 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("missing panel label: {label}"))
         };
-        let traffic = position("Traffic");
+        let traffic = position("eth0");
         let inbound = position("Inbound IPs");
         let outbound = position("Outbound IPs");
         let processes = position("Top Processes");
         let domains = position("Top Domains");
 
-        // Row 1: Traffic spans the full width at the top.
+        // Row 1: The interface traffic panel spans the full width at the top.
         assert!(traffic.1 < processes.1);
         assert!(traffic.1 < inbound.1);
 
@@ -219,7 +225,7 @@ mod tests {
         assert!((outbound.0 - inbound.0) >= half_width.saturating_sub(2));
         assert!((outbound.0 - inbound.0) <= half_width + 2);
 
-        // Palette: the "n" prefix of the Traffic panel keeps the violet tint.
+        // Palette: the "n" prefix of the interface traffic panel keeps the violet tint.
         let net_cell = &terminal.backend().buffer()[(traffic.0 as u16 - 4, traffic.1 as u16)];
         assert_eq!(net_cell.symbol(), "n");
         assert_eq!(net_cell.fg, Color::Rgb(167, 139, 250));
@@ -229,7 +235,7 @@ mod tests {
     #[test]
     fn standard_overview_uses_row_layout_with_equal_columns() {
         // 80-column terminal lands in Standard mode (80..120). The Overview
-        // still arranges its panels in the row-based layout: Traffic at top,
+        // still arranges its panels in the row-based layout: the interface traffic panel at top,
         // then Process|Domain on the same band, then Inbound|Outbound IPs on
         // the next.
         let snapshot = TrafficSnapshot::default();
@@ -251,7 +257,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("missing panel label: {label}"))
         };
-        let traffic = position("Traffic");
+        let traffic = position("eth0");
         let processes = position("Top Processes");
         let domains = position("Top Domains");
         let inbound = position("Inbound IPs");
@@ -270,7 +276,7 @@ mod tests {
 
     #[test]
     fn compact_overview_stacks_five_rows_without_side_by_side_panels() {
-        // <80 columns triggers Compact mode. Overview stacks Traffic / Process
+        // <80 columns triggers Compact mode. Overview stacks the interface traffic panel / Process
         // / Domain / Inbound / Outbound IP vertically — no side-by-side panels.
         let snapshot = TrafficSnapshot::default();
         let mut state = AppState::new();
@@ -291,7 +297,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("missing panel label: {label}"))
         };
-        let traffic = position("Traffic");
+        let traffic = position("eth0");
         let processes = position("Top Processes");
         let domains = position("Top Domains");
         let inbound = position("Inbound IPs");

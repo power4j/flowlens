@@ -25,6 +25,7 @@ use std::sync::atomic::Ordering;
 pub struct InterfaceInfo {
     pub name: String,
     pub description: String,
+    pub addresses: Vec<IpAddr>,
     pub is_default_route: bool,
 }
 
@@ -1092,10 +1093,31 @@ mod tests {
     }
 
     #[test]
+    fn interface_catalog_retains_sorted_unique_ip_addresses() {
+        let mut device = device("eth0", Some("Wired Ethernet"));
+        device.addresses = vec![
+            address("2001:db8::10"),
+            address("192.0.2.10"),
+            address("192.0.2.10"),
+        ];
+
+        let catalog = interface_catalog_from_devices(vec![device], None);
+
+        assert_eq!(
+            catalog[0].addresses,
+            vec![
+                "192.0.2.10".parse::<IpAddr>().unwrap(),
+                "2001:db8::10".parse::<IpAddr>().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn interface_labels_follow_platform_display_order() {
         let interface = InterfaceInfo {
             name: r"\Device\NPF_{1234}".to_string(),
             description: "Intel Ethernet Controller".to_string(),
+            addresses: Vec::new(),
             is_default_route: false,
         };
 
@@ -1114,6 +1136,7 @@ mod tests {
         let interface = InterfaceInfo {
             name: "eth0".to_string(),
             description: "No description".to_string(),
+            addresses: Vec::new(),
             is_default_route: false,
         };
 

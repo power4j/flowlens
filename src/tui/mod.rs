@@ -249,11 +249,13 @@ fn interfaces() -> Vec<crate::capture::InterfaceInfo> {
         crate::capture::InterfaceInfo {
             name: "eth0".to_string(),
             description: "Wired Ethernet".to_string(),
+            addresses: vec!["192.0.2.10".parse().unwrap()],
             is_default_route: true,
         },
         crate::capture::InterfaceInfo {
             name: "wlan0".to_string(),
             description: "Wireless Adapter".to_string(),
+            addresses: vec!["2001:db8::10".parse().unwrap()],
             is_default_route: false,
         },
     ]

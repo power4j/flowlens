@@ -13,13 +13,20 @@ use crate::session::Activation;
 use crate::stats::TrafficSnapshot;
 
 use super::layout::ratatui_state;
+use super::popups::draw_interface_ip_popup;
 use super::state::*;
+
+pub(super) struct InterfaceIpPopup {
+    pub(super) interface_index: usize,
+    pub(super) scroll: usize,
+}
 
 pub(super) struct InterfaceSelector {
     pub(super) selected: usize,
     pub(super) can_cancel: bool,
     pub(super) activating: Option<String>,
     pub(super) error: Option<String>,
+    pub(super) ip_popup: Option<InterfaceIpPopup>,
 }
 
 pub(super) fn finish_tui_activation(
@@ -180,9 +187,9 @@ pub(super) fn draw_interface_selector(
         .as_deref()
         .or(activation_hint.as_deref())
         .unwrap_or(if selector.can_cancel {
-            "j/k:select  Enter:activate  Esc:cancel  q:quit"
+            "j/k:select  i:IP addresses  Enter:activate  Esc:cancel  q:quit"
         } else {
-            "j/k:select  Enter:activate  q:quit"
+            "j/k:select  i:IP addresses  Enter:activate  q:quit"
         });
     f.render_widget(
         Paragraph::new(hint)
@@ -194,6 +201,12 @@ pub(super) fn draw_interface_selector(
             .wrap(Wrap { trim: true }),
         chunks[2],
     );
+
+    if let Some(popup) = selector.ip_popup.as_ref()
+        && let Some(interface) = interfaces.get(popup.interface_index)
+    {
+        draw_interface_ip_popup(f, area, interface, popup.scroll);
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +284,7 @@ mod tests {
         interfaces.push(crate::capture::InterfaceInfo {
             name: "lo".to_string(),
             description: "Loopback".to_string(),
+            addresses: Vec::new(),
             is_default_route: false,
         });
         let mut state = AppState::startup(&interfaces);
@@ -346,6 +360,7 @@ mod tests {
         let interfaces = vec![crate::capture::InterfaceInfo {
             name: r"\Device\NPF_{A1B2C3D4}".to_string(),
             description: "Intel Ethernet Controller".to_string(),
+            addresses: Vec::new(),
             is_default_route: true,
         }];
         let snapshot = TrafficSnapshot::default();
@@ -378,6 +393,7 @@ mod tests {
             let interfaces = vec![crate::capture::InterfaceInfo {
                 name: name.to_string(),
                 description: description.to_string(),
+                addresses: Vec::new(),
                 is_default_route: true,
             }];
 
@@ -624,6 +640,7 @@ mod tests {
         let interfaces = vec![crate::capture::InterfaceInfo {
             name: pcap_name.to_string(),
             description: "Npcap Adapter".to_string(),
+            addresses: Vec::new(),
             is_default_route: false,
         }];
         let snapshot = TrafficSnapshot::default();
@@ -668,6 +685,7 @@ mod tests {
         let interfaces = vec![crate::capture::InterfaceInfo {
             name: interface_name.to_string(),
             description: description.to_string(),
+            addresses: Vec::new(),
             is_default_route: false,
         }];
         let snapshot = TrafficSnapshot::default();
@@ -696,5 +714,169 @@ mod tests {
         } else {
             assert!(interface_position < description_position);
         }
+    }
+    #[test]
+    fn interface_ip_popup_renders_all_addresses_and_supports_scrolling() {
+        let interfaces = vec![crate::capture::InterfaceInfo {
+            name: "eth0".to_string(),
+            description: "Wired Ethernet".to_string(),
+            addresses: (1..=20)
+                .map(|octet| format!("192.0.2.{octet}").parse().unwrap())
+                .collect(),
+            is_default_route: true,
+        }];
+        let mut state = AppState::startup(&interfaces);
+        let mut snapshot = Arc::new(TrafficSnapshot::default());
+
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                &mut snapshot,
+                &interfaces,
+                None,
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert_eq!(
+            state
+                .interface_selector
+                .as_ref()
+                .and_then(|selector| selector.ip_popup.as_ref())
+                .map(|popup| popup.scroll),
+            Some(0)
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_with_interfaces(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    None,
+                    &interfaces,
+                    "host",
+                    Instant::now(),
+                );
+            })
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("IP addresses"));
+        assert!(rendered.contains("192.0.2.1"));
+
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &mut snapshot,
+                &interfaces,
+                None,
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert_eq!(
+            state
+                .interface_selector
+                .as_ref()
+                .and_then(|selector| selector.ip_popup.as_ref())
+                .map(|popup| popup.scroll),
+            Some(8)
+        );
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+                &mut snapshot,
+                &interfaces,
+                None,
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert_eq!(
+            state
+                .interface_selector
+                .as_ref()
+                .and_then(|selector| selector.ip_popup.as_ref())
+                .map(|popup| popup.scroll),
+            Some(22)
+        );
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                &mut snapshot,
+                &interfaces,
+                None,
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert_eq!(
+            state
+                .interface_selector
+                .as_ref()
+                .and_then(|selector| selector.ip_popup.as_ref())
+                .map(|popup| popup.scroll),
+            Some(0)
+        );
+        assert_eq!(
+            handle_tui_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut snapshot,
+                &interfaces,
+                None,
+                |_| unreachable!(),
+            ),
+            KeyOutcome::Changed
+        );
+        assert!(
+            state
+                .interface_selector
+                .as_ref()
+                .is_some_and(|selector| selector.ip_popup.is_none())
+        );
+    }
+
+    #[test]
+    fn interface_ip_popup_explains_when_no_addresses_are_available() {
+        let interfaces = vec![crate::capture::InterfaceInfo {
+            name: "lo".to_string(),
+            description: "Loopback".to_string(),
+            addresses: Vec::new(),
+            is_default_route: false,
+        }];
+        let mut state = AppState::startup(&interfaces);
+        let mut snapshot = Arc::new(TrafficSnapshot::default());
+
+        handle_tui_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            &mut snapshot,
+            &interfaces,
+            None,
+            |_| unreachable!(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_with_interfaces(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    None,
+                    &interfaces,
+                    "host",
+                    Instant::now(),
+                );
+            })
+            .unwrap();
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("No IP addresses"));
     }
 }

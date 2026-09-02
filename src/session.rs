@@ -482,6 +482,7 @@ mod tests {
         InterfaceInfo {
             name: name.to_string(),
             description: format!("{name} description"),
+            addresses: Vec::new(),
             is_default_route,
         }
     }

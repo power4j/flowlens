@@ -120,10 +120,20 @@ pub(crate) fn interface_catalog_from_devices(
 ) -> Vec<InterfaceInfo> {
     devices
         .into_iter()
-        .map(|device| InterfaceInfo {
-            is_default_route: default == Some(device.name.as_str()),
-            description: device.desc.unwrap_or_else(|| "No description".to_string()),
-            name: device.name,
+        .map(|device| {
+            let mut addresses: Vec<_> = device
+                .addresses
+                .into_iter()
+                .map(|address| address.addr)
+                .collect();
+            addresses.sort_unstable();
+            addresses.dedup();
+            InterfaceInfo {
+                is_default_route: default == Some(device.name.as_str()),
+                description: device.desc.unwrap_or_else(|| "No description".to_string()),
+                name: device.name,
+                addresses,
+            }
         })
         .collect()
 }

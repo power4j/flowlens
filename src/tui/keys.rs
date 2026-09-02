@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use super::pages::settings::{
     DIAGNOSTICS_ROW, PALETTE_CHOICES, PALETTE_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS,
 };
+use super::selector::InterfaceIpPopup;
 use super::state::*;
 use crate::capture::InterfaceInfo;
 use crate::palette;
@@ -47,44 +48,93 @@ where
         if selector.activating.is_some() {
             return KeyOutcome::Ignored;
         }
-        match key.code {
-            KeyCode::Esc if selector.can_cancel => {
-                state.interface_selector = None;
-                KeyOutcome::Changed
+        if let Some(popup) = selector.ip_popup.as_mut() {
+            let address_count = interfaces
+                .get(popup.interface_index)
+                .map_or(0, |interface| interface.addresses.len());
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('i') => {
+                    selector.ip_popup = None;
+                    KeyOutcome::Changed
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    popup.scroll = popup.scroll.saturating_sub(1);
+                    KeyOutcome::Changed
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    popup.scroll = (popup.scroll + 1).min(address_count.saturating_add(2));
+                    KeyOutcome::Changed
+                }
+                KeyCode::PageUp => {
+                    popup.scroll = popup.scroll.saturating_sub(8);
+                    KeyOutcome::Changed
+                }
+                KeyCode::PageDown => {
+                    popup.scroll = (popup.scroll + 8).min(address_count.saturating_add(2));
+                    KeyOutcome::Changed
+                }
+                KeyCode::Home => {
+                    popup.scroll = 0;
+                    KeyOutcome::Changed
+                }
+                KeyCode::End => {
+                    popup.scroll = address_count.saturating_add(2);
+                    KeyOutcome::Changed
+                }
+                _ => KeyOutcome::Ignored,
             }
-            KeyCode::Esc => KeyOutcome::Ignored,
-            KeyCode::Down | KeyCode::Char('j') => {
-                selector.selected = (selector.selected + 1).min(interfaces.len().saturating_sub(1));
-                selector.error = None;
-                KeyOutcome::Changed
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                selector.selected = selector.selected.saturating_sub(1);
-                selector.error = None;
-                KeyOutcome::Changed
-            }
-            KeyCode::Enter => {
-                let Some(interface) = interfaces.get(selector.selected) else {
-                    return KeyOutcome::Ignored;
-                };
-                let interface_name = interface.name.clone();
-                match activate(&interface_name) {
-                    Ok(Activation::Activated) => {
-                        state.reset_after_interface_switch();
-                        *snapshot = Arc::new(TrafficSnapshot::default());
-                    }
-                    Ok(Activation::Pending) => {
-                        selector.activating = Some(interface_name);
-                    }
-                    Ok(Activation::Unchanged) => state.interface_selector = None,
-                    Err(error) => {
-                        selector.error =
-                            Some(format!("Failed to activate {interface_name}: {error}"));
+        } else {
+            match key.code {
+                KeyCode::Esc if selector.can_cancel => {
+                    state.interface_selector = None;
+                    KeyOutcome::Changed
+                }
+                KeyCode::Esc => KeyOutcome::Ignored,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selector.selected =
+                        (selector.selected + 1).min(interfaces.len().saturating_sub(1));
+                    selector.error = None;
+                    KeyOutcome::Changed
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selector.selected = selector.selected.saturating_sub(1);
+                    selector.error = None;
+                    KeyOutcome::Changed
+                }
+                KeyCode::Char('i') => {
+                    if interfaces.get(selector.selected).is_some() {
+                        selector.ip_popup = Some(InterfaceIpPopup {
+                            interface_index: selector.selected,
+                            scroll: 0,
+                        });
+                        KeyOutcome::Changed
+                    } else {
+                        KeyOutcome::Ignored
                     }
                 }
-                KeyOutcome::Changed
+                KeyCode::Enter => {
+                    let Some(interface) = interfaces.get(selector.selected) else {
+                        return KeyOutcome::Ignored;
+                    };
+                    let interface_name = interface.name.clone();
+                    match activate(&interface_name) {
+                        Ok(Activation::Activated) => {
+                            state.reset_after_interface_switch();
+                            *snapshot = Arc::new(TrafficSnapshot::default());
+                        }
+                        Ok(Activation::Pending) => {
+                            selector.activating = Some(interface_name);
+                        }
+                        Ok(Activation::Unchanged) => state.interface_selector = None,
+                        Err(error) => {
+                            selector.error =
+                                Some(format!("Failed to activate {interface_name}: {error}"));
+                        }
+                    }
+                    KeyOutcome::Changed
+                }
+                _ => KeyOutcome::Ignored,
             }
-            _ => KeyOutcome::Ignored,
         }
     } else if state.settings_open {
         match key.code {
