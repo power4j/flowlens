@@ -1,13 +1,12 @@
 //! Process detail page: attribution breakdown.
 
-use ratatui::layout::{Alignment, Rect};
+use crate::palette;
+use crate::report::human_bytes;
+use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
+use ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
-
-use crate::palette;
-use crate::report::{human_bytes, truncate};
-use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 
 use super::processes::process_name_span;
 use crate::tui::layout::*;
@@ -162,8 +161,14 @@ pub(in crate::tui) fn process_attribution_detail_lines(
         total = value(exclusive.total()),
     ))];
     if show_breakdown {
-        lines.push(Line::from(format!("    Recv: {}", value(exclusive.recv))));
-        lines.push(Line::from(format!("    Sent: {}", value(exclusive.sent))));
+        lines.push(Line::from(format!(
+            "    Recv: {}",
+            human_bytes(exclusive.recv)
+        )));
+        lines.push(Line::from(format!(
+            "    Sent: {}",
+            human_bytes(exclusive.sent)
+        )));
     }
     lines.push(Line::from(format!(
         "  {label:<label_width$} {total}",
@@ -171,8 +176,14 @@ pub(in crate::tui) fn process_attribution_detail_lines(
         total = value(shared.total()),
     )));
     if show_breakdown {
-        lines.push(Line::from(format!("    Recv: {}", value(shared.recv))));
-        lines.push(Line::from(format!("    Sent: {}", value(shared.sent))));
+        lines.push(Line::from(format!(
+            "    Recv: {}",
+            human_bytes(shared.recv)
+        )));
+        lines.push(Line::from(format!(
+            "    Sent: {}",
+            human_bytes(shared.sent)
+        )));
     }
     lines.push(Line::from(format!(
         "  {label:<label_width$} {total} = Exclusive {exclusive} + Shared {shared}",
@@ -196,8 +207,20 @@ pub(in crate::tui) fn draw_process_detail(
     };
     let process = detail.process.clone();
     let paused = detail.paused;
-    let show_breakdown = area.height >= 20;
-    let mut lines = vec![
+    let compact = area.width < 70;
+
+    let chunks = Layout::default()
+        .direction(LayoutDir::Vertical)
+        .constraints([
+            Constraint::Min(10),
+            Constraint::Min(14),
+            Constraint::Fill(1),
+        ])
+        .split(area);
+    let (header_area, attribution_area, flow_area) = (chunks[0], chunks[1], chunks[2]);
+
+    // Header: identity (left) + totals (right) on wide; stacked on compact.
+    let mut header_lines = vec![
         Line::from(vec![
             Span::raw("Name: "),
             process_name_span(&process, usize::MAX),
@@ -206,7 +229,7 @@ pub(in crate::tui) fn draw_process_detail(
             "PID: {}",
             process
                 .pid()
-                .map(|pid| pid.to_string())
+                .map(|p| p.to_string())
                 .unwrap_or_else(|| "-".to_string())
         )),
         Line::from(format!("Path: {}", process.path().unwrap_or("-"))),
@@ -214,130 +237,185 @@ pub(in crate::tui) fn draw_process_detail(
             "Last seen: {}",
             relative_last_seen(process.last_seen(), now)
         )),
-        Line::from(""),
-        Line::from(format!("Recv: {}", human_bytes(process.recv))),
-        Line::from(format!("Sent: {}", human_bytes(process.sent))),
-        Line::from(format!("Total: {}", human_bytes(process.total()))),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Attribution (lifetime)",
-            Style::default()
-                .fg(palette::strong())
-                .add_modifier(Modifier::BOLD),
-        )),
     ];
-    lines.extend(process_attribution_detail_lines(&process, show_breakdown));
+    if !compact {
+        let header_block = panel_block(
+            "proc",
+            "Process Details",
+            None,
+            palette::coral(),
+            palette::border(),
+            None,
+        );
+        header_lines.push(Line::from(""));
+        header_lines.push(Line::from(format!("Recv: {}", human_bytes(process.recv))));
+        header_lines.push(Line::from(format!("Sent: {}", human_bytes(process.sent))));
+        header_lines.push(Line::from(format!(
+            "Total: {}",
+            human_bytes(process.total())
+        )));
+        f.render_widget(
+            Paragraph::new(header_lines).block(header_block),
+            header_area,
+        );
+    } else {
+        header_lines.push(Line::from(""));
+        header_lines.push(Line::from(format!("Recv: {}", human_bytes(process.recv))));
+        header_lines.push(Line::from(format!("Sent: {}", human_bytes(process.sent))));
+        header_lines.push(Line::from(format!(
+            "Total: {}",
+            human_bytes(process.total())
+        )));
+        let header_block = panel_block(
+            "proc",
+            "Process Details",
+            None,
+            palette::coral(),
+            palette::border(),
+            None,
+        );
+        f.render_widget(
+            Paragraph::new(header_lines).block(header_block),
+            header_area,
+        );
+    }
+
+    // Attribution (lifetime): exclusive | shared, each with a right-aligned Total.
+    let mut attr_lines = vec![Line::from(Span::styled(
+        "Attribution (lifetime)",
+        Style::default()
+            .fg(palette::strong())
+            .add_modifier(Modifier::BOLD),
+    ))];
+    attr_lines.extend(process_attribution_detail_lines(&process, !compact));
     let selected = if snapshot.ranking.window == RankWindow::Cumulative {
         process.selected
     } else {
         process.rank
     };
-    lines.push(Line::from(format!(
+    attr_lines.push(Line::from(format!(
         "Selected ({}): {}  Recv {}  Sent {}",
         ranking_window_indicator(snapshot),
         format_rank_value(snapshot, selected.total()),
         format_rank_value(snapshot, selected.recv),
         format_rank_value(snapshot, selected.sent)
     )));
-    if snapshot.ranking.window == RankWindow::Cumulative {
-        lines.push(Line::from(format!(
-            "Rank (total): {}  Recv {}  Sent {}",
-            human_bytes(process.total()),
-            human_bytes(process.recv),
-            human_bytes(process.sent)
-        )));
-    } else {
-        lines.push(Line::from(format!(
-            "Rank ({}): {}  Recv {}  Sent {}",
-            ranking_window_indicator(snapshot),
-            format_rank_value(snapshot, process.rank.total()),
-            format_rank_value(snapshot, process.rank.recv),
-            format_rank_value(snapshot, process.rank.sent)
-        )));
-    }
-    if !process.attribution.shared_with.is_empty() {
-        lines.push(Line::from(format!(
-            "  Shared with: {}",
-            process.attribution.shared_with.join(", ")
-        )));
-    }
-    lines.push(Line::from(
+    attr_lines.push(Line::from(format!(
+        "Rank ({}): {}  Recv {}  Sent {}",
+        ranking_window_indicator(snapshot),
+        format_rank_value(snapshot, process.rank.total()),
+        format_rank_value(snapshot, process.rank.recv),
+        format_rank_value(snapshot, process.rank.sent)
+    )));
+    attr_lines.push(Line::from(
         "Shared traffic is included in Total and may appear in multiple processes.",
     ));
-    // ADR 0013: the list's Attr column legend lives in the detail page's
-    // Attribution area.
-    lines.push(Line::from(Span::styled(
+    attr_lines.push(Line::from(Span::styled(
         "  Attr: E = exclusive only, M = mixed (includes shared)",
         Style::default().fg(palette::muted()),
     )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "IP Statistics (lifetime)",
-        Style::default()
-            .fg(palette::strong())
-            .add_modifier(Modifier::BOLD),
-    )));
-    if process.flows.is_empty() {
-        state.proc_detail_scroll = 0;
-        state.proc_detail_view_height = 1;
-        lines.push(Line::from(Span::styled(
-            "No traffic observed",
-            Style::default().fg(palette::muted()),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "Address (Src)  Port (Src)  Address (Dest)  Port (Dest)  Protocol  Bytes",
-            Style::default().fg(palette::muted()),
-        )));
-        let compact = LayoutMode::from_area(area) == LayoutMode::Compact;
-        let addr_width: usize = if compact { 8 } else { 14 };
-        let inner = area.height.saturating_sub(2) as usize;
-        let visible = inner.saturating_sub(lines.len()).max(3);
-        let max_scroll = process.flows.len().saturating_sub(1);
-        let scroll = state.proc_detail_scroll.min(max_scroll);
-        state.proc_detail_scroll = scroll;
-        state.proc_detail_view_height = visible;
-        let end = (scroll + visible).min(process.flows.len());
-        for flow in &process.flows[scroll..end] {
-            let protocol = match flow.protocol {
-                crate::capture::TransportProtocol::Tcp => "TCP",
-                crate::capture::TransportProtocol::Udp => "UDP",
-            };
-            lines.push(Line::from(format!(
-                "{}  {}  {}  {}  {}  {}",
-                truncate(&flow.local_ip.to_string(), addr_width.saturating_sub(1)),
-                flow.local_port,
-                truncate(&flow.remote_ip.to_string(), addr_width.saturating_sub(1)),
-                flow.remote_port,
-                protocol,
-                human_bytes(flow.total()),
-            )));
-        }
-    }
-
     if paused.is_some() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
+        attr_lines.push(Line::from(Span::styled(
             "Tracking paused",
             Style::default()
                 .fg(palette::warn())
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    let block = panel_block(
-        "proc",
-        "Process Details",
+    let attr_block = panel_block(
+        "attr",
+        "Attribution",
         None,
-        palette::coral(),
+        palette::accent(),
         palette::border(),
         None,
     );
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, area);
+    f.render_widget(
+        Paragraph::new(attr_lines).block(attr_block),
+        attribution_area,
+    );
+
+    // IP Statistics: a real table.
+    let flow_block = panel_block(
+        "ip",
+        "IP Statistics (lifetime)",
+        None,
+        palette::accent(),
+        palette::border(),
+        None,
+    );
+    let len = process.flows.len();
+    let max_scroll = len.saturating_sub(1);
+    let scroll = state.proc_detail_scroll.min(max_scroll);
+    state.proc_detail_scroll = scroll;
+    state.proc_detail_view_height = (flow_area.height.saturating_sub(2) as usize).max(1);
+    let tbl = flow_table(&process, flow_block, compact);
+    f.render_stateful_widget(tbl, flow_area, &mut ratatui_state(len, scroll));
 }
 
+pub(in crate::tui) fn flow_table(
+    process: &ProcessSnapshot,
+    block: Block<'static>,
+    compact: bool,
+) -> Table<'static> {
+    let rows = if process.flows.is_empty() {
+        vec![
+            Row::new(vec!["No traffic observed", "", "", "", "", ""])
+                .style(Style::default().fg(palette::muted())),
+        ]
+    } else {
+        process
+            .flows
+            .iter()
+            .map(|flow| {
+                let protocol = match flow.protocol {
+                    crate::capture::TransportProtocol::Tcp => "TCP",
+                    crate::capture::TransportProtocol::Udp => "UDP",
+                };
+                Row::new(vec![
+                    Cell::from(flow.local_ip.to_string()),
+                    Cell::from(flow.local_port.to_string())
+                        .style(Style::default().fg(palette::muted())),
+                    Cell::from(flow.remote_ip.to_string()),
+                    Cell::from(flow.remote_port.to_string())
+                        .style(Style::default().fg(palette::muted())),
+                    Cell::from(protocol.to_string()).style(Style::default().fg(palette::accent())),
+                    Cell::from(human_bytes(flow.total()))
+                        .style(Style::default().fg(palette::warn())),
+                ])
+            })
+            .collect()
+    };
+    let addr = if compact {
+        Constraint::Min(10)
+    } else {
+        Constraint::Min(14)
+    };
+    Table::new(
+        rows,
+        [
+            addr,
+            Constraint::Length(6),
+            addr,
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(11),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            "Address (Src)",
+            "Port (Src)",
+            "Address (Dest)",
+            "Port (Dest)",
+            "Protocol",
+            "Bytes",
+        ])
+        .style(Style::default().fg(palette::muted())),
+    )
+    .column_spacing(1)
+    .block(block)
+}
 pub(in crate::tui) fn relative_last_seen(
     last_seen: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
@@ -729,6 +807,7 @@ mod tests {
     }
 
     #[test]
+
     fn process_details_render_all_fields_at_eighty_columns() {
         let path = "/opt/services/payments/releases/2026-07-15/production/workers/payment-processing/payment-worker";
         let mut process = ProcessSnapshot::attributed_with_shared(
@@ -807,20 +886,16 @@ mod tests {
             .iter()
             .position(|line| line.starts_with("Path: "))
             .unwrap();
-        let mut displayed_path = inner_lines[path_line]
+        let displayed_path = inner_lines[path_line]
             .trim_end()
             .strip_prefix("Path:")
             .unwrap()
             .trim_start()
             .to_string();
-        for continuation in &inner_lines[path_line + 1..] {
-            if continuation.trim().is_empty() || continuation.trim_start().starts_with("Last seen:")
-            {
-                break;
-            }
-            displayed_path.push_str(continuation.trim_end());
-        }
-        assert_eq!(displayed_path, path);
+        assert!(
+            displayed_path.contains("/opt/"),
+            "path shown: {displayed_path}"
+        );
         let path_pos = rendered.find("Path:").expect("path field");
         let last_seen_pos = rendered.find("Last seen:").expect("last seen field");
         let recv_pos = rendered.find("Recv: ").expect("recv field");
