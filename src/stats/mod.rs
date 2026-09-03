@@ -19,6 +19,7 @@ pub enum Direction {
 pub type RankWindow = RankingWindow;
 
 pub const DEFAULT_PROC_FLOWS: usize = 256;
+pub const MAX_PROC_FLOWS_TOTAL: usize = 65_536;
 
 #[derive(Clone, Copy)]
 struct ProcFlowLimit(usize);
@@ -26,6 +27,15 @@ struct ProcFlowLimit(usize);
 impl Default for ProcFlowLimit {
     fn default() -> Self {
         Self(DEFAULT_PROC_FLOWS)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProcFlowGlobalLimit(usize);
+
+impl Default for ProcFlowGlobalLimit {
+    fn default() -> Self {
+        Self(MAX_PROC_FLOWS_TOTAL)
     }
 }
 
@@ -86,6 +96,8 @@ pub struct Stats {
     rank_window_evictions: u64,
     proc_flows: HashMap<ProcessKey, HashMap<ProcFlowKey, ProcFlowTraffic>>,
     proc_flow_limit: ProcFlowLimit,
+    proc_flow_global_limit: ProcFlowGlobalLimit,
+    proc_flow_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -421,19 +433,102 @@ impl Stats {
         bytes: u64,
         observed_at: DateTime<Utc>,
     ) {
-        let traffic = self
+        let limit = self.proc_flow_limit.0.max(1);
+        let is_new = !self
             .proc_flows
-            .entry(process)
-            .or_default()
-            .entry(conn)
-            .or_default();
+            .get(&process)
+            .is_some_and(|table| table.contains_key(&conn));
+        if is_new {
+            loop {
+                let len = self
+                    .proc_flows
+                    .get(&process)
+                    .map(|table| table.len())
+                    .unwrap_or(0);
+                if len < limit {
+                    break;
+                }
+                let Some(table) = self.proc_flows.get_mut(&process) else {
+                    break;
+                };
+                if !Self::evict_lightest_flow(table) {
+                    break;
+                }
+                self.proc_flow_count = self.proc_flow_count.saturating_sub(1);
+            }
+        }
+        let table = self.proc_flows.entry(process.clone()).or_default();
+        let vacant = !table.contains_key(&conn);
+        let traffic = table.entry(conn).or_default();
         match direction {
             Direction::Inbound => traffic.recv = traffic.recv.saturating_add(bytes),
             Direction::Outbound => traffic.sent = traffic.sent.saturating_add(bytes),
         }
         traffic.last_seen_epoch = observed_at.timestamp();
+        if vacant {
+            self.proc_flow_count = self.proc_flow_count.saturating_add(1);
+        }
+        self.enforce_global_proc_flow_limit();
     }
 
+    fn evict_lightest_flow(table: &mut HashMap<ProcFlowKey, ProcFlowTraffic>) -> bool {
+        let Some(victim) = table
+            .iter()
+            .min_by_key(|(key, traffic)| {
+                (
+                    traffic.recv.saturating_add(traffic.sent),
+                    key.local_port,
+                    key.remote_port,
+                )
+            })
+            .map(|(key, _)| *key)
+        else {
+            return false;
+        };
+        table.remove(&victim);
+        true
+    }
+
+    fn enforce_global_proc_flow_limit(&mut self) {
+        let max = self.proc_flow_global_limit.0;
+        while self.proc_flow_count > max {
+            let Some(process) = self
+                .proc_flows
+                .iter()
+                .max_by_key(|(key, table)| {
+                    (
+                        table.len(),
+                        std::cmp::Reverse(key.pid),
+                        std::cmp::Reverse(key.path.as_deref()),
+                    )
+                })
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            {
+                let Some(table) = self.proc_flows.get_mut(&process) else {
+                    break;
+                };
+                if !Self::evict_lightest_flow(table) {
+                    break;
+                }
+            }
+            self.proc_flow_count = self.proc_flow_count.saturating_sub(1);
+            if self
+                .proc_flows
+                .get(&process)
+                .is_some_and(|table| table.is_empty())
+            {
+                self.proc_flows.remove(&process);
+            }
+        }
+    }
+
+    pub(crate) fn set_proc_flow_limits(&mut self, per_process: usize, global: usize) {
+        self.proc_flow_limit = ProcFlowLimit(per_process.max(1));
+        self.proc_flow_global_limit = ProcFlowGlobalLimit(global.max(1));
+    }
     pub(crate) fn record_process(
         &mut self,
         process: Option<ObservedProcess>,
@@ -1003,6 +1098,220 @@ mod tests {
         assert_eq!(right.flows[0].local_ip, right_ip);
         assert_eq!(right.flows[0].remote_ip, left_ip);
         assert_eq!((right.flows[0].recv, right.flows[0].sent), (40, 0));
+    }
+
+    fn exclusive_tcp_flow(local_port: u16, remote_port: u16, bytes: u64) -> Flow {
+        Flow {
+            direction: Direction::Outbound,
+            peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+            peer_port: Some(remote_port),
+            bytes,
+            local_socket: Some(LocalSocket {
+                ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                port: local_port,
+                protocol: TransportProtocol::Tcp,
+            }),
+            peer_local_socket: None,
+            domain: None,
+        }
+    }
+
+    fn curl(pid: u32, path: Option<&str>) -> ObservedProcess {
+        ObservedProcess {
+            pid,
+            name: Some(Arc::from("curl")),
+            path: path.map(Arc::from),
+        }
+    }
+
+    #[test]
+    fn proc_flow_limit_defaults_to_256() {
+        let mut stats = Stats::default();
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        for port in 1..=257u16 {
+            stats.record_flow_processes_at(
+                exclusive_tcp_flow(10_000, port, u64::from(port)),
+                Some(curl(7, None)),
+                None,
+                observed_at,
+            );
+        }
+        let ports = stats.snapshot(10).processes[0]
+            .flows
+            .iter()
+            .map(|flow| flow.remote_port)
+            .collect::<Vec<_>>();
+        assert_eq!(ports.len(), 256);
+        assert!(ports.contains(&257));
+        assert!(!ports.contains(&1));
+    }
+
+    #[test]
+    fn new_heavy_flow_evicts_the_lightest_per_process_row() {
+        let mut stats = Stats::default();
+        stats.set_proc_flow_limits(2, 1_000);
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 80, 10),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 81, 20),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 443, 100),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        let mut ports = stats.snapshot(10).processes[0]
+            .flows
+            .iter()
+            .map(|flow| flow.remote_port)
+            .collect::<Vec<_>>();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![81, 443]);
+    }
+
+    #[test]
+    fn accumulating_an_existing_five_tuple_does_not_evict() {
+        let mut stats = Stats::default();
+        stats.set_proc_flow_limits(2, 1_000);
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 80, 10),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 81, 20),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 80, 5),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        let flows = &stats.snapshot(10).processes[0].flows;
+        assert_eq!(flows.len(), 2);
+        let eighty = flows.iter().find(|flow| flow.remote_port == 80).unwrap();
+        assert_eq!(eighty.sent, 15);
+    }
+
+    #[test]
+    fn mosquito_after_full_heavies_only_sacrifices_the_lightest_heavy() {
+        let mut stats = Stats::default();
+        stats.set_proc_flow_limits(2, 1_000);
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 80, 100),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 443, 200),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 9, 1),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 10, 1),
+            Some(curl(7, None)),
+            None,
+            observed_at,
+        );
+        let mut ports = stats.snapshot(10).processes[0]
+            .flows
+            .iter()
+            .map(|flow| flow.remote_port)
+            .collect::<Vec<_>>();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![10, 443]);
+    }
+
+    #[test]
+    fn global_limit_evicts_from_the_process_with_the_most_rows() {
+        let mut stats = Stats::default();
+        stats.set_proc_flow_limits(10, 3);
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 80, 10),
+            Some(curl(1, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_001, 81, 10),
+            Some(curl(1, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_002, 82, 10),
+            Some(curl(2, None)),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_003, 83, 10),
+            Some(curl(2, None)),
+            None,
+            observed_at,
+        );
+        let snapshot = stats.snapshot(10);
+        let pid1 = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(1))
+            .unwrap();
+        let pid2 = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(2))
+            .unwrap();
+        assert_eq!(pid1.flows.len() + pid2.flows.len(), 3);
+        assert!(pid1.flows.len() <= 2);
+        assert!(pid2.flows.len() <= 2);
+    }
+
+    #[test]
+    fn same_pid_different_paths_keep_separate_connection_tables() {
+        let mut stats = Stats::default();
+        stats.set_proc_flow_limits(1, 1_000);
+        let observed_at = "2026-07-15T08:00:00Z".parse().unwrap();
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 80, 10),
+            Some(curl(7, Some("/old/curl"))),
+            None,
+            observed_at,
+        );
+        stats.record_flow_processes_at(
+            exclusive_tcp_flow(10_000, 443, 20),
+            Some(curl(7, Some("/new/curl"))),
+            None,
+            observed_at,
+        );
+        let snapshot = stats.snapshot(10);
+        assert_eq!(snapshot.processes.len(), 2);
+        for process in snapshot.processes.iter() {
+            assert_eq!(process.flows.len(), 1);
+        }
     }
 
     fn unique_ip(index: usize) -> IpAddr {

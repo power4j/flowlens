@@ -107,6 +107,7 @@ fn aggregate_loop_with_probe(
     snapshot_tx: SyncSender<Arc<TrafficSnapshot>>,
     proc_table: SharedProcTable,
     top_n: usize,
+    proc_flows: usize,
     snapshot_interval: Duration,
     probe: Option<ProcessProbe>,
     flow_table_entries: Option<Arc<AtomicU64>>,
@@ -117,6 +118,7 @@ fn aggregate_loop_with_probe(
     failure: Arc<OnceLock<PipelineError>>,
 ) {
     let mut stats = Stats::new_at(chrono::Utc::now());
+    stats.set_proc_flow_limits(proc_flows, crate::stats::MAX_PROC_FLOWS_TOTAL);
     let mut attributor = match probe {
         Some(probe) => PendingAttributor::with_probe(
             attribution::PENDING_ATTRIBUTION_WINDOW,
@@ -229,6 +231,7 @@ fn aggregate_loop(
         snapshot_tx,
         proc_table,
         top_n,
+        crate::stats::DEFAULT_PROC_FLOWS,
         snapshot_interval,
         None,
         None,
@@ -288,6 +291,7 @@ impl TrafficPipeline {
         mut source: CaptureSource,
         proc_table: SharedProcTable,
         top_n: usize,
+        proc_flows: usize,
         diagnostics_enabled: Arc<AtomicBool>,
         rank_window: Arc<AtomicU8>,
     ) -> io::Result<Self> {
@@ -304,6 +308,7 @@ impl TrafficPipeline {
             },
             proc_table,
             top_n,
+            proc_flows,
             Some(flow_table_entries),
             diagnostics_enabled,
             rank_window,
@@ -327,6 +332,7 @@ impl TrafficPipeline {
             next_flow,
             proc_table,
             top_n,
+            crate::stats::DEFAULT_PROC_FLOWS,
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
@@ -352,6 +358,7 @@ impl TrafficPipeline {
             next_flow,
             proc_table,
             top_n,
+            crate::stats::DEFAULT_PROC_FLOWS,
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
@@ -366,6 +373,7 @@ impl TrafficPipeline {
         next_flow: N,
         proc_table: SharedProcTable,
         top_n: usize,
+        proc_flows: usize,
         flow_table_entries: Option<Arc<AtomicU64>>,
         diagnostics_enabled: Arc<AtomicBool>,
         rank_window: Arc<AtomicU8>,
@@ -397,6 +405,7 @@ impl TrafficPipeline {
                     snapshot_tx,
                     proc_table,
                     top_n,
+                    proc_flows,
                     SNAPSHOT_INTERVAL,
                     Some(ProcessProbe::spawn()),
                     flow_table_entries,
@@ -1142,6 +1151,7 @@ mod tests {
             || Ok::<_, io::Error>(None),
             proc_table,
             10,
+            crate::stats::DEFAULT_PROC_FLOWS,
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU8::new(RankWindow::Cumulative.to_u8())),
