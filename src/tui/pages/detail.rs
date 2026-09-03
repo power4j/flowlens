@@ -219,80 +219,201 @@ pub(in crate::tui) fn draw_process_detail(
         .split(area);
     let (header_area, attribution_area, flow_area) = (chunks[0], chunks[1], chunks[2]);
 
+    let header_block = panel_block(
+        "proc",
+        "Process Details",
+        None,
+        palette::coral(),
+        palette::border(),
+        None,
+    );
+
     // Header: identity (left) + totals (right) on wide; stacked on compact.
-    let mut header_lines = vec![
-        Line::from(vec![
-            Span::raw("Name: "),
-            process_name_span(&process, usize::MAX),
-        ]),
-        Line::from(format!(
-            "PID: {}",
-            process
-                .pid()
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "-".to_string())
-        )),
-        Line::from(format!("Path: {}", process.path().unwrap_or("-"))),
-        Line::from(format!(
-            "Last seen: {}",
-            relative_last_seen(process.last_seen(), now)
-        )),
-    ];
     if !compact {
-        let header_block = panel_block(
-            "proc",
-            "Process Details",
-            None,
-            palette::coral(),
-            palette::border(),
-            None,
-        );
-        header_lines.push(Line::from(""));
-        header_lines.push(Line::from(format!("Recv: {}", human_bytes(process.recv))));
-        header_lines.push(Line::from(format!("Sent: {}", human_bytes(process.sent))));
-        header_lines.push(Line::from(format!(
-            "Total: {}",
-            human_bytes(process.total())
-        )));
+        let muted = Style::default().fg(palette::muted());
+        let value = Style::default().fg(palette::text());
+        let recv_fg = Style::default().fg(palette::inbound());
+        let sent_fg = Style::default().fg(palette::outbound());
+        let total_fg = Style::default().fg(palette::warn());
+        let row = |label: &str,
+                   ls: Style,
+                   val: String,
+                   vs: Style,
+                   right_label: &str,
+                   rls: Style,
+                   rval: String,
+                   rvs: Style|
+         -> Line<'static> {
+            Line::from(vec![
+                Span::styled(label.to_string(), ls),
+                Span::raw(" "),
+                Span::styled(val, vs),
+                Span::raw("     "),
+                Span::styled(right_label.to_string(), rls),
+                Span::raw(" "),
+                Span::styled(rval, rvs),
+            ])
+        };
+        let name = process.display_name().to_string();
+        let header_lines = vec![
+            row(
+                "Name:",
+                muted,
+                name,
+                value,
+                "Recv:",
+                muted,
+                human_bytes(process.recv),
+                recv_fg,
+            ),
+            row(
+                "PID:",
+                muted,
+                process
+                    .pid()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                value,
+                "Sent:",
+                muted,
+                human_bytes(process.sent),
+                sent_fg,
+            ),
+            row(
+                "Last seen:",
+                muted,
+                relative_last_seen(process.last_seen(), now),
+                value,
+                "Total:",
+                muted,
+                human_bytes(process.total()),
+                total_fg,
+            ),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Path: ", muted),
+                Span::styled(process.path().unwrap_or("-").to_string(), value),
+            ]),
+        ];
         f.render_widget(
             Paragraph::new(header_lines).block(header_block),
             header_area,
         );
     } else {
-        header_lines.push(Line::from(""));
-        header_lines.push(Line::from(format!("Recv: {}", human_bytes(process.recv))));
-        header_lines.push(Line::from(format!("Sent: {}", human_bytes(process.sent))));
-        header_lines.push(Line::from(format!(
-            "Total: {}",
-            human_bytes(process.total())
-        )));
-        let header_block = panel_block(
-            "proc",
-            "Process Details",
-            None,
-            palette::coral(),
-            palette::border(),
-            None,
-        );
+        let muted = Style::default().fg(palette::muted());
+        let value = Style::default().fg(palette::text());
+        let header_lines = vec![
+            Line::from(vec![
+                Span::raw("Name: "),
+                process_name_span(&process, usize::MAX),
+            ]),
+            Line::from(format!(
+                "PID: {}",
+                process
+                    .pid()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            )),
+            Line::from(format!(
+                "Last seen: {}",
+                relative_last_seen(process.last_seen(), now)
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Recv: ", muted),
+                Span::styled(human_bytes(process.recv), value),
+            ]),
+            Line::from(vec![
+                Span::styled("Sent: ", muted),
+                Span::styled(human_bytes(process.sent), value),
+            ]),
+            Line::from(vec![
+                Span::styled("Total: ", muted),
+                Span::styled(human_bytes(process.total()), value),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Path: ", muted),
+                Span::styled(process.path().unwrap_or("-").to_string(), value),
+            ]),
+        ];
         f.render_widget(
             Paragraph::new(header_lines).block(header_block),
             header_area,
         );
     }
 
-    // Attribution (lifetime): exclusive | shared, each with a right-aligned Total.
+    // Attribution (lifetime): exclusive | shared side by side on wide.
+    let selected = if snapshot.ranking.window == RankWindow::Cumulative {
+        process.selected
+    } else {
+        process.rank
+    };
     let mut attr_lines = vec![Line::from(Span::styled(
         "Attribution (lifetime)",
         Style::default()
             .fg(palette::strong())
             .add_modifier(Modifier::BOLD),
     ))];
-    attr_lines.extend(process_attribution_detail_lines(&process, !compact));
-    let selected = if snapshot.ranking.window == RankWindow::Cumulative {
-        process.selected
+    let excl = &process.attribution.exclusive;
+    let shr = &process.attribution.shared;
+    if !compact {
+        let muted = Style::default().fg(palette::muted());
+        let recv_fg = Style::default().fg(palette::inbound());
+        let sent_fg = Style::default().fg(palette::outbound());
+        let total_fg = Style::default().fg(palette::warn());
+        let mk = |title: &'static str, t: crate::stats::ProcTraffic| -> Vec<Line<'static>> {
+            let tl = human_bytes(t.total());
+            let half_n = 28usize;
+            vec![
+                Line::from(vec![
+                    Span::styled("  ", muted),
+                    Span::styled(
+                        title,
+                        Style::default()
+                            .fg(palette::text())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{:>width$}", tl, width = half_n - title.chars().count() - 2),
+                        total_fg,
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("    ├ Recv: ", muted),
+                    Span::styled(human_bytes(t.recv), recv_fg),
+                ]),
+                Line::from(vec![
+                    Span::styled("    └ Sent: ", muted),
+                    Span::styled(human_bytes(t.sent), sent_fg),
+                ]),
+            ]
+        };
+        let left_lines = mk("Exclusive:", *excl);
+        let right_lines = mk("Shared:", *shr);
+        let n = left_lines.len().max(right_lines.len());
+        for i in 0..n {
+            let left = left_lines.get(i).cloned().unwrap_or_else(|| Line::from(""));
+            let right = right_lines
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| Line::from(""));
+            attr_lines.push(Line::from(vec![
+                Span::raw(left.to_string()),
+                Span::raw("  │  "),
+                Span::raw(right.to_string()),
+            ]));
+        }
+        attr_lines.push(Line::from(""));
+        attr_lines.push(Line::from(Span::styled(
+            "  ─────────────────────────────────────────",
+            Style::default().fg(palette::muted()),
+        )));
+        attr_lines.push(Line::from(""));
     } else {
-        process.rank
-    };
+        attr_lines.extend(process_attribution_detail_lines(&process, !compact));
+        attr_lines.push(Line::from(""));
+    }
     attr_lines.push(Line::from(format!(
         "Selected ({}): {}  Recv {}  Sent {}",
         ranking_window_indicator(snapshot),
@@ -352,7 +473,6 @@ pub(in crate::tui) fn draw_process_detail(
     let tbl = flow_table(&process, flow_block, compact);
     f.render_stateful_widget(tbl, flow_area, &mut ratatui_state(len, scroll));
 }
-
 pub(in crate::tui) fn flow_table(
     process: &ProcessSnapshot,
     block: Block<'static>,
@@ -861,13 +981,13 @@ mod tests {
         let lines = rendered_lines(&terminal);
         let rendered = lines.join("\n");
         assert!(rendered.contains("Process Details"));
-        assert!(rendered.contains("Name: payment-worker"));
+        assert!(rendered.contains("payment-worker"));
         assert!(rendered.contains("PID: 7"));
         assert!(rendered.contains("Recv: 1.50 KB"));
         assert!(rendered.contains("Sent: 3.00 KB"));
         assert!(rendered.contains("Total: 4.50 KB"));
         assert!(rendered.contains("Attribution (lifetime)"));
-        assert!(rendered.contains("Exclusive: 3.00 KB"));
+        assert!(rendered.contains("Exclusive:") && rendered.contains("3.00 KB"));
         assert!(rendered.contains("Recv: 1.00 KB"));
         assert!(rendered.contains("Sent: 2.00 KB"));
         assert!(rendered.contains("Selected (total): 768 B  Recv 256 B  Sent 512 B"));
@@ -899,8 +1019,8 @@ mod tests {
         let path_pos = rendered.find("Path:").expect("path field");
         let last_seen_pos = rendered.find("Last seen:").expect("last seen field");
         let recv_pos = rendered.find("Recv: ").expect("recv field");
-        assert!(path_pos < last_seen_pos, "Last seen should follow Path");
-        assert!(last_seen_pos < recv_pos, "Last seen should precede Recv");
+        assert!(recv_pos < last_seen_pos, "Recv should precede Last seen");
+        assert!(last_seen_pos < path_pos, "Last seen should precede Path");
         for line in lines {
             let field_count = [
                 "Name:",
@@ -914,7 +1034,7 @@ mod tests {
             .iter()
             .filter(|field| line.contains(**field))
             .count();
-            assert!(field_count <= 1, "detail fields overlap: {line}");
+            assert!(field_count <= 2, "detail fields overlap: {line}");
         }
     }
 
