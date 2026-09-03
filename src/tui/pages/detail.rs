@@ -533,18 +533,20 @@ pub(in crate::tui) fn flow_table(
     compact: bool,
 ) -> Table<'static> {
     let inner_width = area.width.saturating_sub(2) as usize;
-    let spacing = 5usize;
-    let (headers, port_src_width, port_dest_width, protocol_width, bytes_width, addr_min): (
-        [&str; 6],
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-    ) = if compact {
+    let spacing = 6usize;
+    let (
+        headers,
+        port_src_width,
+        endpoint_gap_width,
+        port_dest_width,
+        protocol_width,
+        bytes_width,
+        addr_min,
+    ): ([&str; 7], usize, usize, usize, usize, usize, usize) = if compact {
         (
-            ["Src", "Port", "Dest", "Port", "Proto", "Bytes"],
+            ["Src", "Port", "", "Dest", "Port", "Proto", "Bytes"],
             5,
+            0,
             5,
             5,
             9,
@@ -555,19 +557,26 @@ pub(in crate::tui) fn flow_table(
             [
                 "Address (Src)",
                 "Port (Src)",
+                "",
                 "Address (Dest)",
                 "Port (Dest)",
                 "Protocol",
                 "Bytes",
             ],
             10,
+            2,
             11,
             8,
             11,
             14,
         )
     };
-    let fixed_width = port_src_width + port_dest_width + protocol_width + bytes_width + spacing;
+    let fixed_width = port_src_width
+        + endpoint_gap_width
+        + port_dest_width
+        + protocol_width
+        + bytes_width
+        + spacing;
     let address_total = inner_width
         .saturating_sub(fixed_width)
         .max(addr_min.saturating_mul(2));
@@ -577,7 +586,7 @@ pub(in crate::tui) fn flow_table(
     let protocol_width = protocol_width.max(1);
     let rows = if process.flows.is_empty() {
         vec![
-            Row::new(vec!["No traffic observed", "", "", "", "", ""])
+            Row::new(vec!["No traffic observed", "", "", "", "", "", ""])
                 .style(Style::default().fg(palette::muted())),
         ]
     } else {
@@ -585,9 +594,9 @@ pub(in crate::tui) fn flow_table(
             .flows
             .iter()
             .map(|flow| {
-                let protocol = match flow.protocol {
-                    crate::capture::TransportProtocol::Tcp => "TCP",
-                    crate::capture::TransportProtocol::Udp => "UDP",
+                let (protocol, protocol_color) = match flow.protocol {
+                    crate::capture::TransportProtocol::Tcp => ("TCP", palette::outbound()),
+                    crate::capture::TransportProtocol::Udp => ("UDP", palette::violet()),
                 };
                 Row::new(vec![
                     Cell::from(truncate(
@@ -600,6 +609,7 @@ pub(in crate::tui) fn flow_table(
                         width = port_src_width
                     ))
                     .style(Style::default().fg(palette::muted())),
+                    Cell::from(""),
                     Cell::from(truncate(
                         &flow.remote_ip.to_string(),
                         dest_addr_width.saturating_sub(1),
@@ -611,7 +621,7 @@ pub(in crate::tui) fn flow_table(
                     ))
                     .style(Style::default().fg(palette::muted())),
                     Cell::from(format!("{protocol:^protocol_width$}"))
-                        .style(Style::default().fg(palette::accent())),
+                        .style(Style::default().fg(protocol_color)),
                     Cell::from(format!(
                         "{:>width$}",
                         human_bytes(flow.total()),
@@ -627,6 +637,7 @@ pub(in crate::tui) fn flow_table(
         [
             Constraint::Length(src_addr_width as u16),
             Constraint::Length(port_src_width as u16),
+            Constraint::Length(endpoint_gap_width as u16),
             Constraint::Length(dest_addr_width as u16),
             Constraint::Length(port_dest_width as u16),
             Constraint::Length(protocol_width as u16),
@@ -705,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn process_details_render_exclusive_connection_rows_as_lifetime_bytes() {
+    fn process_details_render_connection_rows_with_grouped_columns_and_protocol_colors() {
         let mut process = ProcessSnapshot::attributed(
             7,
             Some(Arc::from("curl")),
@@ -714,16 +725,28 @@ mod tests {
             40,
             60,
         );
-        process.flows = vec![ProcFlowSnapshot {
-            local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
-            local_port: 49_152,
-            remote_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
-            remote_port: 443,
-            protocol: TransportProtocol::Tcp,
-            recv: 0,
-            sent: 40,
-            last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
-        }]
+        process.flows = vec![
+            ProcFlowSnapshot {
+                local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                local_port: 49_152,
+                remote_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+                remote_port: 443,
+                protocol: TransportProtocol::Tcp,
+                recv: 0,
+                sent: 40,
+                last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+            },
+            ProcFlowSnapshot {
+                local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                local_port: 53_535,
+                remote_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)),
+                remote_port: 53,
+                protocol: TransportProtocol::Udp,
+                recv: 60,
+                sent: 0,
+                last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+            },
+        ]
         .into();
         let snapshot = TrafficSnapshot {
             process_data_fresh: true,
@@ -751,7 +774,8 @@ mod tests {
                 )
             })
             .unwrap();
-        let rendered = rendered_lines(&terminal).join("\n");
+        let lines = rendered_lines(&terminal);
+        let rendered = lines.join("\n");
         assert!(rendered.contains("IP Statistics (lifetime)"));
         for header in [
             "Address (Src)",
@@ -765,12 +789,44 @@ mod tests {
         }
         assert!(!rendered.contains("Port ( Address"));
         assert!(!rendered.contains("Port ( Protocol"));
+        let header_line = lines
+            .iter()
+            .find(|line| line.contains("Port (Src)"))
+            .expect("flow table header");
+        let src_port_end = header_line.find("Port (Src)").unwrap() + "Port (Src)".len();
+        let dest_address_start = header_line.find("Address (Dest)").unwrap();
+        assert_eq!(
+            &header_line[src_port_end..dest_address_start],
+            "    ",
+            "source and destination endpoint groups should have a four-column gap"
+        );
         assert!(rendered.contains("192.0.2.10"));
         assert!(rendered.contains("198.51.100.5"));
+        assert!(rendered.contains("203.0.113.8"));
         assert!(rendered.contains("TCP"));
+        assert!(rendered.contains("UDP"));
         assert!(rendered.contains("40 B"));
         assert!(!rendered.contains("40 B/s"));
         assert!(!rendered.contains("No traffic observed"));
+
+        let position = |needle: &str| {
+            let (y, line) = lines
+                .iter()
+                .enumerate()
+                .find(|(_, line)| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing rendered text: {needle}"));
+            let byte_x = line.find(needle).unwrap();
+            (line[..byte_x].chars().count() as u16, y as u16)
+        };
+        let buffer = terminal.backend().buffer();
+        let tcp = buffer[position("TCP")].fg;
+        let udp = buffer[position("UDP")].fg;
+        let bytes = buffer[position("40 B")].fg;
+        assert_eq!(tcp, palette::outbound());
+        assert_eq!(udp, palette::violet());
+        assert_ne!(tcp, udp);
+        assert_ne!(tcp, bytes);
+        assert_ne!(udp, bytes);
     }
 
     #[test]
