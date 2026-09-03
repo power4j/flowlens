@@ -212,8 +212,8 @@ pub(in crate::tui) fn draw_process_detail(
     let chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Min(10),
-            Constraint::Min(14),
+            Constraint::Length(if compact { 11 } else { 7 }),
+            Constraint::Length(if compact { 12 } else { 13 }),
             Constraint::Fill(1),
         ])
         .split(area);
