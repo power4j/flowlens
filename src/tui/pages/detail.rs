@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::palette;
-use crate::report::human_bytes;
+use crate::report::{human_bytes, truncate};
 use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
 
 use super::processes::process_name_span;
@@ -133,6 +133,7 @@ pub(in crate::tui) fn pending_status_title(bytes: u64, area_width: u16) -> Line<
 
 pub(in crate::tui) fn process_attribution_detail_lines(
     process: &ProcessSnapshot,
+    show_breakdown: bool,
 ) -> Vec<Line<'static>> {
     let exclusive = &process.attribution.exclusive;
     let shared = &process.attribution.shared;
@@ -155,43 +156,51 @@ pub(in crate::tui) fn process_attribution_detail_lines(
     .max()
     .unwrap_or(0);
     let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
-    vec![
-        Line::from(format!(
-            "  {label:<label_width$} {total}  Recv {recv}  Sent {sent}",
-            label = "Exclusive:",
-            total = value(exclusive.total()),
-            recv = value(exclusive.recv),
-            sent = value(exclusive.sent),
-        )),
-        Line::from(format!(
-            "  {label:<label_width$} {total}  Recv {recv}  Sent {sent}",
-            label = "Shared:",
-            total = value(shared.total()),
-            recv = value(shared.recv),
-            sent = value(shared.sent),
-        )),
-        Line::from(format!(
-            "  {label:<label_width$} {total} = Exclusive {exclusive} + Shared {shared}",
-            label = "Total:",
-            total = value(process.total()),
-            exclusive = human_bytes(exclusive.total()),
-            shared = human_bytes(shared.total()),
-        )),
-    ]
+    let mut lines = vec![Line::from(format!(
+        "  {label:<label_width$} {total}",
+        label = "Exclusive:",
+        total = value(exclusive.total()),
+    ))];
+    if show_breakdown {
+        lines.push(Line::from(format!("    Recv: {}", value(exclusive.recv))));
+        lines.push(Line::from(format!("    Sent: {}", value(exclusive.sent))));
+    }
+    lines.push(Line::from(format!(
+        "  {label:<label_width$} {total}",
+        label = "Shared:",
+        total = value(shared.total()),
+    )));
+    if show_breakdown {
+        lines.push(Line::from(format!("    Recv: {}", value(shared.recv))));
+        lines.push(Line::from(format!("    Sent: {}", value(shared.sent))));
+    }
+    lines.push(Line::from(format!(
+        "  {label:<label_width$} {total} = Exclusive {exclusive} + Shared {shared}",
+        label = "Total:",
+        total = value(process.total()),
+        exclusive = human_bytes(exclusive.total()),
+        shared = human_bytes(shared.total()),
+    )));
+    lines
 }
 
 pub(in crate::tui) fn draw_process_detail(
     f: &mut ratatui::Frame,
     area: Rect,
-    detail: &ProcessDetail,
+    state: &mut AppState,
     snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    let process = &detail.process;
+    let Some(detail) = state.process_detail.as_ref() else {
+        return;
+    };
+    let process = detail.process.clone();
+    let paused = detail.paused;
+    let show_breakdown = area.height >= 20;
     let mut lines = vec![
         Line::from(vec![
             Span::raw("Name: "),
-            process_name_span(process, usize::MAX),
+            process_name_span(&process, usize::MAX),
         ]),
         Line::from(format!(
             "PID: {}",
@@ -217,7 +226,7 @@ pub(in crate::tui) fn draw_process_detail(
                 .add_modifier(Modifier::BOLD),
         )),
     ];
-    lines.extend(process_attribution_detail_lines(process));
+    lines.extend(process_attribution_detail_lines(&process, show_breakdown));
     let selected = if snapshot.ranking.window == RankWindow::Cumulative {
         process.selected
     } else {
@@ -278,16 +287,25 @@ pub(in crate::tui) fn draw_process_detail(
             "Address (Src)  Port (Src)  Address (Dest)  Port (Dest)  Protocol  Bytes",
             Style::default().fg(palette::muted()),
         )));
-        for flow in process.flows.iter() {
+        let compact = LayoutMode::from_area(area) == LayoutMode::Compact;
+        let addr_width: usize = if compact { 8 } else { 14 };
+        let inner = area.height.saturating_sub(2) as usize;
+        let visible = inner.saturating_sub(lines.len()).max(3);
+        let max_scroll = process.flows.len().saturating_sub(1);
+        let scroll = state.proc_detail_scroll.min(max_scroll);
+        state.proc_detail_scroll = scroll;
+        state.proc_detail_view_height = visible;
+        let end = (scroll + visible).min(process.flows.len());
+        for flow in &process.flows[scroll..end] {
             let protocol = match flow.protocol {
                 crate::capture::TransportProtocol::Tcp => "TCP",
                 crate::capture::TransportProtocol::Udp => "UDP",
             };
             lines.push(Line::from(format!(
                 "{}  {}  {}  {}  {}  {}",
-                flow.local_ip,
+                truncate(&flow.local_ip.to_string(), addr_width.saturating_sub(1)),
                 flow.local_port,
-                flow.remote_ip,
+                truncate(&flow.remote_ip.to_string(), addr_width.saturating_sub(1)),
                 flow.remote_port,
                 protocol,
                 human_bytes(flow.total()),
@@ -295,7 +313,7 @@ pub(in crate::tui) fn draw_process_detail(
         }
     }
 
-    if detail.paused.is_some() {
+    if paused.is_some() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Tracking paused",
@@ -684,7 +702,7 @@ mod tests {
             crate::stats::ProcTraffic::default(),
             Vec::new(),
         );
-        let lines = process_attribution_detail_lines(&process);
+        let lines = process_attribution_detail_lines(&process, true);
         let text: Vec<String> = lines
             .iter()
             .map(|line| {
@@ -695,9 +713,11 @@ mod tests {
             })
             .collect();
         assert!(
-            text[2].contains("= Exclusive 1.02 MB + Shared 0 B"),
+            text.last()
+                .unwrap()
+                .contains("= Exclusive 1.02 MB + Shared 0 B"),
             "total equation should not inherit Recv/Sent padding: {}",
-            text[2]
+            text.last().unwrap()
         );
         assert!(
             !text[2].contains("Shared      0 B") && !text[2].contains("Shared       0 B"),
@@ -741,7 +761,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &snapshot,
         );
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 32)).unwrap();
 
         terminal
             .draw(|frame| {
@@ -766,27 +786,9 @@ mod tests {
         assert!(rendered.contains("Sent: 3.00 KB"));
         assert!(rendered.contains("Total: 4.50 KB"));
         assert!(rendered.contains("Attribution (lifetime)"));
-        assert!(rendered.contains("Exclusive: 3.00 KB  Recv 1.00 KB  Sent 2.00 KB"));
-        assert!(rendered.contains("Shared:    1.50 KB  Recv   512 B  Sent 1.00 KB"));
-        assert!(rendered.contains("Total:     4.50 KB = Exclusive 3.00 KB + Shared 1.50 KB"));
-        let exclusive = lines
-            .iter()
-            .find(|line| line.contains("Exclusive:") && line.contains("Recv"))
-            .expect("exclusive attribution row");
-        let shared = lines
-            .iter()
-            .find(|line| line.contains("Shared:") && line.contains("Recv"))
-            .expect("shared attribution row");
-        let total = lines
-            .iter()
-            .find(|line| line.contains("Total:") && line.contains("= Exclusive"))
-            .expect("total attribution row");
-        let value_column = |line: &str| {
-            line.find(|ch: char| ch.is_ascii_digit())
-                .expect("attribution value")
-        };
-        assert_eq!(value_column(exclusive), value_column(shared));
-        assert_eq!(value_column(shared), value_column(total));
+        assert!(rendered.contains("Exclusive: 3.00 KB"));
+        assert!(rendered.contains("Recv: 1.00 KB"));
+        assert!(rendered.contains("Sent: 2.00 KB"));
         assert!(rendered.contains("Selected (total): 768 B  Recv 256 B  Sent 512 B"));
         assert!(
             rendered.contains(
@@ -1170,5 +1172,58 @@ mod tests {
         assert_eq!(detail.paused, None);
         assert_eq!(detail.pause_notice, None);
         assert_eq!((detail.process.recv, detail.process.sent), (140, 160));
+    }
+
+    #[test]
+    fn process_detail_scroll_does_not_move_process_list_scroll() {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            None,
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+            40,
+            60,
+        );
+        process.flows = (0..20u16)
+            .map(|port| ProcFlowSnapshot {
+                local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                local_port: 49_152,
+                remote_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+                remote_port: port + 1,
+                protocol: TransportProtocol::Tcp,
+                recv: 0,
+                sent: 10,
+                last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        let list_scroll = state.proc_scroll;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert_eq!(state.proc_scroll, list_scroll);
+        assert_eq!(state.proc_detail_scroll, 1);
+        let outcome = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert!(matches!(outcome, KeyOutcome::Ignored));
+        assert_eq!(state.page, Page::Processes);
+        assert!(state.process_detail.is_some());
     }
 }

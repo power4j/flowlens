@@ -126,7 +126,7 @@ pub(super) fn draw_with_interfaces_at(
     match state.page {
         Page::Overview => draw_overview(f, body, snapshot, Some(&interface_label), mode, now),
         Page::Processes => match state.process_detail.as_ref() {
-            Some(detail) => draw_process_detail(f, body, detail, snapshot, now),
+            Some(_) => draw_process_detail(f, body, state, snapshot, now),
             None => draw_processes(f, body, state, snapshot, mode, now),
         },
         Page::Ips => draw_ips(f, body, state, snapshot, mode, now),
@@ -435,7 +435,7 @@ pub(super) fn draw_status_bar(
         let hint = match (detail.pause_notice, detail.paused) {
             (Some(reason), _) => format!("{}  Esc:back  q:quit", reason.message()),
             (None, Some(_)) => "Tracking paused  Esc:back  q:quit".to_string(),
-            (None, None) => "Esc:back  q:quit".to_string(),
+            (None, None) => "j/k scroll  Esc:back  q:quit".to_string(),
         };
         f.render_widget(
             Paragraph::new(format!(" {hint} ")).style(Style::default().fg(palette::muted())),
