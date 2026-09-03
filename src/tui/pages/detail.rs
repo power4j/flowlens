@@ -278,6 +278,8 @@ pub(in crate::tui) fn draw_process_detail(
             .add_modifier(Modifier::BOLD),
     )));
     if process.flows.is_empty() {
+        state.proc_detail_scroll = 0;
+        state.proc_detail_view_height = 1;
         lines.push(Line::from(Span::styled(
             "No traffic observed",
             Style::default().fg(palette::muted()),
