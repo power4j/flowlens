@@ -1,12 +1,12 @@
 //! Process detail page: attribution breakdown.
 
 use crate::palette;
-use crate::report::human_bytes;
+use crate::report::{human_bytes, truncate};
 use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
 use ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::processes::process_name_span;
 use crate::tui::layout::*;
@@ -195,6 +195,53 @@ pub(in crate::tui) fn process_attribution_detail_lines(
     lines
 }
 
+fn render_attribution_column(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    title: &'static str,
+    traffic: crate::stats::ProcTraffic,
+) {
+    let rows = Layout::default()
+        .direction(LayoutDir::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    let fields = [
+        (
+            title,
+            human_bytes(traffic.total()),
+            Style::default()
+                .fg(palette::text())
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(palette::warn()),
+        ),
+        (
+            "  ├ Recv:",
+            human_bytes(traffic.recv),
+            Style::default().fg(palette::muted()),
+            Style::default().fg(palette::inbound()),
+        ),
+        (
+            "  └ Sent:",
+            human_bytes(traffic.sent),
+            Style::default().fg(palette::muted()),
+            Style::default().fg(palette::outbound()),
+        ),
+    ];
+    for (row, (label, value, label_style, value_style)) in rows.iter().zip(fields) {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(label, label_style),
+                Span::raw(" "),
+                Span::styled(value, value_style),
+            ])),
+            *row,
+        );
+    }
+}
 pub(in crate::tui) fn draw_process_detail(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -228,76 +275,72 @@ pub(in crate::tui) fn draw_process_detail(
         None,
     );
 
-    // Header: identity (left) + totals (right) on wide; stacked on compact.
+    // Header: lay out regions first, then render each field into its region.
     if !compact {
         let muted = Style::default().fg(palette::muted());
         let value = Style::default().fg(palette::text());
         let recv_fg = Style::default().fg(palette::inbound());
         let sent_fg = Style::default().fg(palette::outbound());
         let total_fg = Style::default().fg(palette::warn());
-        let row = |label: &str,
-                   ls: Style,
-                   val: String,
-                   vs: Style,
-                   right_label: &str,
-                   rls: Style,
-                   rval: String,
-                   rvs: Style|
-         -> Line<'static> {
+        let inner = header_block.inner(header_area);
+        f.render_widget(header_block, header_area);
+        let rows = Layout::default()
+            .direction(LayoutDir::Vertical)
+            .constraints([Constraint::Fill(1), Constraint::Length(1)])
+            .split(inner);
+        let columns = Layout::default()
+            .direction(LayoutDir::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+
+        let left = vec![
             Line::from(vec![
-                Span::styled(label.to_string(), ls),
-                Span::raw(" "),
-                Span::styled(val, vs),
-                Span::raw("     "),
-                Span::styled(right_label.to_string(), rls),
-                Span::raw(" "),
-                Span::styled(rval, rvs),
-            ])
-        };
-        let name = process.display_name().to_string();
-        let header_lines = vec![
-            row(
-                "Name:",
-                muted,
-                name,
-                value,
-                "Recv:",
-                muted,
-                human_bytes(process.recv),
-                recv_fg,
-            ),
-            row(
-                "PID:",
-                muted,
-                process
-                    .pid()
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                value,
-                "Sent:",
-                muted,
-                human_bytes(process.sent),
-                sent_fg,
-            ),
-            row(
-                "Last seen:",
-                muted,
-                relative_last_seen(process.last_seen(), now),
-                value,
-                "Total:",
-                muted,
-                human_bytes(process.total()),
-                total_fg,
-            ),
-            Line::from(""),
+                Span::styled("Name: ", muted),
+                process_name_span(&process, columns[0].width.saturating_sub(6) as usize),
+            ]),
             Line::from(vec![
-                Span::styled("Path: ", muted),
-                Span::styled(process.path().unwrap_or("-").to_string(), value),
+                Span::styled("PID: ", muted),
+                Span::styled(
+                    process
+                        .pid()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    value,
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Last seen: ", muted),
+                Span::styled(relative_last_seen(process.last_seen(), now), value),
             ]),
         ];
+        let right = vec![
+            Line::from(vec![
+                Span::styled("Recv: ", muted),
+                Span::styled(human_bytes(process.recv), recv_fg),
+            ]),
+            Line::from(vec![
+                Span::styled("Sent: ", muted),
+                Span::styled(human_bytes(process.sent), sent_fg),
+            ]),
+            Line::from(vec![
+                Span::styled("Total: ", muted),
+                Span::styled(human_bytes(process.total()), total_fg),
+            ]),
+        ];
+        f.render_widget(Paragraph::new(left), columns[0]);
+        f.render_widget(Paragraph::new(right), columns[1]);
         f.render_widget(
-            Paragraph::new(header_lines).block(header_block),
-            header_area,
+            Paragraph::new(Line::from(vec![
+                Span::styled("Path: ", muted),
+                Span::styled(
+                    truncate(
+                        process.path().unwrap_or("-"),
+                        inner.width.saturating_sub(6) as usize,
+                    ),
+                    value,
+                ),
+            ])),
+            rows[1],
         );
     } else {
         let muted = Style::default().fg(palette::muted());
@@ -343,106 +386,14 @@ pub(in crate::tui) fn draw_process_detail(
         );
     }
 
-    // Attribution (lifetime): exclusive | shared side by side on wide.
+    // Attribution: split the panel into title, breakdown, divider, and summary regions.
     let selected = if snapshot.ranking.window == RankWindow::Cumulative {
         process.selected
     } else {
         process.rank
     };
-    let mut attr_lines = vec![Line::from(Span::styled(
-        "Attribution (lifetime)",
-        Style::default()
-            .fg(palette::strong())
-            .add_modifier(Modifier::BOLD),
-    ))];
     let excl = &process.attribution.exclusive;
     let shr = &process.attribution.shared;
-    if !compact {
-        let muted = Style::default().fg(palette::muted());
-        let recv_fg = Style::default().fg(palette::inbound());
-        let sent_fg = Style::default().fg(palette::outbound());
-        let total_fg = Style::default().fg(palette::warn());
-        let mk = |title: &'static str, t: crate::stats::ProcTraffic| -> Vec<Line<'static>> {
-            let tl = human_bytes(t.total());
-            let half_n = 28usize;
-            vec![
-                Line::from(vec![
-                    Span::styled("  ", muted),
-                    Span::styled(
-                        title,
-                        Style::default()
-                            .fg(palette::text())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{:>width$}", tl, width = half_n - title.chars().count() - 2),
-                        total_fg,
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("    ├ Recv: ", muted),
-                    Span::styled(human_bytes(t.recv), recv_fg),
-                ]),
-                Line::from(vec![
-                    Span::styled("    └ Sent: ", muted),
-                    Span::styled(human_bytes(t.sent), sent_fg),
-                ]),
-            ]
-        };
-        let left_lines = mk("Exclusive:", *excl);
-        let right_lines = mk("Shared:", *shr);
-        let n = left_lines.len().max(right_lines.len());
-        for i in 0..n {
-            let left = left_lines.get(i).cloned().unwrap_or_else(|| Line::from(""));
-            let right = right_lines
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| Line::from(""));
-            attr_lines.push(Line::from(vec![
-                Span::raw(left.to_string()),
-                Span::raw("  │  "),
-                Span::raw(right.to_string()),
-            ]));
-        }
-        attr_lines.push(Line::from(""));
-        attr_lines.push(Line::from(Span::styled(
-            "  ─────────────────────────────────────────",
-            Style::default().fg(palette::muted()),
-        )));
-        attr_lines.push(Line::from(""));
-    } else {
-        attr_lines.extend(process_attribution_detail_lines(&process, !compact));
-        attr_lines.push(Line::from(""));
-    }
-    attr_lines.push(Line::from(format!(
-        "Selected ({}): {}  Recv {}  Sent {}",
-        ranking_window_indicator(snapshot),
-        format_rank_value(snapshot, selected.total()),
-        format_rank_value(snapshot, selected.recv),
-        format_rank_value(snapshot, selected.sent)
-    )));
-    attr_lines.push(Line::from(format!(
-        "Rank ({}): {}  Recv {}  Sent {}",
-        ranking_window_indicator(snapshot),
-        format_rank_value(snapshot, process.rank.total()),
-        format_rank_value(snapshot, process.rank.recv),
-        format_rank_value(snapshot, process.rank.sent)
-    )));
-    attr_lines.push(Line::from(
-        "Shared traffic is included in Total and may appear in multiple processes.",
-    ));
-    attr_lines.push(Line::from(Span::styled(
-        "  Attr: E = exclusive only, M = mixed (includes shared)",
-        Style::default().fg(palette::muted()),
-    )));
-    if paused.is_some() {
-        attr_lines.push(Line::from(Span::styled(
-            "Tracking paused",
-            Style::default()
-                .fg(palette::warn())
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
     let attr_block = panel_block(
         "attr",
         "Attribution",
@@ -451,10 +402,112 @@ pub(in crate::tui) fn draw_process_detail(
         palette::border(),
         None,
     );
-    f.render_widget(
-        Paragraph::new(attr_lines).block(attr_block),
-        attribution_area,
-    );
+    if !compact {
+        let inner = attr_block.inner(attribution_area);
+        f.render_widget(attr_block, attribution_area);
+        let rows = Layout::default()
+            .direction(LayoutDir::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .split(inner);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Attribution (lifetime)",
+                Style::default()
+                    .fg(palette::strong())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            rows[0],
+        );
+        let columns = Layout::default()
+            .direction(LayoutDir::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[1]);
+        render_attribution_column(f, columns[0], "Exclusive:", *excl);
+        render_attribution_column(f, columns[1], "Shared:", *shr);
+        f.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(palette::muted())),
+            rows[2],
+        );
+
+        let mut summary_lines = vec![
+            Line::from(format!(
+                "Selected ({}): {}  Recv {}  Sent {}",
+                ranking_window_indicator(snapshot),
+                format_rank_value(snapshot, selected.total()),
+                format_rank_value(snapshot, selected.recv),
+                format_rank_value(snapshot, selected.sent)
+            )),
+            Line::from(format!(
+                "Rank ({}): {}  Recv {}  Sent {}",
+                ranking_window_indicator(snapshot),
+                format_rank_value(snapshot, process.rank.total()),
+                format_rank_value(snapshot, process.rank.recv),
+                format_rank_value(snapshot, process.rank.sent)
+            )),
+            Line::from("Shared traffic is included in Total and may appear in multiple processes."),
+            Line::from(Span::styled(
+                "Attr: E = exclusive only, M = mixed (includes shared)",
+                Style::default().fg(palette::muted()),
+            )),
+        ];
+        if paused.is_some() {
+            summary_lines.push(Line::from(Span::styled(
+                "Tracking paused",
+                Style::default()
+                    .fg(palette::warn())
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        f.render_widget(Paragraph::new(summary_lines), rows[3]);
+    } else {
+        let mut attr_lines = vec![Line::from(Span::styled(
+            "Attribution (lifetime)",
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        ))];
+        attr_lines.extend(process_attribution_detail_lines(&process, true));
+        attr_lines.push(Line::from(format!(
+            "Selected ({}): {}  Recv {}  Sent {}",
+            ranking_window_indicator(snapshot),
+            format_rank_value(snapshot, selected.total()),
+            format_rank_value(snapshot, selected.recv),
+            format_rank_value(snapshot, selected.sent)
+        )));
+        attr_lines.push(Line::from(format!(
+            "Rank ({}): {}  Recv {}  Sent {}",
+            ranking_window_indicator(snapshot),
+            format_rank_value(snapshot, process.rank.total()),
+            format_rank_value(snapshot, process.rank.recv),
+            format_rank_value(snapshot, process.rank.sent)
+        )));
+        attr_lines.push(Line::from(
+            "Shared traffic is included in Total and may appear in multiple processes.",
+        ));
+        attr_lines.push(Line::from(Span::styled(
+            "Attr: E = exclusive only, M = mixed (includes shared)",
+            Style::default().fg(palette::muted()),
+        )));
+        if paused.is_some() {
+            attr_lines.push(Line::from(Span::styled(
+                "Tracking paused",
+                Style::default()
+                    .fg(palette::warn())
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        f.render_widget(
+            Paragraph::new(attr_lines).block(attr_block),
+            attribution_area,
+        );
+    }
 
     // IP Statistics: a real table.
     let flow_block = panel_block(
@@ -470,14 +523,58 @@ pub(in crate::tui) fn draw_process_detail(
     let scroll = state.proc_detail_scroll.min(max_scroll);
     state.proc_detail_scroll = scroll;
     state.proc_detail_view_height = (flow_area.height.saturating_sub(2) as usize).max(1);
-    let tbl = flow_table(&process, flow_block, compact);
+    let tbl = flow_table(&process, flow_block, flow_area, compact);
     f.render_stateful_widget(tbl, flow_area, &mut ratatui_state(len, scroll));
 }
 pub(in crate::tui) fn flow_table(
     process: &ProcessSnapshot,
     block: Block<'static>,
+    area: Rect,
     compact: bool,
 ) -> Table<'static> {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let spacing = 5usize;
+    let (headers, port_src_width, port_dest_width, protocol_width, bytes_width, addr_min): (
+        [&str; 6],
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) = if compact {
+        (
+            ["Src", "Port", "Dest", "Port", "Proto", "Bytes"],
+            5,
+            5,
+            5,
+            9,
+            8,
+        )
+    } else {
+        (
+            [
+                "Address (Src)",
+                "Port (Src)",
+                "Address (Dest)",
+                "Port (Dest)",
+                "Protocol",
+                "Bytes",
+            ],
+            10,
+            11,
+            8,
+            11,
+            14,
+        )
+    };
+    let fixed_width = port_src_width + port_dest_width + protocol_width + bytes_width + spacing;
+    let address_total = inner_width
+        .saturating_sub(fixed_width)
+        .max(addr_min.saturating_mul(2));
+    let src_addr_width = address_total / 2;
+    let dest_addr_width = address_total.saturating_sub(src_addr_width);
+
+    let protocol_width = protocol_width.max(1);
     let rows = if process.flows.is_empty() {
         vec![
             Row::new(vec!["No traffic observed", "", "", "", "", ""])
@@ -493,46 +590,50 @@ pub(in crate::tui) fn flow_table(
                     crate::capture::TransportProtocol::Udp => "UDP",
                 };
                 Row::new(vec![
-                    Cell::from(flow.local_ip.to_string()),
-                    Cell::from(flow.local_port.to_string())
-                        .style(Style::default().fg(palette::muted())),
-                    Cell::from(flow.remote_ip.to_string()),
-                    Cell::from(flow.remote_port.to_string())
-                        .style(Style::default().fg(palette::muted())),
-                    Cell::from(protocol.to_string()).style(Style::default().fg(palette::accent())),
-                    Cell::from(human_bytes(flow.total()))
-                        .style(Style::default().fg(palette::warn())),
+                    Cell::from(truncate(
+                        &flow.local_ip.to_string(),
+                        src_addr_width.saturating_sub(1),
+                    )),
+                    Cell::from(format!(
+                        "{:>width$}",
+                        flow.local_port,
+                        width = port_src_width
+                    ))
+                    .style(Style::default().fg(palette::muted())),
+                    Cell::from(truncate(
+                        &flow.remote_ip.to_string(),
+                        dest_addr_width.saturating_sub(1),
+                    )),
+                    Cell::from(format!(
+                        "{:>width$}",
+                        flow.remote_port,
+                        width = port_dest_width
+                    ))
+                    .style(Style::default().fg(palette::muted())),
+                    Cell::from(format!("{protocol:^protocol_width$}"))
+                        .style(Style::default().fg(palette::accent())),
+                    Cell::from(format!(
+                        "{:>width$}",
+                        human_bytes(flow.total()),
+                        width = bytes_width
+                    ))
+                    .style(Style::default().fg(palette::warn())),
                 ])
             })
             .collect()
     };
-    let addr = if compact {
-        Constraint::Min(10)
-    } else {
-        Constraint::Min(14)
-    };
     Table::new(
         rows,
         [
-            addr,
-            Constraint::Length(6),
-            addr,
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(11),
+            Constraint::Length(src_addr_width as u16),
+            Constraint::Length(port_src_width as u16),
+            Constraint::Length(dest_addr_width as u16),
+            Constraint::Length(port_dest_width as u16),
+            Constraint::Length(protocol_width as u16),
+            Constraint::Length(bytes_width as u16),
         ],
     )
-    .header(
-        Row::new(vec![
-            "Address (Src)",
-            "Port (Src)",
-            "Address (Dest)",
-            "Port (Dest)",
-            "Protocol",
-            "Bytes",
-        ])
-        .style(Style::default().fg(palette::muted())),
-    )
+    .header(Row::new(headers).style(Style::default().fg(palette::muted())))
     .column_spacing(1)
     .block(block)
 }
@@ -652,8 +753,18 @@ mod tests {
             .unwrap();
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("IP Statistics (lifetime)"));
-        assert!(rendered.contains("Address (Src)"));
-        assert!(rendered.contains("Bytes"));
+        for header in [
+            "Address (Src)",
+            "Port (Src)",
+            "Address (Dest)",
+            "Port (Dest)",
+            "Protocol",
+            "Bytes",
+        ] {
+            assert!(rendered.contains(header), "missing flow header: {header}");
+        }
+        assert!(!rendered.contains("Port ( Address"));
+        assert!(!rendered.contains("Port ( Protocol"));
         assert!(rendered.contains("192.0.2.10"));
         assert!(rendered.contains("198.51.100.5"));
         assert!(rendered.contains("TCP"));
