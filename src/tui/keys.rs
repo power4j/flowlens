@@ -196,7 +196,7 @@ where
             // leak through while it is open.
             _ => KeyOutcome::Ignored,
         }
-    } else if key.code == KeyCode::Char('o') && state.process_detail.is_none() {
+    } else if key.code == KeyCode::Char('o') {
         state.settings_open = true;
         state.settings_selection = 0;
         state.rank_window_draft = state.rank_window;

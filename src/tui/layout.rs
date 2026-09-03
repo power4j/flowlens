@@ -92,6 +92,7 @@ pub(super) fn draw_with_interfaces_at(
     );
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        state.settings_open = false;
         draw_too_small(f, area);
         if state.quit_confirm {
             draw_quit_confirm(f, area);
@@ -433,15 +434,19 @@ pub(super) fn draw_status_bar(
     }
     if let Some(detail) = state.process_detail.as_ref() {
         let hint = match (detail.pause_notice, detail.paused) {
-            (Some(reason), _) => format!("{}  Esc:back  q:quit", reason.message()),
-            (None, Some(_)) => "Tracking paused  Esc:back  q:quit".to_string(),
-            (None, None) => "j/k scroll  Esc:back  q:quit".to_string(),
+            (Some(reason), _) => {
+                format!("{}  o:settings  Esc:back  q:quit", reason.message())
+            }
+            (None, Some(_)) => "Tracking paused  o:settings  Esc:back  q:quit".to_string(),
+            (None, None) => "j/k scroll  o:settings  Esc:back  q:quit".to_string(),
         };
         f.render_widget(
             Paragraph::new(format!(" {hint} ")).style(Style::default().fg(palette::muted())),
             area,
         );
-        if let Some(detail) = state.process_detail.as_mut() {
+        if !state.settings_open
+            && let Some(detail) = state.process_detail.as_mut()
+        {
             detail.pause_notice = None;
         }
         return;

@@ -644,7 +644,16 @@ pub(in crate::tui) fn flow_table(
             Constraint::Length(bytes_width as u16),
         ],
     )
-    .header(Row::new(headers).style(Style::default().fg(palette::muted())))
+    .header(
+        Row::new(headers.into_iter().enumerate().map(|(index, header)| {
+            if index == 6 {
+                Cell::from(Line::from(header).alignment(Alignment::Right))
+            } else {
+                Cell::from(header)
+            }
+        }))
+        .style(Style::default().fg(palette::muted())),
+    )
     .column_spacing(1)
     .block(block)
 }
@@ -800,6 +809,16 @@ mod tests {
             "    ",
             "source and destination endpoint groups should have a four-column gap"
         );
+        let bytes_header_end = header_line.find("Bytes").unwrap() + "Bytes".len();
+        let bytes_row = lines
+            .iter()
+            .find(|line| line.contains("198.51.100.5") && line.contains("40 B"))
+            .expect("flow table row");
+        let bytes_value_end = bytes_row.find("40 B").unwrap() + "40 B".len();
+        assert_eq!(
+            bytes_header_end, bytes_value_end,
+            "Bytes header and values should share a right edge"
+        );
         assert!(rendered.contains("192.0.2.10"));
         assert!(rendered.contains("198.51.100.5"));
         assert!(rendered.contains("203.0.113.8"));
@@ -827,6 +846,71 @@ mod tests {
         assert_ne!(tcp, udp);
         assert_ne!(tcp, bytes);
         assert_ne!(udp, bytes);
+    }
+
+    #[test]
+    fn compact_process_details_right_align_bytes_header_with_values() {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            Some(Arc::from("/usr/bin/curl")),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+            40,
+            0,
+        );
+        process.flows = vec![ProcFlowSnapshot {
+            local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            local_port: 49_152,
+            remote_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+            remote_port: 443,
+            protocol: TransportProtocol::Tcp,
+            recv: 0,
+            sent: 40,
+            last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+        }]
+        .into();
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(71, 32)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_at(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "eth0",
+                    "host",
+                    Instant::now(),
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                )
+            })
+            .unwrap();
+
+        let lines = rendered_lines(&terminal);
+        let header_line = lines
+            .iter()
+            .find(|line| line.contains("Proto") && line.contains("Bytes"))
+            .expect("compact flow table header");
+        let bytes_row = lines
+            .iter()
+            .find(|line| line.contains("198.51.100.5") && line.contains("40 B"))
+            .expect("compact flow table row");
+        let bytes_header_end = header_line.find("Bytes").unwrap() + "Bytes".len();
+        let bytes_value_end = bytes_row.find("40 B").unwrap() + "40 B".len();
+        assert_eq!(
+            bytes_header_end, bytes_value_end,
+            "compact Bytes header and values should share a right edge"
+        );
     }
 
     #[test]
@@ -1056,6 +1140,106 @@ mod tests {
     }
 
     #[test]
+    fn settings_overlay_preserves_process_details_and_scroll_when_closed() {
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![ProcessSnapshot::attributed(
+                7,
+                Some(Arc::from("curl")),
+                Some(Arc::from("/usr/bin/curl")),
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+                40,
+                60,
+            )]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        state.proc_detail_scroll = 7;
+        state.proc_detail_view_height = 3;
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Changed
+        );
+        assert!(state.settings_open);
+        assert_eq!(
+            state.process_detail.as_ref().unwrap().process.pid(),
+            Some(7)
+        );
+        assert_eq!(state.proc_detail_scroll, 7);
+        assert_eq!(state.proc_detail_view_height, 3);
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Changed
+        );
+        assert!(!state.settings_open);
+        assert_eq!(
+            state.process_detail.as_ref().unwrap().process.pid(),
+            Some(7)
+        );
+        assert_eq!(state.proc_detail_scroll, 7);
+        assert_eq!(state.proc_detail_view_height, 3);
+    }
+
+    #[test]
+    fn settings_overlay_does_not_consume_a_hidden_process_pause_notice() {
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![ProcessSnapshot::attributed(
+                7,
+                Some(Arc::from("curl")),
+                Some(Arc::from("/usr/bin/curl")),
+                "2026-07-15T08:00:00Z".parse().unwrap(),
+                40,
+                60,
+            )]
+            .into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        state
+            .process_detail
+            .as_mut()
+            .unwrap()
+            .pause(TrackingPause::OutsideTopN);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        send_key(&mut state, KeyCode::Char('o'));
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        assert_eq!(
+            state.process_detail.as_ref().unwrap().pause_notice,
+            Some(TrackingPause::OutsideTopN)
+        );
+
+        send_key(&mut state, KeyCode::Char('o'));
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+        assert!(
+            rendered_lines(&terminal)
+                .join("\n")
+                .contains("Tracking paused: process is no longer in Top-N.")
+        );
+        assert_eq!(state.process_detail.as_ref().unwrap().pause_notice, None);
+    }
+
+    #[test]
     fn process_attribution_total_line_keeps_equation_values_tight() {
         let process = ProcessSnapshot::attributed_with_shared(
             7,
@@ -1165,6 +1349,7 @@ mod tests {
         );
         assert!(rendered.contains("Last seen: 2m ago"));
         assert!(rendered.contains("Esc:back"));
+        assert!(rendered.contains("o:settings"));
         let inner_lines = lines
             .iter()
             .map(|line| line.chars().skip(2).take(76).collect::<String>())
