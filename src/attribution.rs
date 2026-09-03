@@ -743,6 +743,7 @@ impl PendingAttributor {
                         pending.direction,
                         pending.bytes,
                         pending.observed_at,
+                        Some(pending.connection.flow_key()),
                     );
                 }
             }
@@ -1221,6 +1222,10 @@ mod tests {
             assert_eq!(process.sent, 40);
             assert!(process.is_mixed());
             assert_eq!(process.attribution.shared_with.len(), 1);
+            assert_eq!(process.flows.len(), 1);
+            assert_eq!(process.flows[0].local_port, 443);
+            assert_eq!(process.flows[0].remote_port, 49_152);
+            assert_eq!(process.flows[0].sent, 40);
         }
         let summary = snapshot.attribution;
         assert_eq!(summary.shared.sent, 40);
@@ -1885,5 +1890,73 @@ mod tests {
         let snapshot = stats.snapshot(10);
         assert!(snapshot.processes.is_empty());
         assert_eq!(snapshot.attribution.unattributed.sent, 40);
+    }
+
+    #[test]
+    fn both_local_endpoints_record_swapped_connection_rows() {
+        let left_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let right_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            left_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("left"),
+            None,
+        );
+        table.insert_for_test(
+            right_ip,
+            80,
+            TransportProtocol::Tcp,
+            8,
+            Arc::from("right"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: right_ip,
+                peer_port: Some(80),
+                bytes: 40,
+                local_socket: Some(LocalSocket {
+                    ip: left_ip,
+                    port: 49_152,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                peer_local_socket: Some(LocalSocket {
+                    ip: right_ip,
+                    port: 80,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                domain: None,
+            },
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        let left = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(7))
+            .unwrap();
+        let right = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(8))
+            .unwrap();
+        assert_eq!(left.flows.len(), 1);
+        assert_eq!(left.flows[0].local_ip, left_ip);
+        assert_eq!(left.flows[0].remote_ip, right_ip);
+        assert_eq!((left.flows[0].recv, left.flows[0].sent), (0, 40));
+        assert_eq!(right.flows.len(), 1);
+        assert_eq!(right.flows[0].local_ip, right_ip);
+        assert_eq!(right.flows[0].remote_ip, left_ip);
+        assert_eq!((right.flows[0].recv, right.flows[0].sent), (40, 0));
     }
 }

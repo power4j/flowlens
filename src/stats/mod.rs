@@ -337,12 +337,64 @@ impl Stats {
             flow.bytes,
             observed_at,
         );
-        if flow.peer_local_socket.is_some() {
-            self.record_process(process, Direction::Outbound, flow.bytes, observed_at);
-            self.record_process(peer_process, Direction::Inbound, flow.bytes, observed_at);
+        if let Some(peer_local) = flow.peer_local_socket {
+            self.record_process(
+                process.clone(),
+                Direction::Outbound,
+                flow.bytes,
+                observed_at,
+            );
+            if let (Some(process), Some(local), Some(peer_port)) =
+                (process, flow.local_socket, flow.peer_port)
+            {
+                self.record_proc_flow(
+                    ProcessKey {
+                        pid: process.pid,
+                        path: process.path.clone(),
+                    },
+                    ProcFlowKey::from_endpoint(local, flow.peer, peer_port),
+                    Direction::Outbound,
+                    flow.bytes,
+                    observed_at,
+                );
+            }
+            self.record_process(
+                peer_process.clone(),
+                Direction::Inbound,
+                flow.bytes,
+                observed_at,
+            );
+            if let Some(peer_process) = peer_process
+                && let Some(local) = flow.local_socket
+            {
+                self.record_proc_flow(
+                    ProcessKey {
+                        pid: peer_process.pid,
+                        path: peer_process.path.clone(),
+                    },
+                    ProcFlowKey::from_endpoint(peer_local, local.ip, local.port),
+                    Direction::Inbound,
+                    flow.bytes,
+                    observed_at,
+                );
+            }
             return;
         }
-        self.record_process(process, flow.direction, flow.bytes, observed_at);
+        self.record_process(process.clone(), flow.direction, flow.bytes, observed_at);
+        if let (Some(process), Some(local), Some(peer_port)) =
+            (process, flow.local_socket, flow.peer_port)
+        {
+            self.record_proc_flow(
+                ProcessKey {
+                    pid: process.pid,
+                    path: process.path.clone(),
+                },
+                ProcFlowKey::from_endpoint(local, flow.peer, peer_port),
+                flow.direction,
+                flow.bytes,
+                observed_at,
+            );
+        }
     }
     pub(crate) fn record_interface_flow(&mut self, flow: &Flow, observed_at: DateTime<Utc>) {
         if flow.peer_local_socket.is_some() {
@@ -474,6 +526,7 @@ impl Stats {
         direction: Direction,
         bytes: u64,
         observed_at: DateTime<Utc>,
+        conn: Option<ProcFlowKey>,
     ) {
         if candidates.len() < 2 {
             self.record_process(None, direction, bytes, observed_at);
@@ -493,6 +546,9 @@ impl Stats {
             })
             .collect();
         for (candidate, key) in candidates.iter().zip(keys.iter()) {
+            if let Some(conn) = conn {
+                self.record_proc_flow(key.clone(), conn, direction, bytes, observed_at);
+            }
             self.record_rank_proc(key.clone(), direction, bytes, observed_at);
             self.proc_windows
                 .entry(key.clone())
@@ -848,7 +904,7 @@ impl Stats {
 mod tests {
     use super::*;
 
-    use crate::capture::Flow;
+    use crate::capture::{Flow, LocalSocket, TransportProtocol};
 
     use chrono::Duration;
 
@@ -893,6 +949,60 @@ mod tests {
 
     fn ip(octets: [u8; 4]) -> IpAddr {
         IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
+    #[test]
+    fn record_flow_processes_at_records_swapped_both_local_rows() {
+        let left_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let right_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+        let mut stats = Stats::default();
+        stats.record_flow_processes_at(
+            Flow {
+                direction: Direction::Outbound,
+                peer: right_ip,
+                peer_port: Some(80),
+                bytes: 40,
+                local_socket: Some(LocalSocket {
+                    ip: left_ip,
+                    port: 49_152,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                peer_local_socket: Some(LocalSocket {
+                    ip: right_ip,
+                    port: 80,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                domain: None,
+            },
+            Some(ObservedProcess {
+                pid: 7,
+                name: Some(Arc::from("left")),
+                path: None,
+            }),
+            Some(ObservedProcess {
+                pid: 8,
+                name: Some(Arc::from("right")),
+                path: None,
+            }),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+        );
+        let snapshot = stats.snapshot(10);
+        let left = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(7))
+            .unwrap();
+        let right = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(8))
+            .unwrap();
+        assert_eq!(left.flows[0].local_ip, left_ip);
+        assert_eq!(left.flows[0].remote_ip, right_ip);
+        assert_eq!((left.flows[0].recv, left.flows[0].sent), (0, 40));
+        assert_eq!(right.flows[0].local_ip, right_ip);
+        assert_eq!(right.flows[0].remote_ip, left_ip);
+        assert_eq!((right.flows[0].recv, right.flows[0].sent), (40, 0));
     }
 
     fn unique_ip(index: usize) -> IpAddr {
@@ -1256,6 +1366,7 @@ mod tests {
             Direction::Inbound,
             1000,
             "2026-07-15T08:00:00Z".parse().unwrap(),
+            None,
         );
         stats.record_flow_at(
             flow(Direction::Inbound, [10, 0, 0, 3], 10),
