@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.6.0] - 2026-09-04
+
+### Added
+
 - Configurable ranking windows: cumulative totals, 5s, 10s, 30s, 60s, and 5m average throughput, selectable from the settings overlay or with `--rank-window`. The active window is shown in the TUI.
 - Process details now include a scrollable TCP/UDP flow table showing endpoint pairs, protocol, and accumulated bytes for each retained 5-tuple. Use `--proc-flows` to set the per-process row limit.
 - The interface selector now provides a scrollable popup for the selected interface's IPv4 and IPv6 addresses via `i`.
