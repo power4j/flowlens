@@ -7,6 +7,7 @@ All notable changes to FlowLens are recorded in this file.
 ### Added
 
 - Configurable ranking windows: cumulative totals, 5s, 10s, 30s, 60s, and 5m average throughput, selectable from the settings overlay or with `--rank-window`. The active window is shown in the TUI.
+- Process details now include a scrollable connection table with local and remote endpoints plus received and sent totals. Use `--proc-flows` to set the maximum retained rows per process.
 
 ### Changed
 
