@@ -210,7 +210,7 @@ where
                 .get_or_insert_with(crate::diagnostics::default_output_path);
         }
         KeyOutcome::Changed
-    } else if key.code == KeyCode::Char('i') {
+    } else if key.code == KeyCode::Char('i') && state.process_detail.is_none() {
         state.open_interface_selector(interfaces, active, true);
         KeyOutcome::Changed
     } else {
@@ -260,6 +260,7 @@ pub(super) fn handle_key(
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => request_quit(state),
         KeyCode::Esc if state.process_detail.is_some() => {
             state.process_detail = None;
+            state.proc_detail_scroll = 0;
             KeyOutcome::Changed
         }
         KeyCode::Esc => request_quit(state),
@@ -275,7 +276,32 @@ pub(super) fn handle_key(
             if !snapshot.process_data_fresh {
                 detail.pause(TrackingPause::Stale);
             }
+            state.proc_detail_scroll = 0;
             state.process_detail = Some(detail);
+            KeyOutcome::Changed
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            scroll(state, 1);
+            KeyOutcome::Changed
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            scroll(state, -1);
+            KeyOutcome::Changed
+        }
+        KeyCode::PageDown => {
+            scroll(state, state.current_view_height() as isize);
+            KeyOutcome::Changed
+        }
+        KeyCode::PageUp => {
+            scroll(state, -(state.current_view_height() as isize));
+            KeyOutcome::Changed
+        }
+        KeyCode::Home => {
+            scroll_to_top(state);
+            KeyOutcome::Changed
+        }
+        KeyCode::End => {
+            scroll_to_bottom(state, snapshot);
             KeyOutcome::Changed
         }
         _ if state.process_detail.is_some() => KeyOutcome::Ignored,
@@ -318,30 +344,6 @@ pub(super) fn handle_key(
             state.page = next_page(state.page);
             KeyOutcome::Changed
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            scroll(state, 1);
-            KeyOutcome::Changed
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            scroll(state, -1);
-            KeyOutcome::Changed
-        }
-        KeyCode::PageDown => {
-            scroll(state, state.current_view_height() as isize);
-            KeyOutcome::Changed
-        }
-        KeyCode::PageUp => {
-            scroll(state, -(state.current_view_height() as isize));
-            KeyOutcome::Changed
-        }
-        KeyCode::Home => {
-            scroll_to_top(state);
-            KeyOutcome::Changed
-        }
-        KeyCode::End => {
-            scroll_to_bottom(state, snapshot);
-            KeyOutcome::Changed
-        }
         _ => KeyOutcome::Ignored,
     }
 }
@@ -374,6 +376,10 @@ pub(super) fn prev_palette_choice(choice: palette::PaletteChoice) -> palette::Pa
 }
 
 pub(super) fn scroll(state: &mut AppState, delta: isize) {
+    if state.process_detail.is_some() {
+        state.proc_detail_scroll = (state.proc_detail_scroll as isize + delta).max(0) as usize;
+        return;
+    }
     match state.page {
         Page::Processes => {
             state.proc_scroll = (state.proc_scroll as isize + delta).max(0) as usize;
@@ -394,6 +400,10 @@ pub(super) fn scroll(state: &mut AppState, delta: isize) {
 }
 
 pub(super) fn scroll_to_top(state: &mut AppState) {
+    if state.process_detail.is_some() {
+        state.proc_detail_scroll = 0;
+        return;
+    }
     match state.page {
         Page::Processes => state.proc_scroll = 0,
         Page::Ips => match state.ip_focus {
@@ -406,6 +416,11 @@ pub(super) fn scroll_to_top(state: &mut AppState) {
 }
 
 pub(super) fn scroll_to_bottom(state: &mut AppState, snapshot: &TrafficSnapshot) {
+    if let Some(detail) = state.process_detail.as_ref() {
+        let len = detail.process.flows.len();
+        state.proc_detail_scroll = len.saturating_sub(state.proc_detail_view_height);
+        return;
+    }
     match state.page {
         Page::Processes => {
             let len = snapshot.processes.len();

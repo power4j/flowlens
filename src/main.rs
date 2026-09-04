@@ -86,13 +86,21 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
     };
     let proc_table = proc_table::spawn(Duration::from_secs(cli.proc_refresh));
     let top_n = cli.top_n as usize;
+    let proc_flows = cli.proc_flows as usize;
     let is_json = cli.format == "json";
 
     if cli.output.is_none() && !is_json {
-        return run_tui_mode(&cli, diagnostics_writer, proc_table, top_n);
+        return run_tui_mode(&cli, diagnostics_writer, proc_table, top_n, proc_flows);
     }
 
-    run_capture_mode(&cli, diagnostics_writer, proc_table, top_n, is_json)
+    run_capture_mode(
+        &cli,
+        diagnostics_writer,
+        proc_table,
+        top_n,
+        proc_flows,
+        is_json,
+    )
 }
 
 fn run_tui_mode(
@@ -100,10 +108,12 @@ fn run_tui_mode(
     diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
     proc_table: proc_table::SharedProcTable,
     top_n: usize,
+    proc_flows: usize,
 ) -> ExitCode {
     let mut session = match session::TrafficSession::discover(
         proc_table,
         top_n,
+        proc_flows,
         cli.flow_table,
         cli.diagnostics,
         cli.read_mode,
@@ -143,6 +153,7 @@ fn run_capture_mode(
     diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
     proc_table: proc_table::SharedProcTable,
     top_n: usize,
+    proc_flows: usize,
     is_json: bool,
 ) -> ExitCode {
     let interface_selector = cli
@@ -177,6 +188,7 @@ fn run_capture_mode(
                 &started_wall,
                 started_at,
                 top_n,
+                proc_flows,
                 cli.rank_window,
                 is_json,
                 diagnostics_writer,
@@ -193,6 +205,7 @@ fn run_capture_mode(
                     &started_wall,
                     started_at,
                     top_n,
+                    proc_flows,
                     cli.rank_window,
                     diagnostics_writer,
                 );
@@ -251,11 +264,13 @@ fn background_loop(
     started_wall: &chrono::DateTime<chrono::Local>,
     started_at: Instant,
     top_n: usize,
+    proc_flows: usize,
     rank_window: stats::RankWindow,
     is_json: bool,
     mut diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
 ) {
     let mut stats = stats::Stats::new_at(chrono::Utc::now());
+    stats.set_proc_flow_limits(proc_flows, stats::MAX_PROC_FLOWS_TOTAL);
     let mut attributor = attribution::PendingAttributor::with_probe(
         attribution::PENDING_ATTRIBUTION_WINDOW,
         attribution::PENDING_ATTRIBUTION_CAPACITY,
@@ -317,10 +332,12 @@ fn json_stdout_loop(
     started_wall: &chrono::DateTime<chrono::Local>,
     started_at: Instant,
     top_n: usize,
+    proc_flows: usize,
     rank_window: stats::RankWindow,
     mut diagnostics_writer: Option<diagnostics::DiagnosticsWriter>,
 ) {
     let mut stats = stats::Stats::new_at(chrono::Utc::now());
+    stats.set_proc_flow_limits(proc_flows, stats::MAX_PROC_FLOWS_TOTAL);
     let mut attributor = attribution::PendingAttributor::with_probe(
         attribution::PENDING_ATTRIBUTION_WINDOW,
         attribution::PENDING_ATTRIBUTION_CAPACITY,
@@ -399,6 +416,9 @@ struct Cli {
     /// Number of entries per top-N list (default: 10, min: 1)
     #[arg(long = "top-n", short = 'n', default_value_t = DEFAULT_TOP_N, value_parser = clap::value_parser!(u64).range(1..))]
     top_n: u64,
+    /// Max connection rows per process on the process-detail page (default: 256, min: 1)
+    #[arg(long = "proc-flows", default_value_t = stats::DEFAULT_PROC_FLOWS as u64, value_parser = clap::value_parser!(u64).range(1..))]
+    proc_flows: u64,
     /// Ranking window: cumulative, 5s, 10s, 30s, 60s, or 5m
     #[arg(long = "rank-window", default_value = "cumulative", value_parser = parse_rank_window)]
     rank_window: stats::RankWindow,
@@ -565,6 +585,24 @@ mod cli_tests {
     #[test]
     fn flow_table_zero_rejected() {
         let result = Cli::try_parse_from(["flowlens", "eth0", "--flow-table", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn proc_flows_defaults_to_256() {
+        let cli = Cli::try_parse_from(["flowlens", "eth0"]).unwrap();
+        assert_eq!(cli.proc_flows, stats::DEFAULT_PROC_FLOWS as u64);
+    }
+
+    #[test]
+    fn proc_flows_accepts_custom_limit() {
+        let cli = Cli::try_parse_from(["flowlens", "eth0", "--proc-flows", "32"]).unwrap();
+        assert_eq!(cli.proc_flows, 32);
+    }
+
+    #[test]
+    fn proc_flows_zero_rejected() {
+        let result = Cli::try_parse_from(["flowlens", "eth0", "--proc-flows", "0"]);
         assert!(result.is_err());
     }
 

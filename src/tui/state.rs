@@ -102,6 +102,8 @@ pub(super) struct AppState {
     pub(super) page: Page,
     pub(super) proc_scroll: usize,
     pub(super) process_detail: Option<ProcessDetail>,
+    pub(super) proc_detail_scroll: usize,
+    pub(super) proc_detail_view_height: usize,
     pub(super) ip_in_scroll: usize,
     pub(super) ip_out_scroll: usize,
     pub(super) ip_focus: IpFocus,
@@ -148,6 +150,8 @@ impl AppState {
             page: Page::Overview,
             proc_scroll: 0,
             process_detail: None,
+            proc_detail_scroll: 0,
+            proc_detail_view_height: 1,
             ip_in_scroll: 0,
             ip_out_scroll: 0,
             ip_focus: IpFocus::Inbound,
@@ -347,6 +351,7 @@ impl DiagnosticsRuntime {
 impl AppState {
     pub(super) fn current_view_height(&self) -> usize {
         match self.page {
+            Page::Processes if self.process_detail.is_some() => self.proc_detail_view_height,
             Page::Processes => self.proc_view_height,
             Page::Ips => match self.ip_focus {
                 IpFocus::Inbound => self.ip_in_view_height,

@@ -10,7 +10,7 @@ use crate::proc_table::{self, LookupMissReason, LookupOutcome, SharedProcTable};
 use crate::process_probe::{
     ConnectionMatch, ProbeProcess, ProbeRequestId, ProbeRequestOutcome, ProbeResult, ProcessProbe,
 };
-use crate::stats::{Direction, Evidence, ObservedProcess, Stats};
+use crate::stats::{Direction, Evidence, ObservedProcess, ProcFlowKey, Stats};
 
 pub(crate) const PENDING_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(1);
 pub(crate) const PENDING_ATTRIBUTION_CAPACITY: usize = 1_024;
@@ -45,6 +45,12 @@ struct ConnectionKey {
     peer_ip: IpAddr,
     peer_port: u16,
     direction: Direction,
+}
+
+impl ConnectionKey {
+    fn flow_key(&self) -> ProcFlowKey {
+        ProcFlowKey::from_endpoint(self.local_socket, self.peer_ip, self.peer_port)
+    }
 }
 
 struct PendingAttribution {
@@ -246,6 +252,7 @@ impl PendingAttributor {
                                 pending.bytes,
                                 pending.observed_at,
                                 Evidence::PROBE,
+                                Some(pending.connection.flow_key()),
                             );
                         } else {
                             retained.push_back(pending);
@@ -289,6 +296,7 @@ impl PendingAttributor {
                             pending.bytes,
                             pending.observed_at,
                             Evidence::PROBE,
+                            Some(pending.connection.flow_key()),
                         );
                         continue;
                     }
@@ -493,6 +501,7 @@ impl PendingAttributor {
                         pending.bytes,
                         pending.observed_at,
                         Evidence::SNAPSHOT,
+                        Some(pending.connection.flow_key()),
                     );
                 }
                 Some(LookupResolved::Ambiguous(candidates)) => {
@@ -623,6 +632,7 @@ impl PendingAttributor {
                     bytes,
                     observed_at,
                     Evidence::SNAPSHOT,
+                    Some(ProcFlowKey::from_endpoint(socket, peer_ip, peer_port)),
                 );
                 return;
             }
@@ -724,6 +734,7 @@ impl PendingAttributor {
                         pending.bytes,
                         pending.observed_at,
                         Evidence::HISTORY,
+                        Some(pending.connection.flow_key()),
                     );
                 }
                 _ => {
@@ -732,6 +743,7 @@ impl PendingAttributor {
                         pending.direction,
                         pending.bytes,
                         pending.observed_at,
+                        Some(pending.connection.flow_key()),
                     );
                 }
             }
@@ -1092,6 +1104,9 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.out_bytes, 100);
         assert_eq!(process.sent, 100);
+        assert_eq!(process.flows.len(), 1);
+        assert_eq!(process.flows[0].remote_port, 443);
+        assert_eq!(process.flows[0].sent, 100);
         assert_eq!(
             process.last_seen(),
             observed_at() + chrono::Duration::milliseconds(10)
@@ -1159,6 +1174,9 @@ mod tests {
         let snapshot = stats.snapshot(10);
         assert_eq!(snapshot.processes[0].pid(), Some(7));
         assert_eq!(snapshot.processes[0].last_seen(), observed_at());
+        assert_eq!(snapshot.processes[0].flows.len(), 1);
+        assert_eq!(snapshot.processes[0].flows[0].remote_port, 443);
+        assert_eq!(snapshot.processes[0].flows[0].sent, 40);
     }
 
     #[test]
@@ -1204,6 +1222,10 @@ mod tests {
             assert_eq!(process.sent, 40);
             assert!(process.is_mixed());
             assert_eq!(process.attribution.shared_with.len(), 1);
+            assert_eq!(process.flows.len(), 1);
+            assert_eq!(process.flows[0].local_port, 443);
+            assert_eq!(process.flows[0].remote_port, 49_152);
+            assert_eq!(process.flows[0].sent, 40);
         }
         let summary = snapshot.attribution;
         assert_eq!(summary.shared.sent, 40);
@@ -1260,6 +1282,9 @@ mod tests {
         assert_eq!(process.pid(), Some(std::process::id()));
         assert_eq!(process.attribution.exclusive.sent, 40);
         assert_eq!(process.attribution.evidence.labels(), vec!["history"]);
+        assert_eq!(process.flows.len(), 1);
+        assert_eq!(process.flows[0].remote_port, 443);
+        assert_eq!(process.flows[0].sent, 40);
         assert_eq!(snapshot.attribution.unattributed.total(), 0);
         assert_eq!(
             snapshot.attribution.total(),
@@ -1539,5 +1564,399 @@ mod tests {
         assert!(snapshot.processes.is_empty());
         assert_eq!(snapshot.attribution.unattributed.sent, 40);
         assert_eq!(attributor.pending_bytes(), 60);
+    }
+
+    #[test]
+    fn exclusive_tcp_flow_appears_on_the_process_connection_table() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            Some(Arc::from("/usr/bin/curl")),
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+
+        let process = &stats.snapshot(10).processes[0];
+        assert_eq!(process.flows.len(), 1);
+        let flow = &process.flows[0];
+        assert_eq!(flow.local_ip, local_ip);
+        assert_eq!(flow.local_port, 49_152);
+        assert_eq!(flow.remote_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)));
+        assert_eq!(flow.remote_port, 443);
+        assert_eq!(flow.protocol, TransportProtocol::Tcp);
+        assert_eq!((flow.recv, flow.sent), (0, 40));
+    }
+
+    #[test]
+    fn exclusive_same_five_tuple_accumulates_on_the_connection_table() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 60),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+
+        let flows = &stats.snapshot(10).processes[0].flows;
+        assert_eq!(flows.len(), 1);
+        assert_eq!((flows[0].recv, flows[0].sent), (0, 100));
+    }
+
+    #[test]
+    fn exclusive_different_five_tuples_are_separate_connection_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        let started = Instant::now();
+
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 80, 25),
+            &proc_table,
+            started,
+            observed_at(),
+        );
+
+        let mut ports = stats.snapshot(10).processes[0]
+            .flows
+            .iter()
+            .map(|flow| flow.remote_port)
+            .collect::<Vec<_>>();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn traffic_without_a_local_socket_does_not_create_connection_rows() {
+        let proc_table = Arc::new(RwLock::new(ProcTable::default()));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)),
+                peer_port: None,
+                bytes: 10,
+                local_socket: None,
+                peer_local_socket: None,
+                domain: None,
+            },
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.system.sent, 10);
+    }
+
+    #[test]
+    fn traffic_without_a_peer_port_does_not_create_connection_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            local_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("curl"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+                peer_port: None,
+                bytes: 10,
+                local_socket: Some(LocalSocket {
+                    ip: local_ip,
+                    port: 49_152,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                peer_local_socket: None,
+                domain: None,
+            },
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 10);
+    }
+
+    #[test]
+    fn probe_unique_settlement_records_the_pending_connection() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let socket = LocalSocket {
+            ip: local_ip,
+            port: 49_152,
+            protocol: TransportProtocol::Tcp,
+        };
+        let (release_tx, release_rx) = mpsc::channel();
+        let probe = ProcessProbe::spawn_blocked_for_test(Arc::new(AtomicUsize::new(0)), release_rx);
+        let request_id = match probe.request(socket) {
+            ProbeRequestOutcome::Queued(request_id) => request_id,
+            outcome => panic!("unexpected probe request outcome: {outcome:?}"),
+        };
+        let mut attributor = PendingAttributor::new(Duration::from_secs(1), 8);
+        attributor.probe = Some(probe);
+        attributor.pending.push_back(PendingAttribution {
+            candidates: Vec::new(),
+            connection: ConnectionKey {
+                local_socket: socket,
+                peer_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
+                peer_port: 443,
+                direction: Direction::Outbound,
+            },
+            socket,
+            direction: Direction::Outbound,
+            bytes: 40,
+            observed_at: observed_at(),
+            pending_since: Instant::now(),
+        });
+        attributor.probe_state.insert(
+            socket,
+            ProbeState {
+                active_request: Some(request_id),
+                attempts: 1,
+                next_retry_at: Instant::now(),
+                exhausted: false,
+                accept_results: true,
+            },
+        );
+        let mut stats = Stats::default();
+        attributor.apply_probe_result(
+            &mut stats,
+            ProbeResult::Unique {
+                request_id,
+                socket,
+                process: ProbeProcess {
+                    pid: 7,
+                    name: Some(Arc::from("curl")),
+                    path: None,
+                },
+            },
+            Instant::now(),
+        );
+        let process = &stats.snapshot(10).processes[0];
+        assert_eq!(process.pid(), Some(7));
+        assert_eq!(process.flows.len(), 1);
+        assert_eq!(process.flows[0].remote_port, 443);
+        assert_eq!(process.flows[0].sent, 40);
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn probe_connection_matches_records_only_the_matched_pending_connection() {
+        let local = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let first_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)), 443);
+        let second_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 6)), 443);
+        let socket = LocalSocket {
+            ip: local,
+            port: 49_152,
+            protocol: TransportProtocol::Tcp,
+        };
+        let (release_tx, release_rx) = mpsc::channel();
+        let probe = ProcessProbe::spawn_blocked_for_test(Arc::new(AtomicUsize::new(0)), release_rx);
+        let request_id = match probe.request_for_peers(socket, vec![first_peer, second_peer]) {
+            ProbeRequestOutcome::Queued(request_id) => request_id,
+            outcome => panic!("unexpected probe request outcome: {outcome:?}"),
+        };
+        let mut attributor = PendingAttributor::new(Duration::from_secs(1), 8);
+        attributor.probe = Some(probe);
+        for (peer, bytes) in [(first_peer, 40), (second_peer, 60)] {
+            attributor.pending.push_back(PendingAttribution {
+                candidates: Vec::new(),
+                connection: ConnectionKey {
+                    local_socket: socket,
+                    peer_ip: peer.ip(),
+                    peer_port: peer.port(),
+                    direction: Direction::Outbound,
+                },
+                socket,
+                direction: Direction::Outbound,
+                bytes,
+                observed_at: observed_at(),
+                pending_since: Instant::now(),
+            });
+        }
+        attributor.probe_state.insert(
+            socket,
+            ProbeState {
+                active_request: Some(request_id),
+                attempts: 1,
+                next_retry_at: Instant::now(),
+                exhausted: false,
+                accept_results: true,
+            },
+        );
+        let mut stats = Stats::default();
+        attributor.apply_probe_result(
+            &mut stats,
+            ProbeResult::ConnectionMatches {
+                request_id,
+                socket,
+                matches: vec![ConnectionMatch {
+                    peer: first_peer,
+                    process: ProbeProcess {
+                        pid: 7,
+                        name: Some(Arc::from("curl")),
+                        path: None,
+                    },
+                }],
+            },
+            Instant::now(),
+        );
+        let process = &stats.snapshot(10).processes[0];
+        assert_eq!(process.flows.len(), 1);
+        assert_eq!(process.flows[0].remote_ip, first_peer.ip());
+        assert_eq!(process.flows[0].sent, 40);
+        assert_eq!(attributor.pending.len(), 1);
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn zero_pending_capacity_does_not_record_connection_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let proc_table = Arc::new(RwLock::new(ProcTable::default()));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::new(Duration::from_secs(1), 0);
+        attributor.record_flow(
+            &mut stats,
+            socket_flow(local_ip, 49_152, 443, 40),
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        assert!(snapshot.processes.is_empty());
+        assert_eq!(snapshot.attribution.unattributed.sent, 40);
+    }
+
+    #[test]
+    fn both_local_endpoints_record_swapped_connection_rows() {
+        let left_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let right_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+        let mut table = ProcTable::default();
+        table.insert_for_test(
+            left_ip,
+            49_152,
+            TransportProtocol::Tcp,
+            7,
+            Arc::from("left"),
+            None,
+        );
+        table.insert_for_test(
+            right_ip,
+            80,
+            TransportProtocol::Tcp,
+            8,
+            Arc::from("right"),
+            None,
+        );
+        let proc_table = Arc::new(RwLock::new(table));
+        let mut stats = Stats::default();
+        let mut attributor = PendingAttributor::default();
+        attributor.record_flow(
+            &mut stats,
+            Flow {
+                direction: Direction::Outbound,
+                peer: right_ip,
+                peer_port: Some(80),
+                bytes: 40,
+                local_socket: Some(LocalSocket {
+                    ip: left_ip,
+                    port: 49_152,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                peer_local_socket: Some(LocalSocket {
+                    ip: right_ip,
+                    port: 80,
+                    protocol: TransportProtocol::Tcp,
+                }),
+                domain: None,
+            },
+            &proc_table,
+            Instant::now(),
+            observed_at(),
+        );
+        let snapshot = stats.snapshot(10);
+        let left = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(7))
+            .unwrap();
+        let right = snapshot
+            .processes
+            .iter()
+            .find(|process| process.pid() == Some(8))
+            .unwrap();
+        assert_eq!(left.flows.len(), 1);
+        assert_eq!(left.flows[0].local_ip, left_ip);
+        assert_eq!(left.flows[0].remote_ip, right_ip);
+        assert_eq!((left.flows[0].recv, left.flows[0].sent), (0, 40));
+        assert_eq!(right.flows.len(), 1);
+        assert_eq!(right.flows[0].local_ip, right_ip);
+        assert_eq!(right.flows[0].remote_ip, left_ip);
+        assert_eq!((right.flows[0].recv, right.flows[0].sent), (40, 0));
     }
 }

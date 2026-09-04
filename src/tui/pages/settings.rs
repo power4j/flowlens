@@ -214,6 +214,78 @@ mod tests {
     }
 
     #[test]
+    fn o_key_does_not_open_settings_over_modal_overlays() {
+        let available_interfaces = interfaces();
+
+        let mut state = AppState::startup(&available_interfaces);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Ignored
+        );
+        assert!(!state.settings_open);
+
+        state.interface_selector.as_mut().unwrap().activating = Some("eth0".to_string());
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Ignored
+        );
+        assert!(!state.settings_open);
+
+        let mut state = AppState::startup(&available_interfaces);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('i')),
+            KeyOutcome::Changed
+        );
+        assert!(
+            state
+                .interface_selector
+                .as_ref()
+                .unwrap()
+                .ip_popup
+                .is_some()
+        );
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Ignored
+        );
+        assert!(!state.settings_open);
+
+        let mut state = AppState::new();
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('q')),
+            KeyOutcome::Changed
+        );
+        assert!(state.quit_confirm);
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Ignored
+        );
+        assert!(!state.settings_open);
+    }
+
+    #[test]
+    fn o_key_on_undersized_terminal_does_not_leave_settings_open() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        let mut terminal = Terminal::new(TestBackend::new(59, 15)).unwrap();
+
+        assert_eq!(
+            send_key(&mut state, KeyCode::Char('o')),
+            KeyOutcome::Changed
+        );
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        assert!(!state.settings_open);
+        assert!(
+            rendered_lines(&terminal)
+                .join("\n")
+                .contains("Terminal too small (minimum 60x16)")
+        );
+    }
+
+    #[test]
     fn settings_overlay_renders_rows_and_hint() {
         let snapshot = TrafficSnapshot::default();
         let mut state = AppState::new();
