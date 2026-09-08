@@ -768,7 +768,7 @@ pub(in crate::tui) fn flow_table(
                     } else {
                         Style::default()
                     }),
-                    Cell::from(row.src_port).style(Style::default().fg(palette::muted())),
+                    Cell::from(row.src_port).style(Style::default().fg(palette::text())),
                     Cell::from(""),
                     Cell::from(truncate(&row.dest_ip, dest_addr_width)).style(
                         if row.local_is_src {
@@ -777,7 +777,7 @@ pub(in crate::tui) fn flow_table(
                             local_style
                         },
                     ),
-                    Cell::from(row.dest_port).style(Style::default().fg(palette::muted())),
+                    Cell::from(row.dest_port).style(Style::default().fg(palette::text())),
                     Cell::from(""),
                     Cell::from(Line::from(row.protocol).alignment(Alignment::Center))
                         .style(Style::default().fg(row.protocol_color)),
@@ -1665,6 +1665,11 @@ mod tests {
             buffer[position_in(inbound_row, "192.0.2.10")].fg,
             palette::accent()
         );
+        assert_eq!(
+            buffer[position_in(outbound_row, "49152")].fg,
+            palette::text()
+        );
+        assert_eq!(buffer[position_in(outbound_row, "443")].fg, palette::text());
         let tcp = buffer[position_in(outbound_row, "TCP")].fg;
         let udp = buffer[position_in(inbound_row, "UDP")].fg;
         let bytes = buffer[position_in(outbound_row, "40 B")].fg;
