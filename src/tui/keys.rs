@@ -62,7 +62,7 @@ where
                     KeyOutcome::Changed
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    popup.scroll = (popup.scroll + 1).min(address_count.saturating_add(2));
+                    popup.scroll = (popup.scroll + 1).min(address_count.saturating_sub(1));
                     KeyOutcome::Changed
                 }
                 KeyCode::PageUp => {
@@ -70,7 +70,7 @@ where
                     KeyOutcome::Changed
                 }
                 KeyCode::PageDown => {
-                    popup.scroll = (popup.scroll + 8).min(address_count.saturating_add(2));
+                    popup.scroll = (popup.scroll + 8).min(address_count.saturating_sub(1));
                     KeyOutcome::Changed
                 }
                 KeyCode::Home => {
@@ -78,7 +78,7 @@ where
                     KeyOutcome::Changed
                 }
                 KeyCode::End => {
-                    popup.scroll = address_count.saturating_add(2);
+                    popup.scroll = address_count.saturating_sub(1);
                     KeyOutcome::Changed
                 }
                 _ => KeyOutcome::Ignored,
@@ -376,8 +376,10 @@ pub(super) fn prev_palette_choice(choice: palette::PaletteChoice) -> palette::Pa
 }
 
 pub(super) fn scroll(state: &mut AppState, delta: isize) {
-    if state.process_detail.is_some() {
-        state.proc_detail_scroll = (state.proc_detail_scroll as isize + delta).max(0) as usize;
+    if let Some(detail) = state.process_detail.as_ref() {
+        let max_index = detail.process.flows.len().saturating_sub(1) as isize;
+        state.proc_detail_scroll =
+            (state.proc_detail_scroll as isize + delta).clamp(0, max_index) as usize;
         return;
     }
     match state.page {
@@ -418,7 +420,7 @@ pub(super) fn scroll_to_top(state: &mut AppState) {
 pub(super) fn scroll_to_bottom(state: &mut AppState, snapshot: &TrafficSnapshot) {
     if let Some(detail) = state.process_detail.as_ref() {
         let len = detail.process.flows.len();
-        state.proc_detail_scroll = len.saturating_sub(state.proc_detail_view_height);
+        state.proc_detail_scroll = len.saturating_sub(1);
         return;
     }
     match state.page {

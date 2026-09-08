@@ -260,7 +260,7 @@ pub(in crate::tui) fn draw_process_detail(
         .direction(LayoutDir::Vertical)
         .constraints([
             Constraint::Length(if compact { 11 } else { 7 }),
-            Constraint::Length(if compact { 12 } else { 13 }),
+            Constraint::Length(if compact || paused.is_some() { 12 } else { 11 }),
             Constraint::Fill(1),
         ])
         .split(area);
@@ -532,25 +532,28 @@ pub(in crate::tui) fn flow_table(
     area: Rect,
     compact: bool,
 ) -> Table<'static> {
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let spacing = 6usize;
+    // Reserve the border and current-row marker, then keep the members of each
+    // endpoint group close together. Any remaining width becomes separation
+    // between endpoint/protocol/traffic groups instead of padding IP columns.
+    let inner_width = area.width.saturating_sub(4) as usize;
+    let spacing = 8usize;
     let (
         headers,
         port_src_width,
-        endpoint_gap_width,
         port_dest_width,
         protocol_width,
         bytes_width,
         addr_min,
-    ): ([&str; 7], usize, usize, usize, usize, usize, usize) = if compact {
+        group_gap_min,
+    ): ([&str; 9], usize, usize, usize, usize, usize, usize) = if compact {
         (
-            ["Src", "Port", "", "Dest", "Port", "Proto", "Bytes"],
+            ["Src", "Port", "", "Dest", "Port", "", "Proto", "", "Bytes"],
             5,
-            0,
             5,
             5,
             9,
             8,
+            0,
         )
     } else {
         (
@@ -560,33 +563,67 @@ pub(in crate::tui) fn flow_table(
                 "",
                 "Address (Dest)",
                 "Port (Dest)",
+                "",
                 "Protocol",
+                "",
                 "Bytes",
             ],
             10,
-            2,
             11,
             8,
             11,
-            14,
+            10,
+            2,
         )
     };
+    let desired_src_width = process
+        .flows
+        .iter()
+        .map(|flow| flow.local_ip.to_string().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(headers[0].chars().count())
+        .max(if process.flows.is_empty() {
+            "No traffic observed".chars().count()
+        } else {
+            0
+        })
+        .max(addr_min);
+    let desired_dest_width = process
+        .flows
+        .iter()
+        .map(|flow| flow.remote_ip.to_string().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(headers[3].chars().count())
+        .max(addr_min);
     let fixed_width = port_src_width
-        + endpoint_gap_width
         + port_dest_width
         + protocol_width
         + bytes_width
-        + spacing;
+        + spacing
+        + group_gap_min * 3;
     let address_total = inner_width
         .saturating_sub(fixed_width)
         .max(addr_min.saturating_mul(2));
-    let src_addr_width = address_total / 2;
-    let dest_addr_width = address_total.saturating_sub(src_addr_width);
+    let desired_total = desired_src_width + desired_dest_width;
+    let (src_addr_width, dest_addr_width, extra_gap_width) = if address_total >= desired_total {
+        (
+            desired_src_width,
+            desired_dest_width,
+            address_total - desired_total,
+        )
+    } else {
+        let src = (address_total / 2).max(addr_min);
+        (src, address_total.saturating_sub(src).max(addr_min), 0)
+    };
+    let endpoint_gap_width = group_gap_min + extra_gap_width / 3;
+    let protocol_gap_width = group_gap_min + (extra_gap_width + 1) / 3;
+    let traffic_gap_width = group_gap_min + extra_gap_width.div_ceil(3);
 
-    let protocol_width = protocol_width.max(1);
     let rows = if process.flows.is_empty() {
         vec![
-            Row::new(vec!["No traffic observed", "", "", "", "", "", ""])
+            Row::new(vec!["No traffic observed", "", "", "", "", "", "", "", ""])
                 .style(Style::default().fg(palette::muted())),
         ]
     } else {
@@ -599,29 +636,29 @@ pub(in crate::tui) fn flow_table(
                     crate::capture::TransportProtocol::Udp => ("UDP", palette::violet()),
                 };
                 Row::new(vec![
-                    Cell::from(truncate(
-                        &flow.local_ip.to_string(),
-                        src_addr_width.saturating_sub(1),
-                    )),
+                    Cell::from(truncate(&flow.local_ip.to_string(), src_addr_width)).style(
+                        Style::default()
+                            .fg(palette::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Cell::from(format!(
-                        "{:>width$}",
+                        "{:<width$}",
                         flow.local_port,
                         width = port_src_width
                     ))
                     .style(Style::default().fg(palette::muted())),
                     Cell::from(""),
-                    Cell::from(truncate(
-                        &flow.remote_ip.to_string(),
-                        dest_addr_width.saturating_sub(1),
-                    )),
+                    Cell::from(truncate(&flow.remote_ip.to_string(), dest_addr_width)),
                     Cell::from(format!(
-                        "{:>width$}",
+                        "{:<width$}",
                         flow.remote_port,
                         width = port_dest_width
                     ))
                     .style(Style::default().fg(palette::muted())),
+                    Cell::from(""),
                     Cell::from(format!("{protocol:^protocol_width$}"))
                         .style(Style::default().fg(protocol_color)),
+                    Cell::from(""),
                     Cell::from(format!(
                         "{:>width$}",
                         human_bytes(flow.total()),
@@ -640,13 +677,15 @@ pub(in crate::tui) fn flow_table(
             Constraint::Length(endpoint_gap_width as u16),
             Constraint::Length(dest_addr_width as u16),
             Constraint::Length(port_dest_width as u16),
+            Constraint::Length(protocol_gap_width as u16),
             Constraint::Length(protocol_width as u16),
+            Constraint::Length(traffic_gap_width as u16),
             Constraint::Length(bytes_width as u16),
         ],
     )
     .header(
         Row::new(headers.into_iter().enumerate().map(|(index, header)| {
-            if index == 6 {
+            if index == 8 {
                 Cell::from(Line::from(header).alignment(Alignment::Right))
             } else {
                 Cell::from(header)
@@ -656,6 +695,12 @@ pub(in crate::tui) fn flow_table(
     )
     .column_spacing(1)
     .block(block)
+    .row_highlight_style(
+        Style::default()
+            .patch(palette::selection_style())
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("> ")
 }
 pub(in crate::tui) fn relative_last_seen(
     last_seen: chrono::DateTime<chrono::Utc>,
@@ -802,18 +847,28 @@ mod tests {
             .iter()
             .find(|line| line.contains("Port (Src)"))
             .expect("flow table header");
-        let src_port_end = header_line.find("Port (Src)").unwrap() + "Port (Src)".len();
-        let dest_address_start = header_line.find("Address (Dest)").unwrap();
-        assert_eq!(
-            &header_line[src_port_end..dest_address_start],
-            "    ",
-            "source and destination endpoint groups should have a four-column gap"
-        );
-        let bytes_header_end = header_line.find("Bytes").unwrap() + "Bytes".len();
         let bytes_row = lines
             .iter()
             .find(|line| line.contains("198.51.100.5") && line.contains("40 B"))
             .expect("flow table row");
+        let local_address_end = bytes_row.find("192.0.2.10").unwrap() + "192.0.2.10".len();
+        let local_port_start = bytes_row.find("49152").unwrap();
+        assert!(
+            local_port_start.saturating_sub(local_address_end) <= 4,
+            "source address and port should stay visually grouped: {bytes_row}"
+        );
+        let src_port_end = bytes_row.find("49152").unwrap() + "49152".len();
+        let dest_address_start = bytes_row.find("198.51.100.5").unwrap();
+        assert!(
+            dest_address_start.saturating_sub(src_port_end) >= 4,
+            "source and destination endpoint groups should remain separated: {bytes_row}"
+        );
+        let selected_prefix = &bytes_row[..bytes_row.find("192.0.2.10").unwrap()];
+        assert!(
+            selected_prefix.ends_with("> "),
+            "the selected flow should have a current-row marker: {bytes_row}"
+        );
+        let bytes_header_end = header_line.find("Bytes").unwrap() + "Bytes".len();
         let bytes_value_end = bytes_row.find("40 B").unwrap() + "40 B".len();
         assert_eq!(
             bytes_header_end, bytes_value_end,
@@ -838,9 +893,11 @@ mod tests {
             (line[..byte_x].chars().count() as u16, y as u16)
         };
         let buffer = terminal.backend().buffer();
+        let local_ip = buffer[position("192.0.2.10")].fg;
         let tcp = buffer[position("TCP")].fg;
         let udp = buffer[position("UDP")].fg;
         let bytes = buffer[position("40 B")].fg;
+        assert_eq!(local_ip, palette::accent());
         assert_eq!(tcp, palette::outbound());
         assert_eq!(udp, palette::violet());
         assert_ne!(tcp, udp);
@@ -1350,6 +1407,19 @@ mod tests {
         assert!(rendered.contains("Last seen: 2m ago"));
         assert!(rendered.contains("Esc:back"));
         assert!(rendered.contains("o:settings"));
+        let attr_legend_line = lines
+            .iter()
+            .position(|line| line.contains("Attr: E = exclusive only"))
+            .expect("attribution legend");
+        let flow_title_line = lines
+            .iter()
+            .position(|line| line.contains("IP Statistics (lifetime)"))
+            .expect("IP Statistics title");
+        assert_eq!(
+            flow_title_line,
+            attr_legend_line + 2,
+            "the IP Statistics panel should immediately follow the attribution panel"
+        );
         let inner_lines = lines
             .iter()
             .map(|line| line.chars().skip(2).take(76).collect::<String>())
@@ -1766,6 +1836,22 @@ mod tests {
         );
         assert_eq!(state.proc_scroll, list_scroll);
         assert_eq!(state.proc_detail_scroll, 1);
+        state.proc_detail_view_height = 5;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert_eq!(state.proc_detail_scroll, 19);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert_eq!(
+            state.proc_detail_scroll, 19,
+            "selection should remain on the final flow instead of entering a dead range"
+        );
         let outcome = handle_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),

@@ -764,7 +764,14 @@ mod tests {
             .unwrap();
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("IP addresses"));
-        assert!(rendered.contains("192.0.2.1"));
+        let selected_line = rendered
+            .lines()
+            .find(|line| line.contains("192.0.2.1"))
+            .expect("first IP address");
+        assert!(
+            selected_line.contains("> "),
+            "the selected IP address should have a current-row marker: {selected_line}"
+        );
 
         assert_eq!(
             handle_tui_key(
@@ -802,7 +809,7 @@ mod tests {
                 .as_ref()
                 .and_then(|selector| selector.ip_popup.as_ref())
                 .map(|popup| popup.scroll),
-            Some(22)
+            Some(19)
         );
         assert_eq!(
             handle_tui_key(

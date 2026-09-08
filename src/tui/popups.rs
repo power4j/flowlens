@@ -3,13 +3,13 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
 
 use crate::capture::InterfaceInfo;
 
 use crate::palette;
 
-use super::layout::centered_rect;
+use super::layout::{centered_rect, ratatui_state};
 
 pub(super) fn draw_quit_confirm(f: &mut ratatui::Frame, area: Rect) {
     let popup = centered_rect(area, 50, 7);
@@ -54,7 +54,7 @@ pub(super) fn draw_interface_ip_popup(
     f: &mut ratatui::Frame,
     area: Rect,
     interface: &InterfaceInfo,
-    scroll: usize,
+    selected: usize,
 ) {
     let popup_height = area.height.saturating_sub(4).clamp(8, 18);
     let popup = centered_rect(area, 80, popup_height);
@@ -72,43 +72,14 @@ pub(super) fn draw_interface_ip_popup(
             Span::raw(" "),
         ]));
 
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        interface.name.clone(),
-        Style::default()
-            .fg(palette::strong())
-            .add_modifier(Modifier::BOLD),
-    )));
-    if interface.addresses.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No IP addresses",
-            Style::default().fg(palette::muted()),
-        )));
-    } else {
-        let mut has_v4 = false;
-        let mut has_v6 = false;
-        for address in &interface.addresses {
-            if address.is_ipv4() && !has_v4 {
-                lines.push(Line::from(Span::styled(
-                    "IPv4",
-                    Style::default().fg(palette::accent()),
-                )));
-                has_v4 = true;
-            } else if address.is_ipv6() && !has_v6 {
-                lines.push(Line::from(Span::styled(
-                    "IPv6",
-                    Style::default().fg(palette::accent()),
-                )));
-                has_v6 = true;
-            }
-            lines.push(Line::from(format!("  {address}")));
-        }
-    }
-
     let inner = block.inner(popup);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(inner);
     f.render_widget(Clear, popup);
     f.render_widget(
@@ -116,16 +87,48 @@ pub(super) fn draw_interface_ip_popup(
         popup,
     );
     f.render_widget(block, popup);
-    let max_scroll = lines.len().saturating_sub(chunks[0].height as usize);
     f.render_widget(
-        Paragraph::new(lines)
-            .scroll((scroll.min(max_scroll).min(u16::MAX as usize) as u16, 0))
-            .wrap(ratatui::widgets::Wrap { trim: true }),
+        Paragraph::new(Span::styled(
+            interface.name.clone(),
+            Style::default()
+                .fg(palette::strong())
+                .add_modifier(Modifier::BOLD),
+        )),
         chunks[0],
     );
+    if interface.addresses.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "No IP addresses",
+                Style::default().fg(palette::muted()),
+            )),
+            chunks[1],
+        );
+    } else {
+        let rows = interface.addresses.iter().map(|address| {
+            let family = if address.is_ipv4() { "IPv4" } else { "IPv6" };
+            Row::new([Cell::from(Line::from(vec![
+                Span::styled(family, Style::default().fg(palette::accent())),
+                Span::raw("  "),
+                Span::raw(address.to_string()),
+            ]))])
+        });
+        let table = Table::new(rows, [Constraint::Min(1)])
+            .row_highlight_style(
+                Style::default()
+                    .patch(palette::selection_style())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+        f.render_stateful_widget(
+            table,
+            chunks[1],
+            &mut ratatui_state(interface.addresses.len(), selected),
+        );
+    }
     f.render_widget(
-        Paragraph::new("j/k or ↑/↓:scroll  PgUp/PgDn:page  Home/End:jump  Esc/i:close")
+        Paragraph::new("j/k or ↑/↓:select  PgUp/PgDn:page  Home/End:jump  Esc/i:close")
             .style(Style::default().fg(palette::muted())),
-        chunks[1],
+        chunks[2],
     );
 }
