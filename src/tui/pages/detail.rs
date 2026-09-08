@@ -242,6 +242,118 @@ fn render_attribution_column(
         );
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlowDirection {
+    Outbound,
+    Inbound,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectionalFlowRow {
+    src_ip: std::net::IpAddr,
+    src_port: u16,
+    dest_ip: std::net::IpAddr,
+    dest_port: u16,
+    protocol: crate::capture::TransportProtocol,
+    bytes: u64,
+    direction: FlowDirection,
+}
+
+struct FormattedDirectionalFlowRow {
+    src_ip: String,
+    src_port: String,
+    dest_ip: String,
+    dest_port: String,
+    protocol: &'static str,
+    protocol_color: ratatui::style::Color,
+    bytes: String,
+    local_is_src: bool,
+}
+
+impl DirectionalFlowRow {
+    fn local_is_src(&self) -> bool {
+        matches!(self.direction, FlowDirection::Outbound)
+    }
+}
+
+fn directional_flow_parts(
+    flow: &crate::stats::ProcFlowSnapshot,
+) -> impl Iterator<Item = (FlowDirection, u64)> + '_ {
+    [
+        (FlowDirection::Outbound, flow.sent),
+        (FlowDirection::Inbound, flow.recv),
+    ]
+    .into_iter()
+    .filter(|(_, bytes)| *bytes > 0)
+}
+
+fn directional_flow_rows(process: &ProcessSnapshot) -> Vec<DirectionalFlowRow> {
+    let mut rows = Vec::with_capacity(process.flows.len().saturating_mul(2));
+    for flow in process.flows.iter() {
+        rows.extend(directional_flow_parts(flow).map(|(direction, bytes)| {
+            let (src_ip, src_port, dest_ip, dest_port) = match direction {
+                FlowDirection::Outbound => (
+                    flow.local_ip,
+                    flow.local_port,
+                    flow.remote_ip,
+                    flow.remote_port,
+                ),
+                FlowDirection::Inbound => (
+                    flow.remote_ip,
+                    flow.remote_port,
+                    flow.local_ip,
+                    flow.local_port,
+                ),
+            };
+            DirectionalFlowRow {
+                src_ip,
+                src_port,
+                dest_ip,
+                dest_port,
+                protocol: flow.protocol,
+                bytes,
+                direction,
+            }
+        }));
+    }
+    rows.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.src_ip.cmp(&right.src_ip))
+            .then_with(|| left.src_port.cmp(&right.src_port))
+            .then_with(|| left.dest_ip.cmp(&right.dest_ip))
+            .then_with(|| left.dest_port.cmp(&right.dest_port))
+            .then_with(|| protocol_sort_key(left.protocol).cmp(&protocol_sort_key(right.protocol)))
+            .then_with(|| {
+                direction_sort_key(left.direction).cmp(&direction_sort_key(right.direction))
+            })
+    });
+    rows
+}
+
+pub(in crate::tui) fn directional_flow_row_count(process: &ProcessSnapshot) -> usize {
+    process
+        .flows
+        .iter()
+        .map(|flow| directional_flow_parts(flow).count())
+        .sum()
+}
+
+fn protocol_sort_key(protocol: crate::capture::TransportProtocol) -> u8 {
+    match protocol {
+        crate::capture::TransportProtocol::Tcp => 0,
+        crate::capture::TransportProtocol::Udp => 1,
+    }
+}
+
+fn direction_sort_key(direction: FlowDirection) -> u8 {
+    match direction {
+        FlowDirection::Outbound => 0,
+        FlowDirection::Inbound => 1,
+    }
+}
+
 pub(in crate::tui) fn draw_process_detail(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -518,7 +630,7 @@ pub(in crate::tui) fn draw_process_detail(
         palette::border(),
         None,
     );
-    let len = process.flows.len();
+    let len = directional_flow_row_count(&process);
     let max_scroll = len.saturating_sub(1);
     let scroll = state.proc_detail_scroll.min(max_scroll);
     state.proc_detail_scroll = scroll;
@@ -576,23 +688,40 @@ pub(in crate::tui) fn flow_table(
             2,
         )
     };
-    let desired_src_width = process
-        .flows
+    let directional_rows: Vec<_> = directional_flow_rows(process)
+        .into_iter()
+        .map(|row| {
+            let (protocol, protocol_color) = match row.protocol {
+                crate::capture::TransportProtocol::Tcp => ("TCP", palette::outbound()),
+                crate::capture::TransportProtocol::Udp => ("UDP", palette::violet()),
+            };
+            FormattedDirectionalFlowRow {
+                src_ip: row.src_ip.to_string(),
+                src_port: row.src_port.to_string(),
+                dest_ip: row.dest_ip.to_string(),
+                dest_port: row.dest_port.to_string(),
+                protocol,
+                protocol_color,
+                bytes: human_bytes(row.bytes),
+                local_is_src: row.local_is_src(),
+            }
+        })
+        .collect();
+    let desired_src_width = directional_rows
         .iter()
-        .map(|flow| flow.local_ip.to_string().chars().count())
+        .map(|row| row.src_ip.chars().count())
         .max()
         .unwrap_or(0)
         .max(headers[0].chars().count())
-        .max(if process.flows.is_empty() {
+        .max(if directional_rows.is_empty() {
             "No traffic observed".chars().count()
         } else {
             0
         })
         .max(addr_min);
-    let desired_dest_width = process
-        .flows
+    let desired_dest_width = directional_rows
         .iter()
-        .map(|flow| flow.remote_ip.to_string().chars().count())
+        .map(|row| row.dest_ip.chars().count())
         .max()
         .unwrap_or(0)
         .max(headers[3].chars().count())
@@ -621,50 +750,40 @@ pub(in crate::tui) fn flow_table(
     let protocol_gap_width = group_gap_min + (extra_gap_width + 1) / 3;
     let traffic_gap_width = group_gap_min + extra_gap_width.div_ceil(3);
 
-    let rows = if process.flows.is_empty() {
+    let rows = if directional_rows.is_empty() {
         vec![
             Row::new(vec!["No traffic observed", "", "", "", "", "", "", "", ""])
                 .style(Style::default().fg(palette::muted())),
         ]
     } else {
-        process
-            .flows
-            .iter()
-            .map(|flow| {
-                let (protocol, protocol_color) = match flow.protocol {
-                    crate::capture::TransportProtocol::Tcp => ("TCP", palette::outbound()),
-                    crate::capture::TransportProtocol::Udp => ("UDP", palette::violet()),
-                };
+        directional_rows
+            .into_iter()
+            .map(|row| {
+                let local_style = Style::default()
+                    .fg(palette::accent())
+                    .add_modifier(Modifier::BOLD);
                 Row::new(vec![
-                    Cell::from(truncate(&flow.local_ip.to_string(), src_addr_width)).style(
+                    Cell::from(truncate(&row.src_ip, src_addr_width)).style(if row.local_is_src {
+                        local_style
+                    } else {
                         Style::default()
-                            .fg(palette::accent())
-                            .add_modifier(Modifier::BOLD),
+                    }),
+                    Cell::from(row.src_port).style(Style::default().fg(palette::muted())),
+                    Cell::from(""),
+                    Cell::from(truncate(&row.dest_ip, dest_addr_width)).style(
+                        if row.local_is_src {
+                            Style::default()
+                        } else {
+                            local_style
+                        },
                     ),
-                    Cell::from(format!(
-                        "{:<width$}",
-                        flow.local_port,
-                        width = port_src_width
-                    ))
-                    .style(Style::default().fg(palette::muted())),
+                    Cell::from(row.dest_port).style(Style::default().fg(palette::muted())),
                     Cell::from(""),
-                    Cell::from(truncate(&flow.remote_ip.to_string(), dest_addr_width)),
-                    Cell::from(format!(
-                        "{:<width$}",
-                        flow.remote_port,
-                        width = port_dest_width
-                    ))
-                    .style(Style::default().fg(palette::muted())),
+                    Cell::from(Line::from(row.protocol).alignment(Alignment::Center))
+                        .style(Style::default().fg(row.protocol_color)),
                     Cell::from(""),
-                    Cell::from(format!("{protocol:^protocol_width$}"))
-                        .style(Style::default().fg(protocol_color)),
-                    Cell::from(""),
-                    Cell::from(format!(
-                        "{:>width$}",
-                        human_bytes(flow.total()),
-                        width = bytes_width
-                    ))
-                    .style(Style::default().fg(palette::warn())),
+                    Cell::from(Line::from(row.bytes).alignment(Alignment::Right))
+                        .style(Style::default().fg(palette::warn())),
                 ])
             })
             .collect()
@@ -724,7 +843,631 @@ mod tests {
     use crate::capture::TransportProtocol;
     use crate::stats::ProcFlowSnapshot;
     use crate::tui::*;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn flow(
+        local_ip: [u8; 4],
+        local_port: u16,
+        remote_ip: [u8; 4],
+        remote_port: u16,
+        protocol: TransportProtocol,
+        recv: u64,
+        sent: u64,
+    ) -> ProcFlowSnapshot {
+        ProcFlowSnapshot {
+            local_ip: IpAddr::V4(Ipv4Addr::from(local_ip)),
+            local_port,
+            remote_ip: IpAddr::V4(Ipv4Addr::from(remote_ip)),
+            remote_port,
+            protocol,
+            recv,
+            sent,
+            last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+        }
+    }
+
+    fn process_with_flows(flows: Vec<ProcFlowSnapshot>) -> ProcessSnapshot {
+        let mut process = ProcessSnapshot::attributed(
+            7,
+            Some(Arc::from("curl")),
+            Some(Arc::from("/usr/bin/curl")),
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+            40,
+            60,
+        );
+        process.flows = flows.into();
+        process
+    }
+
+    fn render_flow_table(process: &ProcessSnapshot) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let table =
+                    flow_table(process, Block::default().borders(Borders::ALL), area, false);
+                frame.render_stateful_widget(
+                    table,
+                    area,
+                    &mut ratatui_state(directional_flow_row_count(process), 0),
+                );
+            })
+            .unwrap();
+        terminal
+    }
+
+    fn rendered_cell_color(
+        terminal: &Terminal<TestBackend>,
+        row_marker: &str,
+        cell_text: &str,
+    ) -> ratatui::style::Color {
+        let lines = rendered_lines(terminal);
+        let (y, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains(row_marker))
+            .unwrap_or_else(|| panic!("missing rendered row: {row_marker}"));
+        let byte_x = line.find(cell_text).unwrap();
+        terminal.backend().buffer()[(line[..byte_x].chars().count() as u16, y as u16)].fg
+    }
+
+    #[test]
+    fn directional_flow_rows_project_sent_traffic_from_local_to_remote() {
+        let process = process_with_flows(vec![flow(
+            [192, 0, 2, 10],
+            49_152,
+            [198, 51, 100, 5],
+            443,
+            TransportProtocol::Tcp,
+            0,
+            40,
+        )]);
+
+        let rows = directional_flow_rows(&process);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].src_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        assert_eq!(rows[0].src_port, 49_152);
+        assert_eq!(rows[0].dest_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)));
+        assert_eq!(rows[0].dest_port, 443);
+        assert_eq!(rows[0].bytes, 40);
+        assert!(rows[0].local_is_src());
+    }
+
+    #[test]
+    fn directional_flow_rows_project_received_traffic_from_remote_to_local() {
+        let process = process_with_flows(vec![flow(
+            [192, 0, 2, 10],
+            49_152,
+            [198, 51, 100, 5],
+            443,
+            TransportProtocol::Tcp,
+            60,
+            0,
+        )]);
+
+        let rows = directional_flow_rows(&process);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].src_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)));
+        assert_eq!(rows[0].src_port, 443);
+        assert_eq!(rows[0].dest_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        assert_eq!(rows[0].dest_port, 49_152);
+        assert_eq!(rows[0].bytes, 60);
+        assert!(!rows[0].local_is_src());
+    }
+
+    #[test]
+    fn directional_flow_rows_split_bidirectional_traffic_and_sort_by_bytes() {
+        let process = process_with_flows(vec![flow(
+            [192, 0, 2, 10],
+            49_152,
+            [198, 51, 100, 5],
+            443,
+            TransportProtocol::Tcp,
+            60,
+            40,
+        )]);
+
+        let rows = directional_flow_rows(&process);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].bytes, 60);
+        assert_eq!(rows[0].src_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)));
+        assert!(!rows[0].local_is_src());
+        assert_eq!(rows[1].bytes, 40);
+        assert_eq!(rows[1].src_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        assert!(rows[1].local_is_src());
+    }
+
+    #[test]
+    fn directional_flow_rows_use_every_deterministic_tie_break_field() {
+        let rows = directional_flow_rows(&process_with_flows(vec![
+            flow(
+                [192, 0, 2, 2],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+        ]));
+        assert_eq!(rows[0].src_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+
+        let rows = directional_flow_rows(&process_with_flows(vec![
+            flow(
+                [192, 0, 2, 1],
+                49_153,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+        ]));
+        assert_eq!(rows[0].src_port, 49_152);
+
+        let rows = directional_flow_rows(&process_with_flows(vec![
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 2],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+        ]));
+        assert_eq!(rows[0].dest_ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)));
+
+        let rows = directional_flow_rows(&process_with_flows(vec![
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                444,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+        ]));
+        assert_eq!(rows[0].dest_port, 443);
+
+        let rows = directional_flow_rows(&process_with_flows(vec![
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Udp,
+                0,
+                10,
+            ),
+            flow(
+                [192, 0, 2, 1],
+                49_152,
+                [203, 0, 113, 1],
+                443,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            ),
+        ]));
+        assert_eq!(rows[0].protocol, TransportProtocol::Tcp);
+
+        let rows = directional_flow_rows(&process_with_flows(vec![flow(
+            [127, 0, 0, 1],
+            8080,
+            [127, 0, 0, 1],
+            8080,
+            TransportProtocol::Tcp,
+            10,
+            10,
+        )]));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].direction, FlowDirection::Outbound);
+        assert_eq!(rows[1].direction, FlowDirection::Inbound);
+    }
+
+    #[test]
+    fn directional_flow_row_count_matches_projected_rows_for_all_inclusion_shapes() {
+        let cases = [
+            Vec::new(),
+            vec![flow(
+                [192, 0, 2, 1],
+                1,
+                [198, 51, 100, 1],
+                2,
+                TransportProtocol::Tcp,
+                0,
+                0,
+            )],
+            vec![flow(
+                [192, 0, 2, 1],
+                1,
+                [198, 51, 100, 1],
+                2,
+                TransportProtocol::Tcp,
+                0,
+                10,
+            )],
+            vec![flow(
+                [192, 0, 2, 1],
+                1,
+                [198, 51, 100, 1],
+                2,
+                TransportProtocol::Tcp,
+                20,
+                10,
+            )],
+            vec![
+                flow(
+                    [192, 0, 2, 1],
+                    1,
+                    [198, 51, 100, 1],
+                    2,
+                    TransportProtocol::Tcp,
+                    20,
+                    10,
+                ),
+                flow(
+                    [192, 0, 2, 2],
+                    3,
+                    [198, 51, 100, 2],
+                    4,
+                    TransportProtocol::Udp,
+                    0,
+                    0,
+                ),
+                flow(
+                    [192, 0, 2, 3],
+                    5,
+                    [198, 51, 100, 3],
+                    6,
+                    TransportProtocol::Udp,
+                    30,
+                    0,
+                ),
+            ],
+        ];
+
+        for flows in cases {
+            let process = process_with_flows(flows);
+            assert_eq!(
+                directional_flow_row_count(&process),
+                directional_flow_rows(&process).len()
+            );
+        }
+    }
+
+    fn benchmark_process(
+        flow_count: usize,
+        bidirectional: bool,
+        ipv6: bool,
+        equal_bytes: bool,
+    ) -> ProcessSnapshot {
+        let flows = (0..flow_count)
+            .map(|index| {
+                let local_ip = if ipv6 {
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, index as u16))
+                } else {
+                    IpAddr::V4(Ipv4Addr::new(10, 0, (index / 256) as u8, index as u8))
+                };
+                let remote_ip = if ipv6 {
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, index as u16))
+                } else {
+                    IpAddr::V4(Ipv4Addr::new(198, 51, (index / 256) as u8, index as u8))
+                };
+                let bytes = if equal_bytes { 1_024 } else { index as u64 + 1 };
+                ProcFlowSnapshot {
+                    local_ip,
+                    local_port: 10_000 + index as u16,
+                    remote_ip,
+                    remote_port: 20_000 + index as u16,
+                    protocol: if index % 2 == 0 {
+                        TransportProtocol::Tcp
+                    } else {
+                        TransportProtocol::Udp
+                    },
+                    recv: if bidirectional { bytes } else { 0 },
+                    sent: bytes,
+                    last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+                }
+            })
+            .collect();
+        process_with_flows(flows)
+    }
+
+    fn benchmark_distribution(
+        label: &str,
+        warmup_iterations: usize,
+        measured_iterations: usize,
+        mut operation: impl FnMut(),
+    ) {
+        for _ in 0..warmup_iterations {
+            operation();
+        }
+        let mut samples = Vec::with_capacity(measured_iterations);
+        for _ in 0..measured_iterations {
+            let started = std::time::Instant::now();
+            operation();
+            samples.push(started.elapsed());
+        }
+        samples.sort_unstable();
+        let percentile = |percent: usize| {
+            let index = samples
+                .len()
+                .saturating_mul(percent)
+                .div_ceil(100)
+                .saturating_sub(1);
+            samples[index.min(samples.len().saturating_sub(1))]
+        };
+        println!(
+            "{label}: median={:?}, p95={:?}, max={:?}",
+            percentile(50),
+            percentile(95),
+            samples.last().copied().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release performance measurement"]
+    fn directional_flow_benchmark() {
+        const WARMUP: usize = 100;
+        const ITERATIONS: usize = 1_000;
+        let single_ipv4 = benchmark_process(256, false, false, false);
+        let bidirectional_ipv4 = benchmark_process(256, true, false, false);
+        let bidirectional_ipv6 = benchmark_process(256, true, true, false);
+        let equal_bytes = benchmark_process(256, true, false, true);
+        let large_bidirectional = benchmark_process(4_096, true, false, false);
+
+        for (label, process) in [
+            ("projection 256 single-direction IPv4", &single_ipv4),
+            ("projection 256 bidirectional IPv4", &bidirectional_ipv4),
+            ("projection 256 bidirectional IPv6", &bidirectional_ipv6),
+            ("projection 256 bidirectional equal-byte ties", &equal_bytes),
+            ("projection 4096 bidirectional IPv4", &large_bidirectional),
+        ] {
+            benchmark_distribution(label, WARMUP, ITERATIONS, || {
+                std::hint::black_box(directional_flow_rows(std::hint::black_box(process)));
+            });
+        }
+
+        let area = Rect::new(0, 0, 200, 60);
+        benchmark_distribution(
+            "flow_table 512 directional rows at 200x60",
+            WARMUP,
+            ITERATIONS,
+            || {
+                std::hint::black_box(flow_table(
+                    std::hint::black_box(&bidirectional_ipv4),
+                    Block::default().borders(Borders::ALL),
+                    area,
+                    false,
+                ));
+            },
+        );
+        benchmark_distribution(
+            "flow_table 8192 directional rows at 200x60",
+            WARMUP,
+            ITERATIONS,
+            || {
+                std::hint::black_box(flow_table(
+                    std::hint::black_box(&large_bidirectional),
+                    Block::default().borders(Borders::ALL),
+                    area,
+                    false,
+                ));
+            },
+        );
+
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![bidirectional_ipv4.clone()].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        let now: chrono::DateTime<chrono::Utc> = "2026-07-15T08:02:00Z".parse().unwrap();
+        benchmark_distribution(
+            "full process detail draw 512 rows at 200x60",
+            WARMUP,
+            ITERATIONS,
+            || {
+                terminal
+                    .draw(|frame| {
+                        draw_at(
+                            frame,
+                            &mut state,
+                            &snapshot,
+                            "eth0",
+                            "host",
+                            Instant::now(),
+                            now,
+                        )
+                    })
+                    .unwrap();
+            },
+        );
+
+        let rows = directional_flow_rows(&bidirectional_ipv4);
+        println!(
+            "DirectionalFlowRow size={} bytes, default rows len={}, capacity={}",
+            std::mem::size_of::<DirectionalFlowRow>(),
+            rows.len(),
+            rows.capacity()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release peak working-set measurement"]
+    fn directional_flow_memory_harness() {
+        const WARMUP: usize = 100;
+        const DRAWS: usize = 5_000;
+        let process = benchmark_process(256, true, false, false);
+        let snapshot = TrafficSnapshot {
+            process_data_fresh: true,
+            processes: vec![process].into(),
+            ..TrafficSnapshot::default()
+        };
+        let mut state = AppState::new();
+        state.page = Page::Processes;
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &snapshot,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        let now: chrono::DateTime<chrono::Utc> = "2026-07-15T08:02:00Z".parse().unwrap();
+        for _ in 0..WARMUP + DRAWS {
+            terminal
+                .draw(|frame| {
+                    draw_at(
+                        frame,
+                        &mut state,
+                        &snapshot,
+                        "eth0",
+                        "host",
+                        Instant::now(),
+                        now,
+                    )
+                })
+                .unwrap();
+        }
+        println!(
+            "memory harness: connections=256, directional_rows=512, terminal=200x60, warmup={WARMUP}, draws={DRAWS}"
+        );
+    }
+
+    #[test]
+    fn all_zero_flows_render_the_same_empty_state_without_reserving_address_width() {
+        let empty = process_with_flows(Vec::new());
+        let mut zero = process_with_flows(Vec::new());
+        zero.flows = vec![ProcFlowSnapshot {
+            local_ip: IpAddr::V6(
+                "2001:db8:1111:2222:3333:4444:5555:6666"
+                    .parse::<Ipv6Addr>()
+                    .unwrap(),
+            ),
+            local_port: 49_152,
+            remote_ip: IpAddr::V6(
+                "2001:db8:aaaa:bbbb:cccc:dddd:eeee:ffff"
+                    .parse::<Ipv6Addr>()
+                    .unwrap(),
+            ),
+            remote_port: 443,
+            protocol: TransportProtocol::Tcp,
+            recv: 0,
+            sent: 0,
+            last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+        }]
+        .into();
+
+        let empty_lines = rendered_lines(&render_flow_table(&empty));
+        let zero_lines = rendered_lines(&render_flow_table(&zero));
+
+        assert_eq!(zero_lines, empty_lines);
+        assert!(zero_lines.join("\n").contains("No traffic observed"));
+    }
+
+    #[test]
+    fn loopback_received_traffic_highlights_only_the_normalized_local_side() {
+        let process = process_with_flows(vec![flow(
+            [127, 0, 0, 1],
+            49_152,
+            [127, 0, 0, 2],
+            443,
+            TransportProtocol::Tcp,
+            20,
+            0,
+        )]);
+        let terminal = render_flow_table(&process);
+
+        assert_ne!(
+            rendered_cell_color(&terminal, "20 B", "127.0.0.2"),
+            palette::accent()
+        );
+        assert_eq!(
+            rendered_cell_color(&terminal, "20 B", "127.0.0.1"),
+            palette::accent()
+        );
+    }
+
+    #[test]
+    fn shared_attribution_still_highlights_only_the_normalized_local_endpoint() {
+        let mut process = ProcessSnapshot::attributed_with_shared(
+            7,
+            Some(Arc::from("shared-client")),
+            None,
+            "2026-07-15T08:00:00Z".parse().unwrap(),
+            crate::stats::ProcTraffic::default(),
+            crate::stats::ProcTraffic { recv: 30, sent: 0 },
+            Vec::new(),
+        );
+        process.flows = vec![flow(
+            [10, 11, 12, 31],
+            22_010,
+            [95, 25, 28, 161],
+            33_718,
+            TransportProtocol::Udp,
+            30,
+            0,
+        )]
+        .into();
+        let terminal = render_flow_table(&process);
+
+        assert_ne!(
+            rendered_cell_color(&terminal, "30 B", "95.25.28.161"),
+            palette::accent()
+        );
+        assert_eq!(
+            rendered_cell_color(&terminal, "30 B", "10.11.12.31"),
+            palette::accent()
+        );
+    }
 
     #[test]
     fn process_details_show_empty_connection_table() {
@@ -847,62 +1590,191 @@ mod tests {
             .iter()
             .find(|line| line.contains("Port (Src)"))
             .expect("flow table header");
-        let bytes_row = lines
+        let outbound_row = lines
             .iter()
-            .find(|line| line.contains("198.51.100.5") && line.contains("40 B"))
-            .expect("flow table row");
-        let local_address_end = bytes_row.find("192.0.2.10").unwrap() + "192.0.2.10".len();
-        let local_port_start = bytes_row.find("49152").unwrap();
+            .find(|line| {
+                line.contains("192.0.2.10")
+                    && line.contains("198.51.100.5")
+                    && line.contains("40 B")
+            })
+            .expect("outbound flow table row");
+        let inbound_row = lines
+            .iter()
+            .find(|line| {
+                line.contains("203.0.113.8") && line.contains("192.0.2.10") && line.contains("60 B")
+            })
+            .expect("inbound flow table row");
+        assert!(
+            outbound_row.find("192.0.2.10").unwrap() < outbound_row.find("198.51.100.5").unwrap(),
+            "sent traffic should render local to remote: {outbound_row}"
+        );
+        assert!(
+            inbound_row.find("203.0.113.8").unwrap() < inbound_row.find("192.0.2.10").unwrap(),
+            "received traffic should render remote to local: {inbound_row}"
+        );
+        let local_address_end = outbound_row.find("192.0.2.10").unwrap() + "192.0.2.10".len();
+        let local_port_start = outbound_row.find("49152").unwrap();
         assert!(
             local_port_start.saturating_sub(local_address_end) <= 4,
-            "source address and port should stay visually grouped: {bytes_row}"
+            "source address and port should stay visually grouped: {outbound_row}"
         );
-        let src_port_end = bytes_row.find("49152").unwrap() + "49152".len();
-        let dest_address_start = bytes_row.find("198.51.100.5").unwrap();
+        let src_port_end = outbound_row.find("49152").unwrap() + "49152".len();
+        let dest_address_start = outbound_row.find("198.51.100.5").unwrap();
         assert!(
             dest_address_start.saturating_sub(src_port_end) >= 4,
-            "source and destination endpoint groups should remain separated: {bytes_row}"
+            "source and destination endpoint groups should remain separated: {outbound_row}"
         );
-        let selected_prefix = &bytes_row[..bytes_row.find("192.0.2.10").unwrap()];
+        let selected_prefix = &inbound_row[..inbound_row.find("203.0.113.8").unwrap()];
         assert!(
             selected_prefix.ends_with("> "),
-            "the selected flow should have a current-row marker: {bytes_row}"
+            "the largest directional row should have a current-row marker: {inbound_row}"
         );
         let bytes_header_end = header_line.find("Bytes").unwrap() + "Bytes".len();
-        let bytes_value_end = bytes_row.find("40 B").unwrap() + "40 B".len();
+        let bytes_value_end = outbound_row.find("40 B").unwrap() + "40 B".len();
         assert_eq!(
             bytes_header_end, bytes_value_end,
             "Bytes header and values should share a right edge"
         );
-        assert!(rendered.contains("192.0.2.10"));
-        assert!(rendered.contains("198.51.100.5"));
-        assert!(rendered.contains("203.0.113.8"));
         assert!(rendered.contains("TCP"));
         assert!(rendered.contains("UDP"));
-        assert!(rendered.contains("40 B"));
         assert!(!rendered.contains("40 B/s"));
         assert!(!rendered.contains("No traffic observed"));
 
-        let position = |needle: &str| {
-            let (y, line) = lines
+        let position_in = |line: &str, needle: &str| {
+            let y = lines
                 .iter()
-                .enumerate()
-                .find(|(_, line)| line.contains(needle))
-                .unwrap_or_else(|| panic!("missing rendered text: {needle}"));
+                .position(|candidate| candidate == line)
+                .unwrap();
             let byte_x = line.find(needle).unwrap();
             (line[..byte_x].chars().count() as u16, y as u16)
         };
         let buffer = terminal.backend().buffer();
-        let local_ip = buffer[position("192.0.2.10")].fg;
-        let tcp = buffer[position("TCP")].fg;
-        let udp = buffer[position("UDP")].fg;
-        let bytes = buffer[position("40 B")].fg;
-        assert_eq!(local_ip, palette::accent());
+        assert_eq!(
+            buffer[position_in(outbound_row, "192.0.2.10")].fg,
+            palette::accent()
+        );
+        assert_ne!(
+            buffer[position_in(outbound_row, "198.51.100.5")].fg,
+            palette::accent()
+        );
+        assert_ne!(
+            buffer[position_in(inbound_row, "203.0.113.8")].fg,
+            palette::accent()
+        );
+        assert_eq!(
+            buffer[position_in(inbound_row, "192.0.2.10")].fg,
+            palette::accent()
+        );
+        let tcp = buffer[position_in(outbound_row, "TCP")].fg;
+        let udp = buffer[position_in(inbound_row, "UDP")].fg;
+        let bytes = buffer[position_in(outbound_row, "40 B")].fg;
         assert_eq!(tcp, palette::outbound());
         assert_eq!(udp, palette::violet());
         assert_ne!(tcp, udp);
         assert_ne!(tcp, bytes);
         assert_ne!(udp, bytes);
+    }
+
+    #[test]
+    fn narrow_process_details_render_directional_ipv6_rows_with_visible_selection() {
+        let mut process = process_with_flows(Vec::new());
+        process.flows = vec![ProcFlowSnapshot {
+            local_ip: IpAddr::V6("fd00::1".parse::<Ipv6Addr>().unwrap()),
+            local_port: 49_152,
+            remote_ip: IpAddr::V6(
+                "2001:db8:aaaa:bbbb:cccc:dddd:eeee:ffff"
+                    .parse::<Ipv6Addr>()
+                    .unwrap(),
+            ),
+            remote_port: 443,
+            protocol: TransportProtocol::Tcp,
+            recv: 60,
+            sent: 40,
+            last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
+        }]
+        .into();
+
+        for width in [68, 80] {
+            let snapshot = TrafficSnapshot {
+                process_data_fresh: true,
+                processes: vec![process.clone()].into(),
+                ..TrafficSnapshot::default()
+            };
+            let mut state = AppState::new();
+            state.page = Page::Processes;
+            handle_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &snapshot,
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, 36)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_at(
+                        frame,
+                        &mut state,
+                        &snapshot,
+                        "eth0",
+                        "host",
+                        Instant::now(),
+                        "2026-07-15T08:02:00Z".parse().unwrap(),
+                    );
+                })
+                .unwrap();
+
+            let lines = rendered_lines(&terminal);
+            let selected_row = lines
+                .iter()
+                .find(|line| line.contains("60 B") && line.contains("TCP"))
+                .unwrap_or_else(|| panic!("missing selected IPv6 row at width {width}"));
+            let unselected_row = lines
+                .iter()
+                .find(|line| line.contains("40 B") && line.contains("TCP"))
+                .unwrap_or_else(|| panic!("missing unselected IPv6 row at width {width}"));
+            for row in [selected_row, unselected_row] {
+                assert!(
+                    row.contains("fd00::1"),
+                    "missing local IPv6 at width {width}: {row}"
+                );
+                assert!(
+                    row.contains("2001:db8"),
+                    "missing truncated remote IPv6 at width {width}: {row}"
+                );
+                assert!(
+                    row.contains("49152"),
+                    "missing local port at width {width}: {row}"
+                );
+                assert!(
+                    row.contains("443"),
+                    "missing remote port at width {width}: {row}"
+                );
+                assert!(
+                    row.contains("TCP"),
+                    "missing protocol at width {width}: {row}"
+                );
+            }
+            let selected_prefix = &selected_row[..selected_row.find("2001:db8").unwrap()];
+            assert!(
+                selected_prefix.ends_with("> "),
+                "selected IPv6 row should retain its marker at width {width}: {selected_row}"
+            );
+
+            let position = |line: &str, needle: &str| {
+                let y = lines
+                    .iter()
+                    .position(|candidate| candidate == line)
+                    .unwrap();
+                let byte_x = line.find(needle).unwrap();
+                (line[..byte_x].chars().count() as u16, y as u16)
+            };
+            let buffer = terminal.backend().buffer();
+            let selected_style = buffer[position(selected_row, "fd00::1")].style();
+            let unselected_style = buffer[position(unselected_row, "fd00::1")].style();
+            assert_ne!(
+                selected_style, unselected_style,
+                "selected IPv6 row should have a distinct background or reverse style at width {width}"
+            );
+        }
     }
 
     #[test]
@@ -1803,14 +2675,14 @@ mod tests {
             40,
             60,
         );
-        process.flows = (0..20u16)
+        process.flows = (0..10u16)
             .map(|port| ProcFlowSnapshot {
                 local_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
                 local_port: 49_152,
                 remote_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)),
                 remote_port: port + 1,
                 protocol: TransportProtocol::Tcp,
-                recv: 0,
+                recv: 5,
                 sent: 10,
                 last_seen: "2026-07-15T08:00:00Z".parse().unwrap(),
             })
@@ -1839,6 +2711,18 @@ mod tests {
         state.proc_detail_view_height = 5;
         handle_key(
             &mut state,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert_eq!(state.proc_detail_scroll, 6);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &snapshot,
+        );
+        assert_eq!(state.proc_detail_scroll, 1);
+        handle_key(
+            &mut state,
             KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
             &snapshot,
         );
@@ -1852,6 +2736,34 @@ mod tests {
             state.proc_detail_scroll, 19,
             "selection should remain on the final flow instead of entering a dead range"
         );
+
+        state.process_detail.as_mut().unwrap().process.flows = vec![flow(
+            [192, 0, 2, 10],
+            49_152,
+            [198, 51, 100, 5],
+            443,
+            TransportProtocol::Tcp,
+            0,
+            10,
+        )]
+        .into();
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_process_detail(
+                    frame,
+                    frame.area(),
+                    &mut state,
+                    &snapshot,
+                    "2026-07-15T08:02:00Z".parse().unwrap(),
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            state.proc_detail_scroll, 0,
+            "a shorter refreshed snapshot should clamp selection to its new final row"
+        );
+
         let outcome = handle_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),

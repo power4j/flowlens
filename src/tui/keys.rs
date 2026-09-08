@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::pages::detail::directional_flow_row_count;
 use super::pages::settings::{
     DIAGNOSTICS_ROW, PALETTE_CHOICES, PALETTE_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS,
 };
@@ -377,7 +378,7 @@ pub(super) fn prev_palette_choice(choice: palette::PaletteChoice) -> palette::Pa
 
 pub(super) fn scroll(state: &mut AppState, delta: isize) {
     if let Some(detail) = state.process_detail.as_ref() {
-        let max_index = detail.process.flows.len().saturating_sub(1) as isize;
+        let max_index = directional_flow_row_count(&detail.process).saturating_sub(1) as isize;
         state.proc_detail_scroll =
             (state.proc_detail_scroll as isize + delta).clamp(0, max_index) as usize;
         return;
@@ -419,7 +420,7 @@ pub(super) fn scroll_to_top(state: &mut AppState) {
 
 pub(super) fn scroll_to_bottom(state: &mut AppState, snapshot: &TrafficSnapshot) {
     if let Some(detail) = state.process_detail.as_ref() {
-        let len = detail.process.flows.len();
+        let len = directional_flow_row_count(&detail.process);
         state.proc_detail_scroll = len.saturating_sub(1);
         return;
     }

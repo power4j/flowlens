@@ -416,7 +416,7 @@ struct Cli {
     /// Number of entries per top-N list (default: 10, min: 1)
     #[arg(long = "top-n", short = 'n', default_value_t = DEFAULT_TOP_N, value_parser = clap::value_parser!(u64).range(1..))]
     top_n: u64,
-    /// Max connection rows per process on the process-detail page (default: 256, min: 1)
+    /// Max tracked connections per process on the process-detail page (default: 256, min: 1)
     #[arg(long = "proc-flows", default_value_t = stats::DEFAULT_PROC_FLOWS as u64, value_parser = clap::value_parser!(u64).range(1..))]
     proc_flows: u64,
     /// Ranking window: cumulative, 5s, 10s, 30s, 60s, or 5m
@@ -500,6 +500,7 @@ mod scheduling_tests {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn missing_npcap_fails_before_capture_setup() {
@@ -592,6 +593,14 @@ mod cli_tests {
     fn proc_flows_defaults_to_256() {
         let cli = Cli::try_parse_from(["flowlens", "eth0"]).unwrap();
         assert_eq!(cli.proc_flows, stats::DEFAULT_PROC_FLOWS as u64);
+    }
+
+    #[test]
+    fn proc_flows_help_describes_tracked_connections_not_display_rows() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("Max tracked connections per process on the process-detail page"));
+        assert!(!help.contains("Max connection rows per process"));
     }
 
     #[test]
