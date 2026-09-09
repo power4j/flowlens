@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.6.1] - 2026-09-09
+
+### Added
+
 - Process-detail flow tables now split bidirectional traffic into inbound and outbound rows, ordered by transferred bytes, so endpoint direction is explicit.
 
 ### Changed
