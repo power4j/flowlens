@@ -6,9 +6,16 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+- Process-detail flow tables now split bidirectional traffic into inbound and outbound rows, ordered by transferred bytes, so endpoint direction is explicit.
+
 ### Changed
 
+- Process-detail flow tables now adapt endpoint spacing to compact and wide terminals, and use higher-contrast port text for readability.
+- Interface IP address popups now use a selectable, scrollable table with clearer IPv4/IPv6 grouping and bounded keyboard navigation.
+
 ### Fixed
+
+- Process-detail scrolling now follows the rendered directional rows and clamps to the available range, including when traffic changes or a flow has only one direction.
 
 ### Removed
 
