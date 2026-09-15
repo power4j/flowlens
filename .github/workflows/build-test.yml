@@ -61,7 +61,7 @@ jobs:
             target_dir: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: actions/cache@v6
@@ -127,7 +127,7 @@ jobs:
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: actions/cache@v6
@@ -216,7 +216,7 @@ jobs:
             target_dir: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: actions/cache@v6
