@@ -21,8 +21,12 @@ docs/local/
 # AI
 .claude/
 .codex/
+.agents/
+.grok/
+.pi/
 openspec/
 .mcp.json
 #AGENTS.md
 #CLAUDE.md
 verification.md
+skills-lock.json
