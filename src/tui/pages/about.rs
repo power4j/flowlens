@@ -5,9 +5,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::palette;
+use crate::palette::Theme;
 
-pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect) {
+pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let version = env!("CARGO_PKG_VERSION");
     let repository = env!("CARGO_PKG_REPOSITORY");
     let commit = env!("FLOWLENS_BUILD_COMMIT");
@@ -30,7 +30,7 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect) {
         .split(horizontal)[1];
     let frame = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(palette::border()));
+        .border_style(Style::default().fg(theme.colors.border));
     let content_area = frame.inner(frame_area);
     f.render_widget(frame, frame_area);
 
@@ -38,23 +38,23 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect) {
         Line::from(Span::styled(
             "flowlens",
             Style::default()
-                .fg(palette::accent())
+                .fg(theme.colors.brand)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Network Traffic Analyzer",
-            Style::default().fg(palette::strong()),
+            Style::default().fg(theme.colors.title),
         )),
         Line::from(""),
         Line::from(Span::styled(
             format!("Version {version} ({commit})"),
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.colors.secondary),
         )),
         Line::from(""),
         Line::from(Span::styled(
             repository,
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.colors.secondary),
         )),
     ];
     let para = Paragraph::new(lines).alignment(Alignment::Center);

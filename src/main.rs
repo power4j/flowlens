@@ -64,6 +64,22 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> ExitCode {
+    let tui_mode = cli.output.is_none() && cli.format != "json";
+    if cli.theme.is_some() && !tui_mode {
+        eprintln!("--theme is only available in interactive TUI mode.");
+        return ExitCode::FAILURE;
+    }
+    let theme = if tui_mode {
+        match palette::parse_cli_theme(cli.theme.as_deref().unwrap_or("auto")) {
+            Ok(theme) => theme,
+            Err(error) => {
+                eprintln!("Theme configuration error: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        (palette::ThemeSelection::Auto, None)
+    };
     if let Err(message) = require_npcap() {
         eprintln!("{message}");
         return ExitCode::FAILURE;
@@ -90,7 +106,14 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
     let is_json = cli.format == "json";
 
     if cli.output.is_none() && !is_json {
-        return run_tui_mode(&cli, diagnostics_writer, proc_table, top_n, proc_flows);
+        return run_tui_mode(
+            &cli,
+            diagnostics_writer,
+            proc_table,
+            top_n,
+            proc_flows,
+            palette::ThemeState::with_selection(theme.0, theme.1),
+        );
     }
 
     run_capture_mode(
@@ -109,6 +132,7 @@ fn run_tui_mode(
     proc_table: proc_table::SharedProcTable,
     top_n: usize,
     proc_flows: usize,
+    theme: palette::ThemeState,
 ) -> ExitCode {
     let mut session = match session::TrafficSession::discover(
         proc_table,
@@ -141,6 +165,7 @@ fn run_tui_mode(
         diagnostics_writer,
         diagnostics_enabled,
         rank_window,
+        theme,
     ) {
         eprintln!("TUI error: {error}");
         return ExitCode::FAILURE;
@@ -413,6 +438,9 @@ struct Cli {
     /// Output format: plain (default) or json
     #[arg(long = "format", short = 'f', default_value = "plain", value_parser = ["plain", "json"])]
     format: String,
+    /// TUI theme: auto, dark, ansi16, mono, or a JSON theme file
+    #[arg(long)]
+    theme: Option<String>,
     /// Number of entries per top-N list (default: 10, min: 1)
     #[arg(long = "top-n", short = 'n', default_value_t = DEFAULT_TOP_N, value_parser = clap::value_parser!(u64).range(1..))]
     top_n: u64,
@@ -501,12 +529,61 @@ mod scheduling_tests {
 mod cli_tests {
     use super::*;
     use clap::CommandFactory;
+    use std::cell::Cell;
 
     #[test]
     fn missing_npcap_fails_before_capture_setup() {
         let cli = Cli::try_parse_from(["flowlens", "--format", "json"]).unwrap();
 
         assert_eq!(run(cli, || Err(NPCAP_REQUIRED_MESSAGE)), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn explicit_theme_is_rejected_before_npcap_for_non_tui_modes() {
+        for args in [
+            vec!["flowlens", "eth0", "--format", "json", "--theme", "auto"],
+            vec![
+                "flowlens",
+                "eth0",
+                "--output",
+                "traffic.txt",
+                "--theme",
+                "dark",
+            ],
+            vec![
+                "flowlens",
+                "eth0",
+                "--format",
+                "json",
+                "--theme",
+                "missing-theme.json",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let npc_checked = Cell::new(false);
+            assert_eq!(
+                run(cli, || {
+                    npc_checked.set(true);
+                    Ok(())
+                }),
+                ExitCode::FAILURE
+            );
+            assert!(!npc_checked.get());
+        }
+    }
+
+    #[test]
+    fn invalid_tui_theme_is_rejected_before_npcap() {
+        let cli = Cli::try_parse_from(["flowlens", "--theme", "missing-theme.json"]).unwrap();
+        let npc_checked = Cell::new(false);
+        assert_eq!(
+            run(cli, || {
+                npc_checked.set(true);
+                Ok(())
+            }),
+            ExitCode::FAILURE
+        );
+        assert!(!npc_checked.get());
     }
 
     #[test]

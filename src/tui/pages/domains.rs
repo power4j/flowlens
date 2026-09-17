@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Cell, Row, Table};
 
-use crate::palette;
+use crate::palette::Theme;
 use crate::report::truncate;
 use crate::stats::{RankWindow, TrafficSnapshot};
 
@@ -22,17 +22,19 @@ pub(in crate::tui) fn draw_domain_preview(
     snapshot: &TrafficSnapshot,
     mode: LayoutMode,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) {
     let footer = preview_position(snapshot.outbound_domains.len(), area.height);
     let block = panel_block(
         "dom",
         "Top Domains",
         Some(snapshot.outbound_domains.len()),
-        palette::violet(),
-        palette::border(),
+        theme.colors.brand,
+        theme.colors.border,
         Some(footer),
+        theme,
     );
-    let table = domain_table(snapshot, mode, block, now);
+    let table = domain_table(snapshot, mode, block, now, theme);
     f.render_widget(table, area);
 }
 
@@ -43,6 +45,7 @@ pub(in crate::tui) fn draw_domains(
     snapshot: &TrafficSnapshot,
     mode: LayoutMode,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) {
     let view_h = area.height.saturating_sub(3) as usize;
     state.domain_view_height = view_h.max(1);
@@ -55,14 +58,15 @@ pub(in crate::tui) fn draw_domains(
         "dom",
         "Domains",
         Some(snapshot.outbound_domains.len()),
-        palette::violet(),
-        palette::border(),
+        theme.colors.brand,
+        theme.colors.border,
         Some(footer),
+        theme,
     );
-    let table = domain_table(snapshot, mode, block, now)
+    let table = domain_table(snapshot, mode, block, now, theme)
         .row_highlight_style(
             Style::default()
-                .patch(palette::selection_style())
+                .patch(theme.selection_style())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
@@ -78,10 +82,11 @@ pub(in crate::tui) fn domain_table(
     mode: LayoutMode,
     block: Block<'static>,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) -> Table<'static> {
     let compact = mode == LayoutMode::Compact;
-    let rows = domain_rows(snapshot, compact, now);
-    let header_style = Style::default().fg(palette::muted());
+    let rows = domain_rows(snapshot, compact, now, theme);
+    let header_style = Style::default().fg(theme.colors.header);
     let table = if compact {
         Table::new(
             rows,
@@ -112,6 +117,7 @@ pub(in crate::tui) fn domain_rows(
     snapshot: &TrafficSnapshot,
     compact: bool,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) -> Vec<Row<'static>> {
     if snapshot.outbound_domains.is_empty() {
         let empty_state = if snapshot.ranking.window == RankWindow::Cumulative {
@@ -130,7 +136,7 @@ pub(in crate::tui) fn domain_rows(
                 Cell::from(""),
             ]
         };
-        return vec![Row::new(cells).style(Style::default().fg(palette::muted()))];
+        return vec![Row::new(cells).style(Style::default().fg(theme.colors.placeholder))];
     }
 
     snapshot
@@ -138,7 +144,8 @@ pub(in crate::tui) fn domain_rows(
         .iter()
         .map(|domain| {
             let host = Cell::from(truncate(domain.host(), 40));
-            let last_seen = Cell::from(relative_last_seen(domain.last_seen(), now));
+            let last_seen = Cell::from(relative_last_seen(domain.last_seen(), now))
+                .style(Style::default().fg(theme.colors.time));
             if compact {
                 Row::new(vec![
                     host,
@@ -146,21 +153,21 @@ pub(in crate::tui) fn domain_rows(
                         snapshot,
                         domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
                     ))
-                    .style(Style::default().fg(palette::strong())),
+                    .style(Style::default().fg(theme.colors.total)),
                     last_seen,
                 ])
             } else {
                 Row::new(vec![
                     host,
                     Cell::from(format_rank_value(snapshot, domain.rank_in_bytes))
-                        .style(Style::default().fg(palette::inbound())),
+                        .style(Style::default().fg(theme.colors.inbound)),
                     Cell::from(format_rank_value(snapshot, domain.rank_out_bytes))
-                        .style(Style::default().fg(palette::outbound())),
+                        .style(Style::default().fg(theme.colors.outbound)),
                     Cell::from(format_rank_value(
                         snapshot,
                         domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
                     ))
-                    .style(Style::default().fg(palette::strong())),
+                    .style(Style::default().fg(theme.colors.total)),
                     last_seen,
                 ])
             }

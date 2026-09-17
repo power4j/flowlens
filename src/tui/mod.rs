@@ -17,7 +17,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::diagnostics::DiagnosticsWriter;
-use crate::palette;
+use crate::palette::ThemeState;
 use crate::report::hostname;
 use crate::session::TrafficSession;
 use crate::stats::{RankWindow, TrafficSnapshot};
@@ -49,8 +49,8 @@ pub fn run(
     diagnostics_writer: Option<DiagnosticsWriter>,
     diagnostics_enabled: Arc<AtomicBool>,
     rank_window: Arc<AtomicU8>,
+    theme: ThemeState,
 ) -> io::Result<()> {
-    palette::set_active_tier(palette::detect_tier());
     let started_at = Instant::now();
     let host = hostname();
     let mut snapshot = session
@@ -69,6 +69,7 @@ pub fn run(
     } else {
         AppState::startup(session.interfaces())
     };
+    state.theme = theme;
     state.rank_window = RankWindow::from_u8(rank_window.load(Ordering::Acquire));
     state.rank_window_draft = state.rank_window;
     if let Some(writer) = diagnostics_writer.as_ref() {
@@ -280,6 +281,7 @@ fn render_processes_with_pending(bytes: u64) -> Terminal<TestBackend> {
         ..TrafficSnapshot::default()
     };
     let mut state = AppState::new();
+    state.theme = crate::palette::ThemeState::dark_for_test();
     state.page = Page::Processes;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal

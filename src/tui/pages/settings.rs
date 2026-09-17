@@ -5,46 +5,17 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::palette;
-
 use crate::tui::layout::*;
 use crate::tui::state::*;
 
 /// Number of selectable rows in the settings overlay.
-/// Palette choices in the order the settings overlay cycles through them.
-pub(in crate::tui) const PALETTE_CHOICES: [palette::PaletteChoice; 4] = [
-    palette::PaletteChoice::Auto,
-    palette::PaletteChoice::Truecolor,
-    palette::PaletteChoice::SixteenColor,
-    palette::PaletteChoice::Monochrome,
-];
-
 pub(in crate::tui) const SETTINGS_SELECTABLE_ROWS: usize = 3;
 /// Settings row index for the ranking window.
 pub(in crate::tui) const RANK_WINDOW_ROW: usize = 0;
-/// Settings row index for the palette choice.
-pub(in crate::tui) const PALETTE_ROW: usize = 1;
+/// Settings row index for the theme choice.
+pub(in crate::tui) const THEME_ROW: usize = 1;
 /// Settings row index for the diagnostics toggle.
 pub(in crate::tui) const DIAGNOSTICS_ROW: usize = 2;
-/// User-visible label for a palette choice, as shown in the settings overlay.
-pub(in crate::tui) fn palette_choice_label(choice: palette::PaletteChoice) -> &'static str {
-    match choice {
-        palette::PaletteChoice::Auto => "Auto",
-        palette::PaletteChoice::Truecolor => "truecolor",
-        palette::PaletteChoice::SixteenColor => "16-color",
-        palette::PaletteChoice::Monochrome => "monochrome",
-    }
-}
-
-/// User-visible label for a detected color tier.
-pub(in crate::tui) fn color_tier_label(tier: palette::ColorTier) -> &'static str {
-    match tier {
-        palette::ColorTier::Truecolor => "truecolor",
-        palette::ColorTier::Sixteen => "16-color",
-        palette::ColorTier::Monochrome => "monochrome",
-    }
-}
-
 /// Two-character selection marker column: `> ` for the selected row, two
 /// spaces otherwise, so rows stay aligned even when the highlight style is not
 /// visible (16-color/monochrome tiers).
@@ -55,26 +26,26 @@ pub(in crate::tui) fn settings_selection_prefix(selected: bool) -> &'static str 
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let theme = &state.theme.resolved;
     let popup = centered_rect(area, 70, 11);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::accent()))
+        .border_style(Style::default().fg(theme.colors.border))
         .title(Line::from(vec![
             Span::raw(" "),
             Span::styled(
                 "Settings",
                 Style::default()
-                    .fg(palette::accent())
+                    .fg(theme.colors.title)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
         ]));
-    let detected_label = color_tier_label(state.detected_tier);
-    let choice_label = palette_choice_label(state.palette_choice);
+    let choice_label = state.theme.selection_label();
     let diagnostics_label = if state.diagnostics_draft { "ON" } else { "OFF" };
     let rank_window_label = ranking_window_label(state.rank_window_draft);
-    let selection_style = palette::selection_style();
-    let palette_selected = state.settings_selection == PALETTE_ROW;
+    let selection_style = theme.selection_style();
+    let palette_selected = state.settings_selection == THEME_ROW;
     let mut rank_window_line = Line::from(vec![
         Span::raw(settings_selection_prefix(
             state.settings_selection == RANK_WINDOW_ROW,
@@ -82,26 +53,25 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Span::styled(
             "Rank window: ",
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.colors.setting_label)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(rank_window_label, Style::default().fg(palette::accent())),
+        Span::styled(
+            rank_window_label,
+            Style::default().fg(theme.colors.setting_value),
+        ),
     ]);
     let mut palette_line = Line::from(vec![
         Span::raw(settings_selection_prefix(palette_selected)),
         Span::styled(
-            "Palette: ",
+            "Theme: ",
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.colors.setting_label)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            choice_label.to_string(),
-            Style::default().fg(palette::accent()),
-        ),
-        Span::styled(
-            format!("  (detected: {detected_label})"),
-            Style::default().fg(palette::muted()),
+            choice_label,
+            Style::default().fg(theme.colors.setting_value),
         ),
     ]);
     let mut diagnostics_line = Line::from(vec![
@@ -111,10 +81,13 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Span::styled(
             "Diagnostics: ",
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.colors.setting_label)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(diagnostics_label, Style::default().fg(palette::accent())),
+        Span::styled(
+            diagnostics_label,
+            Style::default().fg(theme.colors.setting_value),
+        ),
     ]);
     if palette_selected {
         palette_line.style = selection_style;
@@ -159,8 +132,8 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
     // never carries a selection marker and is never highlighted.
     let file_line = Line::from(vec![
         Span::raw("  "),
-        Span::styled("File: ", Style::default().fg(palette::muted())),
-        Span::styled(file_label, Style::default().fg(palette::muted())),
+        Span::styled("File: ", Style::default().fg(theme.colors.hint)),
+        Span::styled(file_label, Style::default().fg(theme.colors.hint)),
     ]);
     let lines = vec![
         Line::from(""),
@@ -171,12 +144,12 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Line::from(""),
         Line::from(Span::styled(
             "j/k select  h/l change  o or Esc close",
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.colors.hint),
         )),
     ];
     f.render_widget(Clear, popup);
     f.render_widget(
-        Block::default().style(Style::default().bg(palette::bg())),
+        Block::default().style(Style::default().bg(theme.colors.popup_bg)),
         popup,
     );
     f.render_widget(block, popup);
@@ -299,13 +272,13 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Settings"));
         assert!(rendered.contains("Rank window:"));
-        assert!(rendered.contains("Palette:"));
+        assert!(rendered.contains("Theme:"));
         assert!(rendered.contains("j/k select  h/l change  o or Esc close"));
     }
 
     #[test]
     fn settings_overlay_lays_out_rank_first_then_file_under_diagnostics() {
-        // Layout contract: Rank window is the first row, then Palette, then
+        // Layout contract: Rank window is the first row, then Theme, then
         // Diagnostics, with the file hint directly beneath Diagnostics. The
         // file hint is a muted, non-selectable sub-line and must not carry a
         // selection marker.
@@ -323,7 +296,7 @@ mod tests {
             .iter()
             .find(|line| {
                 line.contains("Rank window:")
-                    || line.contains("Palette:")
+                    || line.contains("Theme:")
                     || line.contains("Diagnostics:")
             })
             .expect("a settings row exists");
@@ -384,8 +357,6 @@ mod tests {
     #[test]
     fn settings_hl_changes_the_selected_item_only() {
         let mut state = AppState::new();
-        state.detected_tier = palette::ColorTier::Truecolor;
-        state.palette_choice = palette::PaletteChoice::Auto;
         send_key(&mut state, KeyCode::Char('o'));
 
         // Rank window row selected by default: h/l cycle the rank window.
@@ -396,7 +367,7 @@ mod tests {
         assert_eq!(state.rank_window_draft, RankWindow::Cumulative.next());
         assert!(!state.diagnostics_draft);
 
-        // Move down to Palette: h/l cycle the palette without touching
+        // Move down to Theme: h/l cycle it without touching
         // diagnostics or the rank draft.
         send_key(&mut state, KeyCode::Char('j'));
         assert_eq!(state.settings_selection, 1);
@@ -404,7 +375,10 @@ mod tests {
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
-        assert_eq!(state.palette_choice, palette::PaletteChoice::Truecolor);
+        assert_eq!(
+            state.theme.selection,
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Dark)
+        );
 
         // Select Diagnostics: h/l toggle only the draft; the actual state
         // (writer + shared flag) is committed when the overlay closes.
@@ -430,17 +404,59 @@ mod tests {
     }
 
     #[test]
+    fn theme_row_cycles_forward_and_backward_with_an_optional_file_theme() {
+        let mut state = AppState::new();
+        send_key(&mut state, KeyCode::Char('o'));
+        send_key(&mut state, KeyCode::Char('j'));
+
+        for expected in [
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Dark),
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Ansi16),
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Mono),
+            crate::palette::ThemeSelection::Auto,
+        ] {
+            send_key(&mut state, KeyCode::Char('l'));
+            assert_eq!(state.theme.selection, expected);
+        }
+        send_key(&mut state, KeyCode::Char('h'));
+        assert_eq!(
+            state.theme.selection,
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Mono)
+        );
+
+        let mut file_theme = crate::palette::Theme::builtin(crate::palette::BuiltinTheme::Dark);
+        file_theme.name = "Session file".to_string();
+        state.theme = crate::palette::ThemeState::for_test(
+            crate::palette::BuiltinTheme::Dark,
+            crate::palette::ThemeSelection::Auto,
+            Some(file_theme),
+        );
+        send_key(&mut state, KeyCode::Char('h'));
+        assert_eq!(state.theme.selection, crate::palette::ThemeSelection::File);
+        send_key(&mut state, KeyCode::Char('l'));
+        assert_eq!(state.theme.selection, crate::palette::ThemeSelection::Auto);
+        for expected in [
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Dark),
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Ansi16),
+            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Mono),
+            crate::palette::ThemeSelection::File,
+            crate::palette::ThemeSelection::Auto,
+        ] {
+            send_key(&mut state, KeyCode::Char('l'));
+            assert_eq!(state.theme.selection, expected);
+        }
+    }
+
+    #[test]
     fn settings_enter_is_ignored() {
         let mut state = AppState::new();
-        state.detected_tier = palette::ColorTier::Truecolor;
-        state.palette_choice = palette::PaletteChoice::Auto;
         send_key(&mut state, KeyCode::Char('o'));
 
         // Enter has no action in the settings overlay: it neither closes the
         // overlay nor commits the diagnostics draft.
         assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
         assert!(state.settings_open, "Enter must not close the overlay");
-        assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
+        assert_eq!(state.theme.selection, crate::palette::ThemeSelection::Auto);
     }
 
     #[test]
@@ -460,6 +476,40 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("Diagnostics: ON"));
         assert!(rendered.contains("flowlens-42.log"));
+    }
+
+    #[test]
+    fn settings_overlay_uses_distinct_setting_and_popup_roles() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::new();
+        state.theme = crate::palette::ThemeState::dark_for_test();
+        state.theme.resolved.colors.setting_label = ratatui::style::Color::LightRed;
+        state.theme.resolved.colors.setting_value = ratatui::style::Color::LightGreen;
+        state.theme.resolved.colors.hint = ratatui::style::Color::LightBlue;
+        state.theme.resolved.colors.popup_bg = ratatui::style::Color::DarkGray;
+        state.settings_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
+            .unwrap();
+
+        let cells = &terminal.backend().buffer().content;
+        for expected in [
+            state.theme.resolved.colors.setting_label,
+            state.theme.resolved.colors.setting_value,
+            state.theme.resolved.colors.hint,
+        ] {
+            assert!(
+                cells.iter().any(|cell| cell.fg == expected),
+                "configured role {expected:?} was not rendered"
+            );
+        }
+        assert!(
+            cells
+                .iter()
+                .any(|cell| cell.bg == state.theme.resolved.colors.popup_bg),
+            "configured popup background was not rendered"
+        );
     }
 
     #[test]
@@ -600,7 +650,7 @@ mod tests {
             .unwrap();
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("> Rank window:"));
-        assert!(rendered.contains("  Palette:"));
+        assert!(rendered.contains("  Theme:"));
         assert!(rendered.contains("  Diagnostics:"));
 
         // Selecting Diagnostics (row 2) moves the marker to it; Rank window
@@ -612,7 +662,7 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("> Diagnostics:"));
         assert!(rendered.contains("  Rank window:"));
-        assert!(rendered.contains("  Palette:"));
+        assert!(rendered.contains("  Theme:"));
         assert!(rendered.contains("  File: (none)"));
     }
 
@@ -661,113 +711,5 @@ mod tests {
 
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(!rendered.contains("Settings"));
-    }
-
-    #[test]
-    fn overlay_h_and_l_cycle_palette_choice_in_opposite_directions() {
-        let mut state = AppState::new();
-        // Pin detected_tier to Truecolor so resolve(Auto, Truecolor) stays at
-        // Truecolor; the one-step cycle exercised here (Auto -> Truecolor)
-        // therefore leaves the global ACTIVE tier unchanged, avoiding
-        // interference with parallel tests. The full 4-step cycle (including
-        // SixteenColor/Monochrome) is covered by the pure-function test
-        // next_palette_choice_cycles_through_all_four_with_wraparound.
-        state.detected_tier = palette::ColorTier::Truecolor;
-        state.palette_choice = palette::PaletteChoice::Auto;
-
-        // Open the overlay; the default selection is the first row (Rank
-        // window), so step down to Palette before cycling it.
-        send_key(&mut state, KeyCode::Char('o'));
-        assert!(state.settings_open);
-        send_key(&mut state, KeyCode::Char('j'));
-        assert_eq!(state.settings_selection, PALETTE_ROW);
-
-        // 'l' advances Auto -> Truecolor (no tier change since detected=Truecolor).
-        assert_eq!(
-            send_key(&mut state, KeyCode::Char('l')),
-            KeyOutcome::Changed
-        );
-        assert_eq!(state.palette_choice, palette::PaletteChoice::Truecolor);
-
-        // 'h' cycles backward. Start from Truecolor so the step stays
-        // side-effect-free: prev(Truecolor) == Auto and resolve(Auto,
-        // Truecolor) == Truecolor leaves the global ACTIVE tier untouched.
-        state.palette_choice = palette::PaletteChoice::Truecolor;
-        assert_eq!(
-            send_key(&mut state, KeyCode::Char('h')),
-            KeyOutcome::Changed
-        );
-        assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
-
-        // Enter is a no-op under the unified select/change model.
-        state.palette_choice = palette::PaletteChoice::Auto;
-        assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
-        assert_eq!(state.palette_choice, palette::PaletteChoice::Auto);
-    }
-
-    #[test]
-    fn palette_choice_and_tier_labels_match_the_adr_wording() {
-        assert_eq!(palette_choice_label(palette::PaletteChoice::Auto), "Auto");
-        assert_eq!(
-            palette_choice_label(palette::PaletteChoice::Truecolor),
-            "truecolor",
-        );
-        assert_eq!(
-            palette_choice_label(palette::PaletteChoice::SixteenColor),
-            "16-color",
-        );
-        assert_eq!(
-            palette_choice_label(palette::PaletteChoice::Monochrome),
-            "monochrome",
-        );
-
-        assert_eq!(color_tier_label(palette::ColorTier::Truecolor), "truecolor");
-        assert_eq!(color_tier_label(palette::ColorTier::Sixteen), "16-color");
-        assert_eq!(
-            color_tier_label(palette::ColorTier::Monochrome),
-            "monochrome",
-        );
-    }
-
-    #[test]
-    fn next_palette_choice_cycles_through_all_four_with_wraparound() {
-        use palette::PaletteChoice;
-        assert_eq!(
-            next_palette_choice(PaletteChoice::Auto),
-            PaletteChoice::Truecolor,
-        );
-        assert_eq!(
-            next_palette_choice(PaletteChoice::Truecolor),
-            PaletteChoice::SixteenColor,
-        );
-        assert_eq!(
-            next_palette_choice(PaletteChoice::SixteenColor),
-            PaletteChoice::Monochrome,
-        );
-        assert_eq!(
-            next_palette_choice(PaletteChoice::Monochrome),
-            PaletteChoice::Auto,
-        );
-    }
-
-    #[test]
-    fn prev_palette_choice_cycles_backward_through_all_four_with_wraparound() {
-        use palette::PaletteChoice;
-        assert_eq!(
-            prev_palette_choice(PaletteChoice::Auto),
-            PaletteChoice::Monochrome,
-        );
-        assert_eq!(
-            prev_palette_choice(PaletteChoice::Truecolor),
-            PaletteChoice::Auto,
-        );
-        assert_eq!(
-            prev_palette_choice(PaletteChoice::SixteenColor),
-            PaletteChoice::Truecolor,
-        );
-        assert_eq!(
-            prev_palette_choice(PaletteChoice::Monochrome),
-            PaletteChoice::SixteenColor,
-        );
     }
 }

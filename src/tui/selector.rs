@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
 use crate::capture::InterfaceInfo;
-use crate::palette;
+use crate::palette::Theme;
 use crate::session::Activation;
 use crate::stats::TrafficSnapshot;
 
@@ -74,6 +74,7 @@ pub(super) fn draw_interface_selector(
     selector: &InterfaceSelector,
     interfaces: &[InterfaceInfo],
     active: Option<&str>,
+    theme: &Theme,
 ) {
     let content = area.inner(Margin {
         horizontal: 1,
@@ -92,13 +93,13 @@ pub(super) fn draw_interface_selector(
             Span::styled(
                 " flowlens ",
                 Style::default()
-                    .fg(palette::accent())
+                    .fg(theme.colors.brand)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Select an interface",
                 Style::default()
-                    .fg(palette::strong())
+                    .fg(theme.colors.title)
                     .add_modifier(Modifier::BOLD),
             ),
         ])),
@@ -109,7 +110,7 @@ pub(super) fn draw_interface_selector(
     let rows = if interfaces.is_empty() {
         vec![
             Row::new(vec![Cell::from(""), Cell::from("No interfaces available")])
-                .style(Style::default().fg(palette::muted())),
+                .style(Style::default().fg(theme.colors.placeholder)),
         ]
     } else {
         interfaces
@@ -149,7 +150,7 @@ pub(super) fn draw_interface_selector(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::border()));
+        .border_style(Style::default().fg(theme.colors.border));
     let table = if compact {
         Table::new(rows, [Constraint::Length(3), Constraint::Min(1)])
     } else {
@@ -167,8 +168,8 @@ pub(super) fn draw_interface_selector(
     .block(block)
     .row_highlight_style(
         Style::default()
-            .fg(palette::strong())
-            .patch(palette::selection_style())
+            .fg(theme.colors.title)
+            .patch(theme.selection_style())
             .add_modifier(Modifier::BOLD),
     )
     .highlight_symbol("> ");
@@ -194,9 +195,9 @@ pub(super) fn draw_interface_selector(
     f.render_widget(
         Paragraph::new(hint)
             .style(Style::default().fg(if selector.error.is_some() {
-                palette::coral()
+                theme.colors.error
             } else {
-                palette::muted()
+                theme.colors.secondary
             }))
             .wrap(Wrap { trim: true }),
         chunks[2],
@@ -205,7 +206,7 @@ pub(super) fn draw_interface_selector(
     if let Some(popup) = selector.ip_popup.as_ref()
         && let Some(interface) = interfaces.get(popup.interface_index)
     {
-        draw_interface_ip_popup(f, area, interface, popup.scroll);
+        draw_interface_ip_popup(f, area, interface, popup.scroll, theme);
     }
 }
 

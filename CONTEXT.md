@@ -81,9 +81,13 @@ _Avoid_：临时缓存、未知 IP 列表
 **IP 流量排名（IP Traffic Ranking）**：
 按单一流量指标对同一方向的 IP 进行排序。当前 `topN` 使用生命周期累计字节排序，不混入近期窗口、增长趋势或观察层规则，也不从其他规则补充条目。
 
-**调色板（Palette）**：
-TUI 根据终端颜色能力选用的一组语义配色。FlowLens 定义三档：真彩色（24-bit RGB，默认）、16 色（ANSI 基色加 `Modifier`）、单色（仅 `Modifier`，无颜色）。档位在启动时按 `NO_COLOR`、`COLORTERM`、`TERM` 环境变量检测；用户也可在设置浮层中选择 `Auto`（沿用检测结果）或强制指定某档，选择仅本次会话生效、不持久化。同一组语义角色（如 inbound、outbound、accent）在三档下映射到不同具体颜色，但角色名不变。
-_Avoid_：把「调色板」与具体 RGB 数值混用；调色板是「角色→颜色」的映射规则，RGB 值只是真彩色档下的实现
+**主题（Theme）**：
+TUI 的完整语义角色呈现方案。FlowLens 提供 FlowLens Dark、ANSI 16 和 Mono 三个内置主题；主题文件从其中一个内置主题继承并按角色覆盖。主题选择只在当前会话有效，`Auto` 依据启动时检测的终端能力解析为一个内置主题。
+_Avoid_：把「主题」与终端色深、单个 RGB 值或 `Auto` 混用
+
+**终端能力（Terminal Color Capability）**：
+终端可表达颜色的范围，是 `Auto` 选择内置主题的依据，不是主题本身。ANSI 16 跟随宿主终端的默认背景和 ANSI 色槽；Mono 仅使用终端默认前景与背景，并以固定修饰和文本标记表达状态。
+_Avoid_：把终端能力称为主题，或把 ANSI 色槽当作固定 RGB 值
 
 **正式版本（Stable Release Version）**：
 由 `MAJOR.MINOR.PATCH` 组成、写入 Cargo 包元数据并对应唯一 Git tag 的版本。FlowLens 的每次 GitHub Release 都必须在当前版本基础上通过 `major`、`minor` 或 `patch` bump 产生新版本；版本号不包含 `beta`、`rc` 等预发布后缀。

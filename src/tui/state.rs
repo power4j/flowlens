@@ -116,10 +116,8 @@ pub(super) struct AppState {
     pub(super) interface_selector: Option<InterfaceSelector>,
     /// Whether the settings overlay is open.
     pub(super) settings_open: bool,
-    /// User-facing palette selection, adjusted in the settings overlay.
-    pub(super) palette_choice: palette::PaletteChoice,
-    /// Terminal color tier detected at startup; `Auto` follows this.
-    pub(super) detected_tier: palette::ColorTier,
+    /// The only session-owned theme state. Rendering never consults globals.
+    pub(super) theme: palette::ThemeState,
     pub(super) diagnostics_error: Option<String>,
     /// Actual diagnostics state: true while a writer is open. Kept in sync
     /// with `DiagnosticsRuntime::writer` and the shared enable flag.
@@ -162,8 +160,7 @@ impl AppState {
             domain_view_height: 1,
             interface_selector: None,
             settings_open: false,
-            palette_choice: palette::PaletteChoice::Auto,
-            detected_tier: palette::detect_tier(),
+            theme: palette::ThemeState::auto(),
             diagnostics_error: None,
             diagnostics_enabled: false,
             diagnostics_draft: false,
@@ -213,11 +210,13 @@ impl AppState {
     /// actual diagnostics state, so an open writer, its file name and any
     /// pending error survive the reset instead of being silently disabled.
     pub(super) fn reset_after_interface_switch(&mut self) {
+        let theme = self.theme.clone();
         let diagnostics_enabled = self.diagnostics_enabled;
         let diagnostics_draft = self.diagnostics_draft;
         let diagnostics_file = self.diagnostics_file.clone();
         let diagnostics_error = self.diagnostics_error.clone();
         *self = AppState::new();
+        self.theme = theme;
         self.diagnostics_enabled = diagnostics_enabled;
         self.diagnostics_draft = diagnostics_draft;
         self.diagnostics_file = diagnostics_file;
@@ -747,5 +746,36 @@ mod tests {
 
         runtime.writer = None;
         std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn interface_switch_preserves_every_theme_state_field() {
+        let mut file_theme = palette::Theme::builtin(palette::BuiltinTheme::Dark);
+        file_theme.name = "Session file".to_string();
+        file_theme.colors.title = ratatui::style::Color::LightRed;
+        let mut state = AppState::new();
+        state.theme = palette::ThemeState::for_test(
+            palette::BuiltinTheme::Ansi16,
+            palette::ThemeSelection::File,
+            Some(file_theme),
+        );
+
+        state.reset_after_interface_switch();
+
+        assert_eq!(state.theme.selection, palette::ThemeSelection::File);
+        assert_eq!(state.theme.detected, palette::BuiltinTheme::Ansi16);
+        assert_eq!(state.theme.resolved.name, "Session file");
+        assert_eq!(
+            state.theme.resolved.colors.title,
+            ratatui::style::Color::LightRed
+        );
+        assert_eq!(
+            state
+                .theme
+                .loaded_file
+                .as_ref()
+                .map(|theme| theme.name.as_str()),
+            Some("Session file")
+        );
     }
 }

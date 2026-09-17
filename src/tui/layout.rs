@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::capture::InterfaceInfo;
-use crate::palette;
+use crate::palette::Theme;
 use crate::report::{fmt_elapsed, human_bytes};
 use crate::stats::{RankWindow, TrafficSnapshot};
 
@@ -85,25 +85,30 @@ pub(super) fn draw_with_interfaces_at(
     started_at: Instant,
     now: chrono::DateTime<chrono::Utc>,
 ) {
+    let theme = state.theme.resolved.clone();
     let area = f.area();
     f.render_widget(
-        Block::default().style(Style::default().fg(palette::text()).bg(palette::bg())),
+        Block::default().style(
+            Style::default()
+                .fg(theme.colors.text)
+                .bg(theme.colors.page_bg),
+        ),
         area,
     );
 
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         state.settings_open = false;
-        draw_too_small(f, area);
+        draw_too_small(f, area, &theme);
         if state.quit_confirm {
-            draw_quit_confirm(f, area);
+            draw_quit_confirm(f, area, &theme);
         }
         return;
     }
 
     if let Some(selector) = state.interface_selector.as_ref() {
-        draw_interface_selector(f, area, selector, interfaces, interface);
+        draw_interface_selector(f, area, selector, interfaces, interface, &theme);
         if state.quit_confirm {
-            draw_quit_confirm(f, area);
+            draw_quit_confirm(f, area, &theme);
         }
         return;
     }
@@ -119,32 +124,36 @@ pub(super) fn draw_with_interfaces_at(
         .split(area);
 
     let interface_label = interface_display_label(interface, interfaces);
-    draw_header(f, chunks[0], state.page, host, started_at, mode, snapshot);
+    draw_header(
+        f, chunks[0], state.page, host, started_at, mode, snapshot, &theme,
+    );
     let body = chunks[1].inner(Margin {
         horizontal: 1,
         vertical: 1,
     });
     match state.page {
-        Page::Overview => draw_overview(f, body, snapshot, Some(&interface_label), mode, now),
+        Page::Overview => {
+            draw_overview(f, body, snapshot, Some(&interface_label), mode, now, &theme)
+        }
         Page::Processes => match state.process_detail.as_ref() {
-            Some(_) => draw_process_detail(f, body, state, snapshot, now),
-            None => draw_processes(f, body, state, snapshot, mode, now),
+            Some(_) => draw_process_detail(f, body, state, snapshot, now, &theme),
+            None => draw_processes(f, body, state, snapshot, mode, now, &theme),
         },
-        Page::Ips => draw_ips(f, body, state, snapshot, mode, now),
-        Page::Domains => draw_domains(f, body, state, snapshot, mode, now),
-        Page::About => draw_about(f, body),
+        Page::Ips => draw_ips(f, body, state, snapshot, mode, now, &theme),
+        Page::Domains => draw_domains(f, body, state, snapshot, mode, now, &theme),
+        Page::About => draw_about(f, body, &theme),
     }
-    draw_status_bar(f, chunks[2], state, mode);
+    draw_status_bar(f, chunks[2], state, mode, &theme);
 
     if state.settings_open {
         draw_settings(f, area, state);
     }
     if state.quit_confirm {
-        draw_quit_confirm(f, area);
+        draw_quit_confirm(f, area, &theme);
     }
 }
 
-pub(super) fn draw_too_small(f: &mut ratatui::Frame, area: Rect) {
+pub(super) fn draw_too_small(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let message_area = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
@@ -157,13 +166,13 @@ pub(super) fn draw_too_small(f: &mut ratatui::Frame, area: Rect) {
         Line::from(Span::styled(
             "flowlens",
             Style::default()
-                .fg(palette::accent())
+                .fg(theme.colors.brand)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             format!("Terminal too small (minimum {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT})"),
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.colors.secondary),
         )),
     ];
     f.render_widget(
@@ -181,8 +190,9 @@ pub(super) fn draw_header(
     started_at: Instant,
     mode: LayoutMode,
     snapshot: &TrafficSnapshot,
+    theme: &Theme,
 ) {
-    let navigation = navigation_line(page, mode);
+    let navigation = navigation_line(page, mode, theme);
     if page == Page::About {
         f.render_widget(Paragraph::new(navigation), area);
         return;
@@ -195,6 +205,7 @@ pub(super) fn draw_header(
         mode,
         snapshot,
         area.width.saturating_sub(navigation_width),
+        theme,
     );
     let runtime_width = runtime.width() as u16;
     let (navigation, runtime) =
@@ -203,7 +214,7 @@ pub(super) fn draw_header(
         } else {
             // Keep the runtime fields visible when the full tab labels leave too
             // little room. The compact tabs are still enough to identify the page.
-            let compact_navigation = navigation_line(page, LayoutMode::Compact);
+            let compact_navigation = navigation_line(page, LayoutMode::Compact, theme);
             let compact_width = compact_navigation.width() as u16;
             let compact_runtime = runtime_line(
                 host,
@@ -211,6 +222,7 @@ pub(super) fn draw_header(
                 mode,
                 snapshot,
                 area.width.saturating_sub(compact_width),
+                theme,
             );
             let compact_runtime_width = compact_runtime.width() as u16;
             if compact_runtime_width > 0
@@ -240,11 +252,11 @@ pub(super) fn draw_header(
     );
 }
 
-pub(super) fn navigation_line(page: Page, mode: LayoutMode) -> Line<'static> {
+pub(super) fn navigation_line(page: Page, mode: LayoutMode, theme: &Theme) -> Line<'static> {
     let mut spans = vec![Span::styled(
         " flowlens ",
         Style::default()
-            .fg(palette::accent())
+            .fg(theme.colors.brand)
             .add_modifier(Modifier::BOLD),
     )];
     for candidate in Page::ALL {
@@ -261,12 +273,9 @@ pub(super) fn navigation_line(page: Page, mode: LayoutMode) -> Line<'static> {
             (Page::About, _) => " 5 About ".to_string(),
         };
         let style = if candidate == page {
-            Style::default()
-                .fg(palette::strong())
-                .bg(palette::overview_highlight())
-                .add_modifier(Modifier::BOLD)
+            theme.active_tab_style()
         } else {
-            Style::default().fg(palette::muted())
+            Style::default().fg(theme.colors.inactive_tab_fg)
         };
         spans.push(Span::styled(label, style));
     }
@@ -279,6 +288,7 @@ pub(super) fn runtime_line(
     mode: LayoutMode,
     snapshot: &TrafficSnapshot,
     available_width: u16,
+    theme: &Theme,
 ) -> Line<'static> {
     let up = fmt_elapsed(started_at.elapsed());
     let rank = ranking_window_indicator(snapshot);
@@ -299,7 +309,7 @@ pub(super) fn runtime_line(
     if text.is_empty() {
         Line::default()
     } else {
-        Line::from(Span::styled(text, Style::default().fg(palette::strong())))
+        Line::from(Span::styled(text, Style::default().fg(theme.colors.title)))
     }
 }
 
@@ -336,28 +346,29 @@ pub(super) fn panel_block(
     prefix: &str,
     title: &str,
     count: Option<usize>,
-    prefix_color: Color,
+    _prefix_color: Color,
     border_color: Color,
     footer: Option<String>,
+    theme: &Theme,
 ) -> Block<'static> {
     let mut title_spans = vec![
         Span::styled(
             format!(" {prefix} "),
             Style::default()
-                .fg(prefix_color)
+                .fg(theme.colors.title)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             title.to_string(),
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.colors.title)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
     if let Some(count) = count {
         title_spans.push(Span::styled(
             format!(" {count} "),
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.colors.secondary),
         ));
     } else {
         title_spans.push(Span::raw(" "));
@@ -365,13 +376,14 @@ pub(super) fn panel_block(
 
     let mut block = Block::default()
         .borders(Borders::ALL)
+        .style(Style::default().bg(theme.colors.panel_bg))
         .border_style(Style::default().fg(border_color))
         .title(Line::from(title_spans));
     if let Some(footer) = footer {
         block = block.title_bottom(
             Line::from(Span::styled(
                 format!(" {footer} "),
-                Style::default().fg(palette::muted()),
+                Style::default().fg(theme.colors.secondary),
             ))
             .alignment(Alignment::Right),
         );
@@ -424,10 +436,11 @@ pub(super) fn draw_status_bar(
     area: Rect,
     state: &mut AppState,
     mode: LayoutMode,
+    theme: &Theme,
 ) {
     if let Some(error) = state.diagnostics_error.as_deref() {
         f.render_widget(
-            Paragraph::new(format!(" {error} ")).style(Style::default().fg(palette::coral())),
+            Paragraph::new(format!(" {error} ")).style(Style::default().fg(theme.colors.error)),
             area,
         );
         return;
@@ -441,7 +454,7 @@ pub(super) fn draw_status_bar(
             (None, None) => "j/k scroll  o:settings  Esc:back  q:quit".to_string(),
         };
         f.render_widget(
-            Paragraph::new(format!(" {hint} ")).style(Style::default().fg(palette::muted())),
+            Paragraph::new(format!(" {hint} ")).style(Style::default().fg(theme.colors.secondary)),
             area,
         );
         if !state.settings_open
@@ -453,21 +466,21 @@ pub(super) fn draw_status_bar(
     }
 
     let mut spans = Vec::new();
-    push_hint(&mut spans, "i", "interface");
-    push_hint(&mut spans, "1-5", "page");
-    push_hint(&mut spans, "h/l", "switch");
-    push_hint(&mut spans, "o", ":settings");
+    push_hint(&mut spans, "i", "interface", theme);
+    push_hint(&mut spans, "1-5", "page", theme);
+    push_hint(&mut spans, "h/l", "switch", theme);
+    push_hint(&mut spans, "o", ":settings", theme);
     if state.page == Page::Ips {
-        push_hint(&mut spans, "Tab", "panel");
+        push_hint(&mut spans, "Tab", "panel", theme);
     }
     if matches!(state.page, Page::Processes | Page::Ips | Page::Domains) {
         if state.page == Page::Processes {
-            push_hint(&mut spans, "Enter", ":details");
+            push_hint(&mut spans, "Enter", ":details", theme);
         }
-        push_hint(&mut spans, "j/k", "scroll");
+        push_hint(&mut spans, "j/k", "scroll", theme);
         if mode != LayoutMode::Compact {
-            push_hint(&mut spans, "PgUp/PgDn", "page");
-            push_hint(&mut spans, "Home/End", "jump");
+            push_hint(&mut spans, "PgUp/PgDn", "page", theme);
+            push_hint(&mut spans, "Home/End", "jump", theme);
         }
     }
 
@@ -481,17 +494,17 @@ pub(super) fn draw_status_bar(
             Span::styled(
                 "q",
                 Style::default()
-                    .fg(palette::coral())
+                    .fg(theme.colors.key)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(":quit ", Style::default().fg(palette::muted())),
+            Span::styled(":quit ", Style::default().fg(theme.colors.secondary)),
         ]))
         .alignment(Alignment::Right),
         chunks[1],
     );
 }
 
-pub(super) fn push_hint(spans: &mut Vec<Span<'static>>, key: &str, action: &str) {
+pub(super) fn push_hint(spans: &mut Vec<Span<'static>>, key: &str, action: &str, theme: &Theme) {
     if !spans.is_empty() {
         spans.push(Span::raw("  "));
     } else {
@@ -500,13 +513,13 @@ pub(super) fn push_hint(spans: &mut Vec<Span<'static>>, key: &str, action: &str)
     spans.push(Span::styled(
         key.to_string(),
         Style::default()
-            .fg(palette::accent())
+            .fg(theme.colors.key)
             .add_modifier(Modifier::BOLD),
     ));
     let separator = if action.starts_with(':') { "" } else { " " };
     spans.push(Span::styled(
         format!("{separator}{action}"),
-        Style::default().fg(palette::muted()),
+        Style::default().fg(theme.colors.secondary),
     ));
 }
 
@@ -528,6 +541,7 @@ mod tests {
     fn top_navigation_renders_page_tabs_with_the_active_page_selected() {
         let snapshot = TrafficSnapshot::default();
         let mut state = AppState::new();
+        state.theme = crate::palette::ThemeState::dark_for_test();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
         terminal
@@ -545,7 +559,7 @@ mod tests {
             .iter()
             .find(|cell| cell.symbol() == "O")
             .expect("Overview tab cell");
-        assert_eq!(overview_cell.bg, Color::Rgb(43, 37, 15));
+        assert_eq!(overview_cell.bg, Color::Rgb(28, 44, 61));
         assert!(overview_cell.modifier.contains(Modifier::BOLD));
     }
 

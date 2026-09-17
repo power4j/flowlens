@@ -7,12 +7,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::pages::detail::directional_flow_row_count;
 use super::pages::settings::{
-    DIAGNOSTICS_ROW, PALETTE_CHOICES, PALETTE_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS,
+    DIAGNOSTICS_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS, THEME_ROW,
 };
 use super::selector::InterfaceIpPopup;
 use super::state::*;
 use crate::capture::InterfaceInfo;
-use crate::palette;
 use crate::session::Activation;
 use crate::stats::TrafficSnapshot;
 
@@ -155,17 +154,19 @@ where
                 KeyOutcome::Changed
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
-                if state.settings_selection == PALETTE_ROW {
+                if state.settings_selection == THEME_ROW {
                     let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
-                    state.palette_choice = if forward {
-                        next_palette_choice(state.palette_choice)
+                    let choices = state.theme.choices();
+                    let index = choices
+                        .iter()
+                        .position(|choice| *choice == state.theme.selection)
+                        .unwrap_or(0);
+                    let next = if forward {
+                        (index + 1) % choices.len()
                     } else {
-                        prev_palette_choice(state.palette_choice)
+                        (index + choices.len() - 1) % choices.len()
                     };
-                    palette::set_active_tier(palette::resolve(
-                        state.palette_choice,
-                        state.detected_tier,
-                    ));
+                    state.theme.select(choices[next].clone());
                 } else if state.settings_selection == DIAGNOSTICS_ROW {
                     // Only the draft changes here; the writer and the shared
                     // enable flag are touched once, when the overlay closes
@@ -357,23 +358,6 @@ pub(super) fn prev_page(p: Page) -> Page {
 pub(super) fn next_page(p: Page) -> Page {
     let idx = p.index();
     Page::ALL[(idx + 1) % Page::ALL.len()]
-}
-
-pub(super) fn next_palette_choice(choice: palette::PaletteChoice) -> palette::PaletteChoice {
-    let idx = PALETTE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0);
-    PALETTE_CHOICES[(idx + 1) % PALETTE_CHOICES.len()]
-}
-
-pub(super) fn prev_palette_choice(choice: palette::PaletteChoice) -> palette::PaletteChoice {
-    let idx = PALETTE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0);
-    let len = PALETTE_CHOICES.len();
-    PALETTE_CHOICES[(idx + len - 1) % len]
 }
 
 pub(super) fn scroll(state: &mut AppState, delta: isize) {

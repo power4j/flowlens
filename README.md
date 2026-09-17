@@ -84,6 +84,15 @@ Start directly on an interface:
 ./flowlens eth0
 ```
 
+Choose a TUI theme explicitly, or load a JSON theme file:
+
+```bash
+./flowlens --theme ansi16
+./flowlens eth0 --theme ./my-theme.json
+```
+
+`--theme` is available only in the foreground interactive TUI. See [TUI themes](docs/themes.md) for built-in themes, automatic selection, and JSON theme files.
+
 Write periodic plain-text snapshots to a file:
 
 ```bash

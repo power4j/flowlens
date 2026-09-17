@@ -1,6 +1,6 @@
 //! Process detail page: attribution breakdown.
 
-use crate::palette;
+use crate::palette::Theme;
 use crate::report::{human_bytes, truncate};
 use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
 use ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
@@ -20,21 +20,23 @@ pub(in crate::tui) const PENDING_STATUS_SLOT_WIDTH: usize = 12;
 pub(in crate::tui) fn attribution_summary_lines(
     snapshot: &TrafficSnapshot,
     compact: bool,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     // The summary uses the same since-start totals as the table.
     let attribution = &snapshot.attribution;
-    let muted = Style::default().fg(palette::muted());
+    let muted = Style::default().fg(theme.colors.secondary);
+    let total = Style::default().fg(theme.colors.total);
     let mut lines = vec![Line::from(vec![
         Span::styled("Total ", muted),
-        Span::raw(human_bytes(attribution.total())),
+        Span::styled(human_bytes(attribution.total()), total),
         Span::styled(" = Exclusive ", muted),
-        Span::raw(human_bytes(attribution.exclusive.total())),
+        Span::styled(human_bytes(attribution.exclusive.total()), total),
         Span::styled(" + Shared ", muted),
-        Span::raw(human_bytes(attribution.shared.total())),
+        Span::styled(human_bytes(attribution.shared.total()), total),
         Span::styled(" + System ", muted),
-        Span::raw(human_bytes(attribution.system.total())),
+        Span::styled(human_bytes(attribution.system.total()), total),
         Span::styled(" + Unattributed ", muted),
-        Span::raw(human_bytes(attribution.unattributed.total())),
+        Span::styled(human_bytes(attribution.unattributed.total()), total),
     ])];
     let channels: Vec<(&str, &crate::stats::ProcTraffic)> = if compact {
         vec![("Unattributed", &attribution.unattributed)]
@@ -55,7 +57,7 @@ pub(in crate::tui) fn attribution_summary_lines(
     lines.extend(
         channels
             .into_iter()
-            .map(|(label, traffic)| channel_summary_line(label, traffic, value_width)),
+            .map(|(label, traffic)| channel_summary_line(label, traffic, value_width, theme)),
     );
     lines
 }
@@ -64,28 +66,38 @@ pub(in crate::tui) fn channel_summary_line(
     label: &str,
     traffic: &crate::stats::ProcTraffic,
     value_width: usize,
+    theme: &Theme,
 ) -> Line<'static> {
-    let muted = Style::default().fg(palette::muted());
-    let label_style = if traffic.total() > 0 {
-        Style::default().fg(palette::warn())
-    } else {
-        muted
-    };
+    let muted = Style::default().fg(theme.colors.secondary);
+    let label_style = Style::default().fg(theme.colors.attribution);
     let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
     Line::from(vec![
         // Label column padded to the longest label (Unattributed) + 2, so
         // it never touches the value columns.
         Span::styled(format!("{label:<14}"), label_style),
         Span::styled("Recv ", muted),
-        Span::raw(value(traffic.recv)),
+        Span::styled(
+            value(traffic.recv),
+            Style::default().fg(theme.colors.inbound),
+        ),
         Span::styled("  Sent ", muted),
-        Span::raw(value(traffic.sent)),
+        Span::styled(
+            value(traffic.sent),
+            Style::default().fg(theme.colors.outbound),
+        ),
         Span::styled("  Total ", muted),
-        Span::raw(value(traffic.total())),
+        Span::styled(
+            value(traffic.total()),
+            Style::default().fg(theme.colors.total),
+        ),
     ])
 }
 
-pub(in crate::tui) fn pending_status_title(bytes: u64, area_width: u16) -> Line<'static> {
+pub(in crate::tui) fn pending_status_title(
+    bytes: u64,
+    area_width: u16,
+    theme: &Theme,
+) -> Line<'static> {
     let slot_width = if area_width < 44 {
         1
     } else {
@@ -122,9 +134,9 @@ pub(in crate::tui) fn pending_status_title(bytes: u64, area_width: u16) -> Line<
     Line::from(Span::styled(
         format!("{}{}", " ".repeat(padding), label),
         Style::default().fg(if bytes == 0 {
-            palette::muted()
+            theme.colors.secondary
         } else {
-            palette::warn()
+            theme.colors.warning
         }),
     ))
     .alignment(Alignment::Right)
@@ -133,6 +145,7 @@ pub(in crate::tui) fn pending_status_title(bytes: u64, area_width: u16) -> Line<
 pub(in crate::tui) fn process_attribution_detail_lines(
     process: &ProcessSnapshot,
     show_breakdown: bool,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     let exclusive = &process.attribution.exclusive;
     let shared = &process.attribution.shared;
@@ -155,44 +168,85 @@ pub(in crate::tui) fn process_attribution_detail_lines(
     .max()
     .unwrap_or(0);
     let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
-    let mut lines = vec![Line::from(format!(
-        "  {label:<label_width$} {total}",
-        label = "Exclusive:",
-        total = value(exclusive.total()),
-    ))];
+    let attribution = Style::default().fg(theme.colors.attribution);
+    let secondary = Style::default().fg(theme.colors.secondary);
+    let total = Style::default().fg(theme.colors.total);
+    let inbound = Style::default().fg(theme.colors.inbound);
+    let outbound = Style::default().fg(theme.colors.outbound);
+    let attribution_line = |label: &str, bytes: u64| {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{label:<label_width$}"), attribution),
+            Span::raw(" "),
+            Span::styled(value(bytes), total),
+        ])
+    };
+    let mut lines = vec![attribution_line("Exclusive:", exclusive.total())];
     if show_breakdown {
-        lines.push(Line::from(format!(
-            "    Recv: {}",
-            human_bytes(exclusive.recv)
-        )));
-        lines.push(Line::from(format!(
-            "    Sent: {}",
-            human_bytes(exclusive.sent)
-        )));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("Recv: ", secondary),
+            Span::styled(human_bytes(exclusive.recv), inbound),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("Sent: ", secondary),
+            Span::styled(human_bytes(exclusive.sent), outbound),
+        ]));
     }
-    lines.push(Line::from(format!(
-        "  {label:<label_width$} {total}",
-        label = "Shared:",
-        total = value(shared.total()),
-    )));
+    lines.push(attribution_line("Shared:", shared.total()));
     if show_breakdown {
-        lines.push(Line::from(format!(
-            "    Recv: {}",
-            human_bytes(shared.recv)
-        )));
-        lines.push(Line::from(format!(
-            "    Sent: {}",
-            human_bytes(shared.sent)
-        )));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("Recv: ", secondary),
+            Span::styled(human_bytes(shared.recv), inbound),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("Sent: ", secondary),
+            Span::styled(human_bytes(shared.sent), outbound),
+        ]));
     }
-    lines.push(Line::from(format!(
-        "  {label:<label_width$} {total} = Exclusive {exclusive} + Shared {shared}",
-        label = "Total:",
-        total = value(process.total()),
-        exclusive = human_bytes(exclusive.total()),
-        shared = human_bytes(shared.total()),
-    )));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{:<label_width$}", "Total:"), attribution),
+        Span::raw(" "),
+        Span::styled(value(process.total()), total),
+        Span::styled(" = Exclusive ", secondary),
+        Span::styled(human_bytes(exclusive.total()), total),
+        Span::styled(" + Shared ", secondary),
+        Span::styled(human_bytes(shared.total()), total),
+    ]));
     lines
+}
+
+fn ranking_summary_line(
+    label: &str,
+    window: &str,
+    traffic: crate::stats::ProcTraffic,
+    snapshot: &TrafficSnapshot,
+    theme: &Theme,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label} ({window}): "),
+            Style::default().fg(theme.colors.attribution),
+        ),
+        Span::styled(
+            format_rank_value(snapshot, traffic.total()),
+            Style::default().fg(theme.colors.total),
+        ),
+        Span::styled("  Recv ", Style::default().fg(theme.colors.secondary)),
+        Span::styled(
+            format_rank_value(snapshot, traffic.recv),
+            Style::default().fg(theme.colors.inbound),
+        ),
+        Span::styled("  Sent ", Style::default().fg(theme.colors.secondary)),
+        Span::styled(
+            format_rank_value(snapshot, traffic.sent),
+            Style::default().fg(theme.colors.outbound),
+        ),
+    ])
 }
 
 fn render_attribution_column(
@@ -200,6 +254,7 @@ fn render_attribution_column(
     area: Rect,
     title: &'static str,
     traffic: crate::stats::ProcTraffic,
+    theme: &Theme,
 ) {
     let rows = Layout::default()
         .direction(LayoutDir::Vertical)
@@ -214,21 +269,21 @@ fn render_attribution_column(
             title,
             human_bytes(traffic.total()),
             Style::default()
-                .fg(palette::text())
+                .fg(theme.colors.attribution)
                 .add_modifier(Modifier::BOLD),
-            Style::default().fg(palette::warn()),
+            Style::default().fg(theme.colors.total),
         ),
         (
             "  ├ Recv:",
             human_bytes(traffic.recv),
-            Style::default().fg(palette::muted()),
-            Style::default().fg(palette::inbound()),
+            Style::default().fg(theme.colors.secondary),
+            Style::default().fg(theme.colors.inbound),
         ),
         (
             "  └ Sent:",
             human_bytes(traffic.sent),
-            Style::default().fg(palette::muted()),
-            Style::default().fg(palette::outbound()),
+            Style::default().fg(theme.colors.secondary),
+            Style::default().fg(theme.colors.outbound),
         ),
     ];
     for (row, (label, value, label_style, value_style)) in rows.iter().zip(fields) {
@@ -360,6 +415,7 @@ pub(in crate::tui) fn draw_process_detail(
     state: &mut AppState,
     snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) {
     let Some(detail) = state.process_detail.as_ref() else {
         return;
@@ -382,18 +438,21 @@ pub(in crate::tui) fn draw_process_detail(
         "proc",
         "Process Details",
         None,
-        palette::coral(),
-        palette::border(),
+        theme.colors.error,
+        theme.colors.border,
         None,
+        theme,
     );
 
     // Header: lay out regions first, then render each field into its region.
     if !compact {
-        let muted = Style::default().fg(palette::muted());
-        let value = Style::default().fg(palette::text());
-        let recv_fg = Style::default().fg(palette::inbound());
-        let sent_fg = Style::default().fg(palette::outbound());
-        let total_fg = Style::default().fg(palette::warn());
+        let label = Style::default().fg(theme.colors.label);
+        let value = Style::default().fg(theme.colors.text);
+        let placeholder = Style::default().fg(theme.colors.placeholder);
+        let time = Style::default().fg(theme.colors.time);
+        let recv_fg = Style::default().fg(theme.colors.inbound);
+        let sent_fg = Style::default().fg(theme.colors.outbound);
+        let total_fg = Style::default().fg(theme.colors.total);
         let inner = header_block.inner(header_area);
         f.render_widget(header_block, header_area);
         let rows = Layout::default()
@@ -407,35 +466,39 @@ pub(in crate::tui) fn draw_process_detail(
 
         let left = vec![
             Line::from(vec![
-                Span::styled("Name: ", muted),
+                Span::styled("Name: ", label),
                 process_name_span(&process, columns[0].width.saturating_sub(6) as usize),
             ]),
             Line::from(vec![
-                Span::styled("PID: ", muted),
+                Span::styled("PID: ", label),
                 Span::styled(
                     process
                         .pid()
                         .map(|p| p.to_string())
                         .unwrap_or_else(|| "-".to_string()),
-                    value,
+                    if process.pid().is_some() {
+                        value
+                    } else {
+                        placeholder
+                    },
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Last seen: ", muted),
-                Span::styled(relative_last_seen(process.last_seen(), now), value),
+                Span::styled("Last seen: ", label),
+                Span::styled(relative_last_seen(process.last_seen(), now), time),
             ]),
         ];
         let right = vec![
             Line::from(vec![
-                Span::styled("Recv: ", muted),
+                Span::styled("Recv: ", label),
                 Span::styled(human_bytes(process.recv), recv_fg),
             ]),
             Line::from(vec![
-                Span::styled("Sent: ", muted),
+                Span::styled("Sent: ", label),
                 Span::styled(human_bytes(process.sent), sent_fg),
             ]),
             Line::from(vec![
-                Span::styled("Total: ", muted),
+                Span::styled("Total: ", label),
                 Span::styled(human_bytes(process.total()), total_fg),
             ]),
         ];
@@ -443,53 +506,82 @@ pub(in crate::tui) fn draw_process_detail(
         f.render_widget(Paragraph::new(right), columns[1]);
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Path: ", muted),
+                Span::styled("Path: ", label),
                 Span::styled(
                     truncate(
                         process.path().unwrap_or("-"),
                         inner.width.saturating_sub(6) as usize,
                     ),
-                    value,
+                    if process.path().is_some() {
+                        value
+                    } else {
+                        placeholder
+                    },
                 ),
             ])),
             rows[1],
         );
     } else {
-        let muted = Style::default().fg(palette::muted());
-        let value = Style::default().fg(palette::text());
+        let label = Style::default().fg(theme.colors.label);
+        let value = Style::default().fg(theme.colors.text);
+        let placeholder = Style::default().fg(theme.colors.placeholder);
+        let time = Style::default().fg(theme.colors.time);
         let header_lines = vec![
             Line::from(vec![
-                Span::raw("Name: "),
+                Span::styled("Name: ", label),
                 process_name_span(&process, usize::MAX),
             ]),
-            Line::from(format!(
-                "PID: {}",
-                process
-                    .pid()
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            )),
-            Line::from(format!(
-                "Last seen: {}",
-                relative_last_seen(process.last_seen(), now)
-            )),
-            Line::from(""),
             Line::from(vec![
-                Span::styled("Recv: ", muted),
-                Span::styled(human_bytes(process.recv), value),
+                Span::styled("PID: ", label),
+                Span::styled(
+                    process
+                        .pid()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    if process.pid().is_some() {
+                        value
+                    } else {
+                        placeholder
+                    },
+                ),
             ]),
             Line::from(vec![
-                Span::styled("Sent: ", muted),
-                Span::styled(human_bytes(process.sent), value),
-            ]),
-            Line::from(vec![
-                Span::styled("Total: ", muted),
-                Span::styled(human_bytes(process.total()), value),
+                Span::styled("Last seen: ", label),
+                Span::styled(relative_last_seen(process.last_seen(), now), time),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Path: ", muted),
-                Span::styled(process.path().unwrap_or("-").to_string(), value),
+                Span::styled("Recv: ", label),
+                Span::styled(
+                    human_bytes(process.recv),
+                    Style::default().fg(theme.colors.inbound),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Sent: ", label),
+                Span::styled(
+                    human_bytes(process.sent),
+                    Style::default().fg(theme.colors.outbound),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Total: ", label),
+                Span::styled(
+                    human_bytes(process.total()),
+                    Style::default().fg(theme.colors.total),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Path: ", label),
+                Span::styled(
+                    process.path().unwrap_or("-").to_string(),
+                    if process.path().is_some() {
+                        value
+                    } else {
+                        placeholder
+                    },
+                ),
             ]),
         ];
         f.render_widget(
@@ -510,9 +602,10 @@ pub(in crate::tui) fn draw_process_detail(
         "attr",
         "Attribution",
         None,
-        palette::accent(),
-        palette::border(),
+        theme.colors.brand,
+        theme.colors.border,
         None,
+        theme,
     );
     if !compact {
         let inner = attr_block.inner(attribution_area);
@@ -530,7 +623,7 @@ pub(in crate::tui) fn draw_process_detail(
             Paragraph::new(Line::from(Span::styled(
                 "Attribution (lifetime)",
                 Style::default()
-                    .fg(palette::strong())
+                    .fg(theme.colors.title)
                     .add_modifier(Modifier::BOLD),
             ))),
             rows[0],
@@ -539,41 +632,41 @@ pub(in crate::tui) fn draw_process_detail(
             .direction(LayoutDir::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(rows[1]);
-        render_attribution_column(f, columns[0], "Exclusive:", *excl);
-        render_attribution_column(f, columns[1], "Shared:", *shr);
+        render_attribution_column(f, columns[0], "Exclusive:", *excl, theme);
+        render_attribution_column(f, columns[1], "Shared:", *shr, theme);
         f.render_widget(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(palette::muted())),
+                .border_style(Style::default().fg(theme.colors.secondary)),
             rows[2],
         );
 
         let mut summary_lines = vec![
-            Line::from(format!(
-                "Selected ({}): {}  Recv {}  Sent {}",
-                ranking_window_indicator(snapshot),
-                format_rank_value(snapshot, selected.total()),
-                format_rank_value(snapshot, selected.recv),
-                format_rank_value(snapshot, selected.sent)
-            )),
-            Line::from(format!(
-                "Rank ({}): {}  Recv {}  Sent {}",
-                ranking_window_indicator(snapshot),
-                format_rank_value(snapshot, process.rank.total()),
-                format_rank_value(snapshot, process.rank.recv),
-                format_rank_value(snapshot, process.rank.sent)
-            )),
+            ranking_summary_line(
+                "Selected",
+                &ranking_window_indicator(snapshot),
+                selected,
+                snapshot,
+                theme,
+            ),
+            ranking_summary_line(
+                "Rank",
+                &ranking_window_indicator(snapshot),
+                process.rank,
+                snapshot,
+                theme,
+            ),
             Line::from("Shared traffic is included in Total and may appear in multiple processes."),
             Line::from(Span::styled(
                 "Attr: E = exclusive only, M = mixed (includes shared)",
-                Style::default().fg(palette::muted()),
+                Style::default().fg(theme.colors.secondary),
             )),
         ];
         if paused.is_some() {
             summary_lines.push(Line::from(Span::styled(
                 "Tracking paused",
                 Style::default()
-                    .fg(palette::warn())
+                    .fg(theme.colors.warning)
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -582,36 +675,36 @@ pub(in crate::tui) fn draw_process_detail(
         let mut attr_lines = vec![Line::from(Span::styled(
             "Attribution (lifetime)",
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.colors.title)
                 .add_modifier(Modifier::BOLD),
         ))];
-        attr_lines.extend(process_attribution_detail_lines(&process, true));
-        attr_lines.push(Line::from(format!(
-            "Selected ({}): {}  Recv {}  Sent {}",
-            ranking_window_indicator(snapshot),
-            format_rank_value(snapshot, selected.total()),
-            format_rank_value(snapshot, selected.recv),
-            format_rank_value(snapshot, selected.sent)
-        )));
-        attr_lines.push(Line::from(format!(
-            "Rank ({}): {}  Recv {}  Sent {}",
-            ranking_window_indicator(snapshot),
-            format_rank_value(snapshot, process.rank.total()),
-            format_rank_value(snapshot, process.rank.recv),
-            format_rank_value(snapshot, process.rank.sent)
-        )));
+        attr_lines.extend(process_attribution_detail_lines(&process, true, theme));
+        attr_lines.push(ranking_summary_line(
+            "Selected",
+            &ranking_window_indicator(snapshot),
+            selected,
+            snapshot,
+            theme,
+        ));
+        attr_lines.push(ranking_summary_line(
+            "Rank",
+            &ranking_window_indicator(snapshot),
+            process.rank,
+            snapshot,
+            theme,
+        ));
         attr_lines.push(Line::from(
             "Shared traffic is included in Total and may appear in multiple processes.",
         ));
         attr_lines.push(Line::from(Span::styled(
             "Attr: E = exclusive only, M = mixed (includes shared)",
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.colors.secondary),
         )));
         if paused.is_some() {
             attr_lines.push(Line::from(Span::styled(
                 "Tracking paused",
                 Style::default()
-                    .fg(palette::warn())
+                    .fg(theme.colors.warning)
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -626,16 +719,17 @@ pub(in crate::tui) fn draw_process_detail(
         "ip",
         "IP Statistics (lifetime)",
         None,
-        palette::accent(),
-        palette::border(),
+        theme.colors.brand,
+        theme.colors.border,
         None,
+        theme,
     );
     let len = directional_flow_row_count(&process);
     let max_scroll = len.saturating_sub(1);
     let scroll = state.proc_detail_scroll.min(max_scroll);
     state.proc_detail_scroll = scroll;
     state.proc_detail_view_height = (flow_area.height.saturating_sub(2) as usize).max(1);
-    let tbl = flow_table(&process, flow_block, flow_area, compact);
+    let tbl = flow_table(&process, flow_block, flow_area, compact, theme);
     f.render_stateful_widget(tbl, flow_area, &mut ratatui_state(len, scroll));
 }
 pub(in crate::tui) fn flow_table(
@@ -643,6 +737,7 @@ pub(in crate::tui) fn flow_table(
     block: Block<'static>,
     area: Rect,
     compact: bool,
+    theme: &Theme,
 ) -> Table<'static> {
     // Reserve the border and current-row marker, then keep the members of each
     // endpoint group close together. Any remaining width becomes separation
@@ -692,8 +787,8 @@ pub(in crate::tui) fn flow_table(
         .into_iter()
         .map(|row| {
             let (protocol, protocol_color) = match row.protocol {
-                crate::capture::TransportProtocol::Tcp => ("TCP", palette::outbound()),
-                crate::capture::TransportProtocol::Udp => ("UDP", palette::violet()),
+                crate::capture::TransportProtocol::Tcp => ("TCP", theme.colors.protocol),
+                crate::capture::TransportProtocol::Udp => ("UDP", theme.colors.protocol),
             };
             FormattedDirectionalFlowRow {
                 src_ip: row.src_ip.to_string(),
@@ -753,37 +848,37 @@ pub(in crate::tui) fn flow_table(
     let rows = if directional_rows.is_empty() {
         vec![
             Row::new(vec!["No traffic observed", "", "", "", "", "", "", "", ""])
-                .style(Style::default().fg(palette::muted())),
+                .style(Style::default().fg(theme.colors.secondary)),
         ]
     } else {
         directional_rows
             .into_iter()
             .map(|row| {
                 let local_style = Style::default()
-                    .fg(palette::accent())
+                    .fg(theme.colors.local_endpoint)
                     .add_modifier(Modifier::BOLD);
                 Row::new(vec![
                     Cell::from(truncate(&row.src_ip, src_addr_width)).style(if row.local_is_src {
                         local_style
                     } else {
-                        Style::default()
+                        Style::default().fg(theme.colors.remote_endpoint)
                     }),
-                    Cell::from(row.src_port).style(Style::default().fg(palette::text())),
+                    Cell::from(row.src_port).style(Style::default().fg(theme.colors.identity)),
                     Cell::from(""),
                     Cell::from(truncate(&row.dest_ip, dest_addr_width)).style(
                         if row.local_is_src {
-                            Style::default()
+                            Style::default().fg(theme.colors.remote_endpoint)
                         } else {
                             local_style
                         },
                     ),
-                    Cell::from(row.dest_port).style(Style::default().fg(palette::text())),
+                    Cell::from(row.dest_port).style(Style::default().fg(theme.colors.identity)),
                     Cell::from(""),
                     Cell::from(Line::from(row.protocol).alignment(Alignment::Center))
                         .style(Style::default().fg(row.protocol_color)),
                     Cell::from(""),
                     Cell::from(Line::from(row.bytes).alignment(Alignment::Right))
-                        .style(Style::default().fg(palette::warn())),
+                        .style(Style::default().fg(theme.colors.total)),
                 ])
             })
             .collect()
@@ -810,13 +905,13 @@ pub(in crate::tui) fn flow_table(
                 Cell::from(header)
             }
         }))
-        .style(Style::default().fg(palette::muted())),
+        .style(Style::default().fg(theme.colors.header)),
     )
     .column_spacing(1)
     .block(block)
     .row_highlight_style(
         Style::default()
-            .patch(palette::selection_style())
+            .patch(theme.selection_style())
             .add_modifier(Modifier::BOLD),
     )
     .highlight_symbol("> ")
@@ -884,8 +979,13 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let table =
-                    flow_table(process, Block::default().borders(Borders::ALL), area, false);
+                let table = flow_table(
+                    process,
+                    Block::default().borders(Borders::ALL),
+                    area,
+                    false,
+                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+                );
                 frame.render_stateful_widget(
                     table,
                     area,
@@ -1281,6 +1381,7 @@ mod tests {
                     Block::default().borders(Borders::ALL),
                     area,
                     false,
+                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
                 ));
             },
         );
@@ -1294,6 +1395,7 @@ mod tests {
                     Block::default().borders(Borders::ALL),
                     area,
                     false,
+                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
                 ));
             },
         );
@@ -1304,6 +1406,7 @@ mod tests {
             ..TrafficSnapshot::default()
         };
         let mut state = AppState::new();
+        state.theme = crate::palette::ThemeState::dark_for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1354,6 +1457,7 @@ mod tests {
             ..TrafficSnapshot::default()
         };
         let mut state = AppState::new();
+        state.theme = crate::palette::ThemeState::dark_for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1428,11 +1532,15 @@ mod tests {
 
         assert_ne!(
             rendered_cell_color(&terminal, "20 B", "127.0.0.2"),
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
         assert_eq!(
             rendered_cell_color(&terminal, "20 B", "127.0.0.1"),
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
     }
 
@@ -1461,11 +1569,15 @@ mod tests {
 
         assert_ne!(
             rendered_cell_color(&terminal, "30 B", "95.25.28.161"),
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
         assert_eq!(
             rendered_cell_color(&terminal, "30 B", "10.11.12.31"),
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
     }
 
@@ -1551,6 +1663,7 @@ mod tests {
             ..TrafficSnapshot::default()
         };
         let mut state = AppState::new();
+        state.theme = crate::palette::ThemeState::dark_for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1651,31 +1764,55 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[position_in(outbound_row, "192.0.2.10")].fg,
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
         assert_ne!(
             buffer[position_in(outbound_row, "198.51.100.5")].fg,
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
         assert_ne!(
             buffer[position_in(inbound_row, "203.0.113.8")].fg,
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
         assert_eq!(
             buffer[position_in(inbound_row, "192.0.2.10")].fg,
-            palette::accent()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .local_endpoint
         );
         assert_eq!(
             buffer[position_in(outbound_row, "49152")].fg,
-            palette::text()
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .text
         );
-        assert_eq!(buffer[position_in(outbound_row, "443")].fg, palette::text());
+        assert_eq!(
+            buffer[position_in(outbound_row, "443")].fg,
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .text
+        );
         let tcp = buffer[position_in(outbound_row, "TCP")].fg;
         let udp = buffer[position_in(inbound_row, "UDP")].fg;
         let bytes = buffer[position_in(outbound_row, "40 B")].fg;
-        assert_eq!(tcp, palette::outbound());
-        assert_eq!(udp, palette::violet());
-        assert_ne!(tcp, udp);
+        assert_eq!(
+            tcp,
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .protocol
+        );
+        assert_eq!(
+            udp,
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .protocol
+        );
         assert_ne!(tcp, bytes);
         assert_ne!(udp, bytes);
     }
@@ -1854,7 +1991,12 @@ mod tests {
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("proc Processes 0"));
         assert!(rendered.contains("?    1.50 KB"));
-        assert_pending_indicator_color(&terminal, palette::warn());
+        assert_pending_indicator_color(
+            &terminal,
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .warning,
+        );
     }
 
     #[test]
@@ -1863,7 +2005,12 @@ mod tests {
 
         let rendered = rendered_lines(&terminal).join("\n");
         assert!(rendered.contains("?    0.00  B"));
-        assert_pending_indicator_color(&terminal, palette::muted());
+        assert_pending_indicator_color(
+            &terminal,
+            Theme::builtin(crate::palette::BuiltinTheme::Dark)
+                .colors
+                .secondary,
+        );
     }
 
     #[test]
@@ -1915,9 +2062,18 @@ mod tests {
 
     #[test]
     fn pending_status_title_keeps_a_fixed_slot_and_degrades_when_narrow() {
-        let full = pending_status_title(1536, 80);
-        let empty = pending_status_title(0, 80);
-        let narrow = pending_status_title(1536, 40);
+        let full = pending_status_title(
+            1536,
+            80,
+            &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+        );
+        let empty =
+            pending_status_title(0, 80, &Theme::builtin(crate::palette::BuiltinTheme::Dark));
+        let narrow = pending_status_title(
+            1536,
+            40,
+            &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+        );
 
         assert_eq!(full.width(), PENDING_STATUS_SLOT_WIDTH);
         assert_eq!(empty.width(), PENDING_STATUS_SLOT_WIDTH);
@@ -2187,7 +2343,11 @@ mod tests {
             crate::stats::ProcTraffic::default(),
             Vec::new(),
         );
-        let lines = process_attribution_detail_lines(&process, true);
+        let lines = process_attribution_detail_lines(
+            &process,
+            true,
+            &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+        );
         let text: Vec<String> = lines
             .iter()
             .map(|line| {
@@ -2761,6 +2921,7 @@ mod tests {
                     &mut state,
                     &snapshot,
                     "2026-07-15T08:02:00Z".parse().unwrap(),
+                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
                 );
             })
             .unwrap();
