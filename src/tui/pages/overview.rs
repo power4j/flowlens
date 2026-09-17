@@ -5,9 +5,9 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::palette::Theme;
 use crate::report::human_bytes;
 use crate::stats::TrafficSnapshot;
+use crate::theme::{Role, Theme};
 
 use super::domains::draw_domain_preview;
 use super::ips::draw_ip_preview;
@@ -107,8 +107,8 @@ pub(in crate::tui) fn draw_traffic(
         "net",
         interface.unwrap_or("No interface"),
         None,
-        theme.colors.brand,
-        theme.colors.border,
+        theme.color(Role::Brand),
+        theme.color(Role::Border),
         None,
         theme,
     );
@@ -119,7 +119,7 @@ pub(in crate::tui) fn draw_traffic(
     let lines = vec![
         traffic_line(
             "IN total",
-            theme.colors.inbound,
+            theme.color(Role::Inbound),
             ratio(snapshot.in_bytes, total),
             &human_bytes(snapshot.in_bytes),
             inner.width,
@@ -127,7 +127,7 @@ pub(in crate::tui) fn draw_traffic(
         ),
         traffic_line(
             "OUT total",
-            theme.colors.outbound,
+            theme.color(Role::Outbound),
             ratio(snapshot.out_bytes, total),
             &human_bytes(snapshot.out_bytes),
             inner.width,
@@ -135,7 +135,7 @@ pub(in crate::tui) fn draw_traffic(
         ),
         traffic_line(
             "Combined",
-            theme.colors.chart_combined,
+            theme.color(Role::ChartCombined),
             if total > 0 { 1.0 } else { 0.0 },
             &human_bytes(total),
             inner.width,
@@ -170,11 +170,11 @@ pub(in crate::tui) fn traffic_line(
         Span::styled("█".repeat(filled), Style::default().fg(color)),
         Span::styled(
             "─".repeat(bar_width.saturating_sub(filled)),
-            Style::default().fg(theme.colors.chart_track),
+            Style::default().fg(theme.color(Role::ChartTrack)),
         ),
         Span::styled(
             format!("  {value}"),
-            Style::default().fg(theme.colors.total),
+            Style::default().fg(theme.color(Role::Total)),
         ),
     ])
 }
@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn wide_overview_uses_row_layout_with_equal_columns() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
         terminal
@@ -250,7 +250,7 @@ mod tests {
         // then Process|Domain on the same band, then Inbound|Outbound IPs on
         // the next.
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
 
         terminal
@@ -290,7 +290,7 @@ mod tests {
         // <80 columns triggers Compact mode. Overview stacks the interface traffic panel / Process
         // / Domain / Inbound / Outbound IP vertically — no side-by-side panels.
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(72, 30)).unwrap();
 
         terminal
@@ -360,7 +360,7 @@ mod tests {
             process_data_fresh: false,
             diagnostics: None,
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
         terminal

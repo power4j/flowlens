@@ -155,18 +155,11 @@ where
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
                 if state.settings_selection == THEME_ROW {
-                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
-                    let choices = state.theme.choices();
-                    let index = choices
-                        .iter()
-                        .position(|choice| *choice == state.theme.selection)
-                        .unwrap_or(0);
-                    let next = if forward {
-                        (index + 1) % choices.len()
+                    if matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
+                        state.theme.next();
                     } else {
-                        (index + choices.len() - 1) % choices.len()
-                    };
-                    state.theme.select(choices[next].clone());
+                        state.theme.previous();
+                    }
                 } else if state.settings_selection == DIAGNOSTICS_ROW {
                     // Only the draft changes here; the writer and the shared
                     // enable flag are touched once, when the overlay closes
@@ -440,7 +433,7 @@ mod tests {
 
     #[test]
     fn page_key_four_opens_domains_and_five_opens_about() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let snapshot = TrafficSnapshot::default();
 
         let outcome = handle_key(
@@ -462,7 +455,7 @@ mod tests {
 
     #[test]
     fn page_key_reports_changed() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let snapshot = TrafficSnapshot::default();
 
         let outcome = handle_key(
@@ -480,7 +473,7 @@ mod tests {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let draw_calls = calls.clone();
         let latest_calls = calls.clone();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut snapshot = Arc::new(TrafficSnapshot::default());
 
         let quit = process_iteration(
@@ -505,7 +498,7 @@ mod tests {
     #[test]
     fn interface_switch_keeps_diagnostics_enabled_and_file() {
         let interfaces = interfaces();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
         state.diagnostics_file = Some("flowlens-42.log".to_string());
@@ -547,7 +540,7 @@ mod tests {
 
     #[test]
     fn overlay_swallows_page_keys_but_q_still_quits() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
 
@@ -571,7 +564,7 @@ mod tests {
 
     #[test]
     fn quit_requires_confirmation_and_can_be_cancelled() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         assert_eq!(
             send_key(&mut state, KeyCode::Char('q')),
             KeyOutcome::Changed
@@ -598,7 +591,7 @@ mod tests {
 
     #[test]
     fn quit_confirm_overlay_renders_prompt() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.quit_confirm = true;
         let snapshot = TrafficSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

@@ -1,0 +1,20 @@
+{
+  "$schema": "./theme-v1.schema.json",
+  "version": 1,
+  "name": "ANSI 16",
+  "profile": "ansi16",
+  "colors": {
+    "ui.page_bg": "default", "ui.panel_bg": "default", "ui.popup_bg": "default",
+    "ui.text": "default", "ui.title": "default", "ui.header": "dark_gray",
+    "ui.label": "dark_gray", "ui.secondary": "dark_gray", "ui.placeholder": "dark_gray",
+    "ui.border": "gray", "ui.focus_border": "gray", "ui.active_tab_fg": "default",
+    "ui.inactive_tab_fg": "dark_gray", "ui.active_tab_bg": "default", "ui.selection_bg": "default",
+    "ui.key": "default", "ui.setting_label": "default", "ui.hint": "dark_gray",
+    "ui.setting_value": "default", "feedback.warning": "yellow", "feedback.error": "red",
+    "brand.foreground": "magenta", "data.inbound": "yellow", "data.outbound": "cyan",
+    "data.local_endpoint": "light_green", "data.remote_endpoint": "default", "data.identity": "default",
+    "data.protocol": "default", "data.address_family": "default", "data.attribution": "default",
+    "data.total": "default", "data.time": "dark_gray", "chart.track": "gray",
+    "chart.combined": "gray"
+  }
+}

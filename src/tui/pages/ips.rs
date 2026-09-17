@@ -4,8 +4,8 @@ use ratatui::layout::{Constraint, Direction as LayoutDir, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Cell, Row, Table};
 
-use crate::palette::Theme;
 use crate::stats::{IpSnapshot, TrafficSnapshot};
+use crate::theme::{Role, Theme};
 
 use super::detail::relative_last_seen;
 use super::processes::{preview_position, selected_position};
@@ -31,7 +31,7 @@ pub(in crate::tui) fn draw_ip_preview(
         title,
         Some(entries.len()),
         color,
-        theme.colors.border,
+        theme.color(Role::Border),
         Some(preview_position(entries.len(), area.height)),
         theme,
     );
@@ -44,9 +44,9 @@ pub(in crate::tui) fn ip_theme(
     theme: &Theme,
 ) -> (&'static str, &'static str, Color) {
     if inbound {
-        ("in", "Inbound IPs", theme.colors.inbound)
+        ("in", "Inbound IPs", theme.color(Role::Inbound))
     } else {
-        ("out", "Outbound IPs", theme.colors.outbound)
+        ("out", "Outbound IPs", theme.color(Role::Outbound))
     }
 }
 
@@ -61,7 +61,7 @@ pub(in crate::tui) fn ip_table(
     let rows = if entries.is_empty() {
         vec![
             Row::new(vec!["No traffic observed", "", ""])
-                .style(Style::default().fg(theme.colors.placeholder)),
+                .style(Style::default().fg(theme.color(Role::Placeholder))),
         ]
     } else {
         entries
@@ -86,7 +86,7 @@ pub(in crate::tui) fn ip_table(
     )
     .header(
         Row::new(vec!["Remote address", "Total", "Last seen"])
-            .style(Style::default().fg(theme.colors.header)),
+            .style(Style::default().fg(theme.color(Role::Header))),
     )
     .column_spacing(1)
     .block(block)
@@ -170,9 +170,9 @@ pub(in crate::tui) fn draw_ip_table(
 ) {
     let (prefix, title, color) = ip_theme(inbound, theme);
     let border = if focused {
-        theme.colors.focus_border
+        theme.color(Role::FocusBorder)
     } else {
-        theme.colors.border
+        theme.color(Role::Border)
     };
     let block = panel_block(
         prefix,
@@ -186,7 +186,7 @@ pub(in crate::tui) fn draw_ip_table(
     let block = if focused {
         block.border_style(
             Style::default()
-                .fg(theme.colors.focus_border)
+                .fg(theme.color(Role::FocusBorder))
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn compact_ips_stack_themed_panels_vertically() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Ips;
         let mut terminal = Terminal::new(TestBackend::new(72, 24)).unwrap();
 
@@ -250,7 +250,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Ips;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 

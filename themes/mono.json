@@ -1,0 +1,20 @@
+{
+  "$schema": "./theme-v1.schema.json",
+  "version": 1,
+  "name": "Mono",
+  "profile": "mono",
+  "colors": {
+    "ui.page_bg": "default", "ui.panel_bg": "default", "ui.popup_bg": "default",
+    "ui.text": "default", "ui.title": "default", "ui.header": "default",
+    "ui.label": "default", "ui.secondary": "default", "ui.placeholder": "default",
+    "ui.border": "default", "ui.focus_border": "default", "ui.active_tab_fg": "default",
+    "ui.inactive_tab_fg": "default", "ui.active_tab_bg": "default", "ui.selection_bg": "default",
+    "ui.key": "default", "ui.setting_label": "default", "ui.hint": "default",
+    "ui.setting_value": "default", "feedback.warning": "default", "feedback.error": "default",
+    "brand.foreground": "default", "data.inbound": "default", "data.outbound": "default",
+    "data.local_endpoint": "default", "data.remote_endpoint": "default", "data.identity": "default",
+    "data.protocol": "default", "data.address_family": "default", "data.attribution": "default",
+    "data.total": "default", "data.time": "default", "chart.track": "default",
+    "chart.combined": "default"
+  }
+}

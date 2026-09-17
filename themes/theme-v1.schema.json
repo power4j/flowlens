@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FlowLens theme v1",
+  "description": "A complete FlowLens theme or a partial override of a registered built-in theme.",
+  "oneOf": [
+    { "$ref": "#/$defs/completeTheme" },
+    { "$ref": "#/$defs/overrideTheme" }
+  ],
+  "$defs": {
+    "ansiColor": {
+      "enum": ["default", "black", "red", "green", "yellow", "blue", "magenta", "cyan", "gray", "dark_gray", "light_red", "light_green", "light_yellow", "light_blue", "light_magenta", "light_cyan", "white"],
+      "examples": ["default", "dark_gray", "light_green"]
+    },
+    "truecolorColor": {
+      "anyOf": [
+        { "$ref": "#/$defs/ansiColor" },
+        { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$", "examples": ["#16C60C"] }
+      ]
+    },
+    "colors": {
+      "type": "object",
+      "description": "The 34 semantic color roles used by the FlowLens interface.",
+      "properties": {
+        "ui.page_bg": { "type": "string", "description": "Main page background." },
+        "ui.panel_bg": { "type": "string", "description": "Panel background." },
+        "ui.popup_bg": { "type": "string", "description": "Popup and dialog background." },
+        "ui.text": { "type": "string", "description": "Default UI text." },
+        "ui.title": { "type": "string", "description": "Page and panel titles." },
+        "ui.header": { "type": "string", "description": "Table and section headers." },
+        "ui.label": { "type": "string", "description": "Static field labels." },
+        "ui.secondary": { "type": "string", "description": "Secondary UI text." },
+        "ui.placeholder": { "type": "string", "description": "Input placeholder text." },
+        "ui.border": { "type": "string", "description": "Unfocused borders." },
+        "ui.focus_border": { "type": "string", "description": "Focused borders." },
+        "ui.active_tab_fg": { "type": "string", "description": "Active tab foreground." },
+        "ui.inactive_tab_fg": { "type": "string", "description": "Inactive tab foreground." },
+        "ui.active_tab_bg": { "type": "string", "description": "Active tab background." },
+        "ui.selection_bg": { "type": "string", "description": "Selected row background." },
+        "ui.key": { "type": "string", "description": "Keyboard shortcut labels." },
+        "ui.setting_label": { "type": "string", "description": "Settings item labels." },
+        "ui.hint": { "type": "string", "description": "Hints and help text." },
+        "ui.setting_value": { "type": "string", "description": "Settings item values." },
+        "feedback.warning": { "type": "string", "description": "Warning feedback." },
+        "feedback.error": { "type": "string", "description": "Error feedback." },
+        "brand.foreground": { "type": "string", "description": "FlowLens brand accent." },
+        "data.inbound": { "type": "string", "description": "Inbound traffic data." },
+        "data.outbound": { "type": "string", "description": "Outbound traffic data." },
+        "data.local_endpoint": { "type": "string", "description": "Local network endpoint data." },
+        "data.remote_endpoint": { "type": "string", "description": "Remote network endpoint data." },
+        "data.identity": { "type": "string", "description": "Identity data." },
+        "data.protocol": { "type": "string", "description": "Protocol data." },
+        "data.address_family": { "type": "string", "description": "Address-family data." },
+        "data.attribution": { "type": "string", "description": "Attribution data." },
+        "data.total": { "type": "string", "description": "Traffic total data." },
+        "data.time": { "type": "string", "description": "Timestamp data." },
+        "chart.track": { "type": "string", "description": "Chart track line." },
+        "chart.combined": { "type": "string", "description": "Combined chart series." }
+      },
+      "additionalProperties": false
+    },
+    "completeColors": {
+      "allOf": [
+        { "$ref": "#/$defs/colors" },
+        { "type": "object", "required": ["ui.page_bg", "ui.panel_bg", "ui.popup_bg", "ui.text", "ui.title", "ui.header", "ui.label", "ui.secondary", "ui.placeholder", "ui.border", "ui.focus_border", "ui.active_tab_fg", "ui.inactive_tab_fg", "ui.active_tab_bg", "ui.selection_bg", "ui.key", "ui.setting_label", "ui.hint", "ui.setting_value", "feedback.warning", "feedback.error", "brand.foreground", "data.inbound", "data.outbound", "data.local_endpoint", "data.remote_endpoint", "data.identity", "data.protocol", "data.address_family", "data.attribution", "data.total", "data.time", "chart.track", "chart.combined"] }
+      ]
+    },
+    "truecolorValues": {
+      "type": "object",
+      "patternProperties": { ".*": { "$ref": "#/$defs/truecolorColor" } }
+    },
+    "ansi16Values": {
+      "type": "object",
+      "patternProperties": { ".*": { "$ref": "#/$defs/ansiColor" } }
+    },
+    "monoValues": {
+      "type": "object",
+      "patternProperties": { ".*": { "const": "default" } }
+    },
+    "completeTheme": {
+      "type": "object",
+      "description": "A complete theme definition. Built-in themes use this form.",
+      "required": ["profile", "colors"],
+      "properties": {
+        "$schema": { "type": "string", "description": "Optional editor schema reference. FlowLens never fetches it." },
+        "version": { "const": 1, "description": "Optional format version; a missing version means v1." },
+        "name": { "type": "string", "description": "Optional display name." },
+        "profile": { "enum": ["truecolor", "ansi16", "mono"], "description": "Terminal color capability required by this complete theme." },
+        "colors": { "$ref": "#/$defs/completeColors" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "profile": { "const": "truecolor" } }, "required": ["profile"] },
+          "then": { "properties": { "colors": { "$ref": "#/$defs/truecolorValues" } } }
+        },
+        {
+          "if": { "properties": { "profile": { "const": "ansi16" } }, "required": ["profile"] },
+          "then": { "properties": { "colors": { "$ref": "#/$defs/ansi16Values" } } }
+        },
+        {
+          "if": { "properties": { "profile": { "const": "mono" } }, "required": ["profile"] },
+          "then": { "properties": { "colors": { "$ref": "#/$defs/monoValues" } } }
+        }
+      ]
+    },
+    "overrideTheme": {
+      "type": "object",
+      "description": "A partial override. Its registered built-in base supplies omitted roles and the capability profile.",
+      "required": ["base"],
+      "properties": {
+        "$schema": { "type": "string", "description": "Optional editor schema reference. FlowLens never fetches it." },
+        "version": { "const": 1, "description": "Optional format version; a missing version means v1." },
+        "name": { "type": "string", "description": "Optional display name." },
+        "base": { "type": "string", "description": "Registered built-in ID. The catalog validates existence." },
+        "colors": { "$ref": "#/$defs/colors", "description": "Roles to replace on the base theme." }
+      },
+      "additionalProperties": false,
+      "examples": [{ "name": "Warm Dark", "base": "dark", "colors": { "ui.title": "#F0C674" } }]
+    }
+  }
+}

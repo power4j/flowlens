@@ -1,6 +1,8 @@
 # TUI 主题按终端能力自动选择，并支持会话级切换
 
-FlowLens 的 TUI 以语义角色而非页面类别或色相获取样式。内置主题为 FlowLens Dark、ANSI 16 和 Mono；三个主题覆盖同一组角色，用户可通过 `--theme` 或设置浮层选择。`Auto` 是选择策略，不是第四套主题：它在启动时依据 `NO_COLOR`、`COLORTERM` 与 `TERM` 解析为一个内置主题。完整的用户配置和角色参考见 [TUI themes](../themes.md)。
+FlowLens 的 TUI 以语义角色而非页面类别或色相获取样式。内置主题为 FlowLens Dark、ANSI 16 和 Mono；三个主题覆盖同一组角色，用户可通过 `--theme` 或设置浮层选择。`Auto` 是选择策略，不是第四套主题：它在启动时依据 `NO_COLOR`、`COLORTERM` 与 `TERM` 解析为一个内置主题。完整的用户配置和角色参考见 [TUI themes](../theme.md)。
+
+主题持久决策为统一的 v1 JSON 契约：内置主题使用完整 JSON，外部文件可以使用完整 JSON 或继承已注册内置主题的覆盖 JSON。内置 JSON 在编译时嵌入单一可执行文件；外部主题只支持命名用户目录查找或显式路径，并且只在会话启动时读取和验证。
 
 自动选择优先级为：非空 `NO_COLOR` 选择 Mono；值为 `truecolor` 或 `24bit` 的 `COLORTERM` 选择 FlowLens Dark；`TERM=dumb` 选择 Mono；包含 `256color` 的 `TERM` 选择 FlowLens Dark；`ansi`、`linux`、`screen`、`xterm` 与 `vt*` 选择 ANSI 16；其他值选择 FlowLens Dark。`COLORTERM` 与 `TERM` 忽略首尾空白并按不区分大小写比较，空 `NO_COLOR` 不影响检测。环境变量无法可靠区分所有真彩色和 256 色终端，因此默认偏向常见的真彩色终端，用户可明确选择 ANSI 16。
 

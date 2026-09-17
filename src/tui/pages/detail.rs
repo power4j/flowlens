@@ -1,8 +1,8 @@
 //! Process detail page: attribution breakdown.
 
-use crate::palette::Theme;
 use crate::report::{human_bytes, truncate};
 use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
+use crate::theme::{Role, Theme};
 use ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -24,8 +24,8 @@ pub(in crate::tui) fn attribution_summary_lines(
 ) -> Vec<Line<'static>> {
     // The summary uses the same since-start totals as the table.
     let attribution = &snapshot.attribution;
-    let muted = Style::default().fg(theme.colors.secondary);
-    let total = Style::default().fg(theme.colors.total);
+    let muted = Style::default().fg(theme.color(Role::Secondary));
+    let total = Style::default().fg(theme.color(Role::Total));
     let mut lines = vec![Line::from(vec![
         Span::styled("Total ", muted),
         Span::styled(human_bytes(attribution.total()), total),
@@ -68,8 +68,8 @@ pub(in crate::tui) fn channel_summary_line(
     value_width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let muted = Style::default().fg(theme.colors.secondary);
-    let label_style = Style::default().fg(theme.colors.attribution);
+    let muted = Style::default().fg(theme.color(Role::Secondary));
+    let label_style = Style::default().fg(theme.color(Role::Attribution));
     let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
     Line::from(vec![
         // Label column padded to the longest label (Unattributed) + 2, so
@@ -78,17 +78,17 @@ pub(in crate::tui) fn channel_summary_line(
         Span::styled("Recv ", muted),
         Span::styled(
             value(traffic.recv),
-            Style::default().fg(theme.colors.inbound),
+            Style::default().fg(theme.color(Role::Inbound)),
         ),
         Span::styled("  Sent ", muted),
         Span::styled(
             value(traffic.sent),
-            Style::default().fg(theme.colors.outbound),
+            Style::default().fg(theme.color(Role::Outbound)),
         ),
         Span::styled("  Total ", muted),
         Span::styled(
             value(traffic.total()),
-            Style::default().fg(theme.colors.total),
+            Style::default().fg(theme.color(Role::Total)),
         ),
     ])
 }
@@ -134,9 +134,9 @@ pub(in crate::tui) fn pending_status_title(
     Line::from(Span::styled(
         format!("{}{}", " ".repeat(padding), label),
         Style::default().fg(if bytes == 0 {
-            theme.colors.secondary
+            theme.color(Role::Secondary)
         } else {
-            theme.colors.warning
+            theme.color(Role::Warning)
         }),
     ))
     .alignment(Alignment::Right)
@@ -168,11 +168,11 @@ pub(in crate::tui) fn process_attribution_detail_lines(
     .max()
     .unwrap_or(0);
     let value = |bytes: u64| format!("{:>width$}", human_bytes(bytes), width = value_width);
-    let attribution = Style::default().fg(theme.colors.attribution);
-    let secondary = Style::default().fg(theme.colors.secondary);
-    let total = Style::default().fg(theme.colors.total);
-    let inbound = Style::default().fg(theme.colors.inbound);
-    let outbound = Style::default().fg(theme.colors.outbound);
+    let attribution = Style::default().fg(theme.color(Role::Attribution));
+    let secondary = Style::default().fg(theme.color(Role::Secondary));
+    let total = Style::default().fg(theme.color(Role::Total));
+    let inbound = Style::default().fg(theme.color(Role::Inbound));
+    let outbound = Style::default().fg(theme.color(Role::Outbound));
     let attribution_line = |label: &str, bytes: u64| {
         Line::from(vec![
             Span::raw("  "),
@@ -230,21 +230,21 @@ fn ranking_summary_line(
     Line::from(vec![
         Span::styled(
             format!("{label} ({window}): "),
-            Style::default().fg(theme.colors.attribution),
+            Style::default().fg(theme.color(Role::Attribution)),
         ),
         Span::styled(
             format_rank_value(snapshot, traffic.total()),
-            Style::default().fg(theme.colors.total),
+            Style::default().fg(theme.color(Role::Total)),
         ),
-        Span::styled("  Recv ", Style::default().fg(theme.colors.secondary)),
+        Span::styled("  Recv ", Style::default().fg(theme.color(Role::Secondary))),
         Span::styled(
             format_rank_value(snapshot, traffic.recv),
-            Style::default().fg(theme.colors.inbound),
+            Style::default().fg(theme.color(Role::Inbound)),
         ),
-        Span::styled("  Sent ", Style::default().fg(theme.colors.secondary)),
+        Span::styled("  Sent ", Style::default().fg(theme.color(Role::Secondary))),
         Span::styled(
             format_rank_value(snapshot, traffic.sent),
-            Style::default().fg(theme.colors.outbound),
+            Style::default().fg(theme.color(Role::Outbound)),
         ),
     ])
 }
@@ -287,21 +287,21 @@ fn aligned_ranking_summary_lines(
         Line::from(vec![
             Span::styled(
                 format!("{:<label_width$} ", labels[row]),
-                Style::default().fg(theme.colors.attribution),
+                Style::default().fg(theme.color(Role::Attribution)),
             ),
             Span::styled(
                 format!("{total:<width$}", width = value_widths[0]),
-                Style::default().fg(theme.colors.total),
+                Style::default().fg(theme.color(Role::Total)),
             ),
-            Span::styled("  Recv ", Style::default().fg(theme.colors.secondary)),
+            Span::styled("  Recv ", Style::default().fg(theme.color(Role::Secondary))),
             Span::styled(
                 format!("{recv:<width$}", width = value_widths[1]),
-                Style::default().fg(theme.colors.inbound),
+                Style::default().fg(theme.color(Role::Inbound)),
             ),
-            Span::styled("  Sent ", Style::default().fg(theme.colors.secondary)),
+            Span::styled("  Sent ", Style::default().fg(theme.color(Role::Secondary))),
             Span::styled(
                 format!("{sent:<width$}", width = value_widths[2]),
-                Style::default().fg(theme.colors.outbound),
+                Style::default().fg(theme.color(Role::Outbound)),
             ),
         ])
     })
@@ -327,21 +327,21 @@ fn render_attribution_column(
             title,
             human_bytes(traffic.total()),
             Style::default()
-                .fg(theme.colors.attribution)
+                .fg(theme.color(Role::Attribution))
                 .add_modifier(Modifier::BOLD),
-            Style::default().fg(theme.colors.total),
+            Style::default().fg(theme.color(Role::Total)),
         ),
         (
             "  ├ Recv:",
             human_bytes(traffic.recv),
-            Style::default().fg(theme.colors.secondary),
-            Style::default().fg(theme.colors.inbound),
+            Style::default().fg(theme.color(Role::Secondary)),
+            Style::default().fg(theme.color(Role::Inbound)),
         ),
         (
             "  └ Sent:",
             human_bytes(traffic.sent),
-            Style::default().fg(theme.colors.secondary),
-            Style::default().fg(theme.colors.outbound),
+            Style::default().fg(theme.color(Role::Secondary)),
+            Style::default().fg(theme.color(Role::Outbound)),
         ),
     ];
     for (row, (label, value, label_style, value_style)) in rows.iter().zip(fields) {
@@ -496,21 +496,21 @@ pub(in crate::tui) fn draw_process_detail(
         "proc",
         "Process Details",
         None,
-        theme.colors.error,
-        theme.colors.border,
+        theme.color(Role::Error),
+        theme.color(Role::Border),
         None,
         theme,
     );
 
     // Header: lay out regions first, then render each field into its region.
     if !compact {
-        let label = Style::default().fg(theme.colors.label);
-        let value = Style::default().fg(theme.colors.text);
-        let placeholder = Style::default().fg(theme.colors.placeholder);
-        let time = Style::default().fg(theme.colors.time);
-        let recv_fg = Style::default().fg(theme.colors.inbound);
-        let sent_fg = Style::default().fg(theme.colors.outbound);
-        let total_fg = Style::default().fg(theme.colors.total);
+        let label = Style::default().fg(theme.color(Role::Label));
+        let value = Style::default().fg(theme.color(Role::Text));
+        let placeholder = Style::default().fg(theme.color(Role::Placeholder));
+        let time = Style::default().fg(theme.color(Role::Time));
+        let recv_fg = Style::default().fg(theme.color(Role::Inbound));
+        let sent_fg = Style::default().fg(theme.color(Role::Outbound));
+        let total_fg = Style::default().fg(theme.color(Role::Total));
         let inner = header_block.inner(header_area);
         f.render_widget(header_block, header_area);
         let rows = Layout::default()
@@ -580,10 +580,10 @@ pub(in crate::tui) fn draw_process_detail(
             rows[1],
         );
     } else {
-        let label = Style::default().fg(theme.colors.label);
-        let value = Style::default().fg(theme.colors.text);
-        let placeholder = Style::default().fg(theme.colors.placeholder);
-        let time = Style::default().fg(theme.colors.time);
+        let label = Style::default().fg(theme.color(Role::Label));
+        let value = Style::default().fg(theme.color(Role::Text));
+        let placeholder = Style::default().fg(theme.color(Role::Placeholder));
+        let time = Style::default().fg(theme.color(Role::Time));
         let header_lines = vec![
             Line::from(vec![
                 Span::styled("Name: ", label),
@@ -612,21 +612,21 @@ pub(in crate::tui) fn draw_process_detail(
                 Span::styled("Recv: ", label),
                 Span::styled(
                     human_bytes(process.recv),
-                    Style::default().fg(theme.colors.inbound),
+                    Style::default().fg(theme.color(Role::Inbound)),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("Sent: ", label),
                 Span::styled(
                     human_bytes(process.sent),
-                    Style::default().fg(theme.colors.outbound),
+                    Style::default().fg(theme.color(Role::Outbound)),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("Total: ", label),
                 Span::styled(
                     human_bytes(process.total()),
-                    Style::default().fg(theme.colors.total),
+                    Style::default().fg(theme.color(Role::Total)),
                 ),
             ]),
             Line::from(""),
@@ -660,8 +660,8 @@ pub(in crate::tui) fn draw_process_detail(
         "attr",
         "Attribution",
         None,
-        theme.colors.brand,
-        theme.colors.border,
+        theme.color(Role::Brand),
+        theme.color(Role::Border),
         None,
         theme,
     );
@@ -681,7 +681,7 @@ pub(in crate::tui) fn draw_process_detail(
             Paragraph::new(Line::from(Span::styled(
                 "Attribution (lifetime)",
                 Style::default()
-                    .fg(theme.colors.title)
+                    .fg(theme.color(Role::Title))
                     .add_modifier(Modifier::BOLD),
             ))),
             rows[0],
@@ -695,7 +695,7 @@ pub(in crate::tui) fn draw_process_detail(
         f.render_widget(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.colors.secondary)),
+                .border_style(Style::default().fg(theme.color(Role::Secondary))),
             rows[2],
         );
 
@@ -711,14 +711,14 @@ pub(in crate::tui) fn draw_process_detail(
             Line::from("Shared traffic is included in Total and may appear in multiple processes."),
             Line::from(Span::styled(
                 "Attr: E = exclusive only, M = mixed (includes shared)",
-                Style::default().fg(theme.colors.secondary),
+                Style::default().fg(theme.color(Role::Secondary)),
             )),
         ]);
         if paused.is_some() {
             summary_lines.push(Line::from(Span::styled(
                 "Tracking paused",
                 Style::default()
-                    .fg(theme.colors.warning)
+                    .fg(theme.color(Role::Warning))
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -727,7 +727,7 @@ pub(in crate::tui) fn draw_process_detail(
         let mut attr_lines = vec![Line::from(Span::styled(
             "Attribution (lifetime)",
             Style::default()
-                .fg(theme.colors.title)
+                .fg(theme.color(Role::Title))
                 .add_modifier(Modifier::BOLD),
         ))];
         attr_lines.extend(process_attribution_detail_lines(&process, true, theme));
@@ -750,13 +750,13 @@ pub(in crate::tui) fn draw_process_detail(
         ));
         attr_lines.push(Line::from(Span::styled(
             "Attr: E = exclusive only, M = mixed (includes shared)",
-            Style::default().fg(theme.colors.secondary),
+            Style::default().fg(theme.color(Role::Secondary)),
         )));
         if paused.is_some() {
             attr_lines.push(Line::from(Span::styled(
                 "Tracking paused",
                 Style::default()
-                    .fg(theme.colors.warning)
+                    .fg(theme.color(Role::Warning))
                     .add_modifier(Modifier::BOLD),
             )));
         }
@@ -771,8 +771,8 @@ pub(in crate::tui) fn draw_process_detail(
         "ip",
         "IP Statistics (lifetime)",
         None,
-        theme.colors.brand,
-        theme.colors.border,
+        theme.color(Role::Brand),
+        theme.color(Role::Border),
         None,
         theme,
     );
@@ -839,8 +839,8 @@ pub(in crate::tui) fn flow_table(
         .into_iter()
         .map(|row| {
             let (protocol, protocol_color) = match row.protocol {
-                crate::capture::TransportProtocol::Tcp => ("TCP", theme.colors.protocol),
-                crate::capture::TransportProtocol::Udp => ("UDP", theme.colors.protocol),
+                crate::capture::TransportProtocol::Tcp => ("TCP", theme.color(Role::Protocol)),
+                crate::capture::TransportProtocol::Udp => ("UDP", theme.color(Role::Protocol)),
             };
             FormattedDirectionalFlowRow {
                 src_ip: row.src_ip.to_string(),
@@ -900,37 +900,39 @@ pub(in crate::tui) fn flow_table(
     let rows = if directional_rows.is_empty() {
         vec![
             Row::new(vec!["No traffic observed", "", "", "", "", "", "", "", ""])
-                .style(Style::default().fg(theme.colors.secondary)),
+                .style(Style::default().fg(theme.color(Role::Secondary))),
         ]
     } else {
         directional_rows
             .into_iter()
             .map(|row| {
                 let local_style = Style::default()
-                    .fg(theme.colors.local_endpoint)
+                    .fg(theme.color(Role::LocalEndpoint))
                     .add_modifier(Modifier::BOLD);
                 Row::new(vec![
                     Cell::from(truncate(&row.src_ip, src_addr_width)).style(if row.local_is_src {
                         local_style
                     } else {
-                        Style::default().fg(theme.colors.remote_endpoint)
+                        Style::default().fg(theme.color(Role::RemoteEndpoint))
                     }),
-                    Cell::from(row.src_port).style(Style::default().fg(theme.colors.identity)),
+                    Cell::from(row.src_port)
+                        .style(Style::default().fg(theme.color(Role::Identity))),
                     Cell::from(""),
                     Cell::from(truncate(&row.dest_ip, dest_addr_width)).style(
                         if row.local_is_src {
-                            Style::default().fg(theme.colors.remote_endpoint)
+                            Style::default().fg(theme.color(Role::RemoteEndpoint))
                         } else {
                             local_style
                         },
                     ),
-                    Cell::from(row.dest_port).style(Style::default().fg(theme.colors.identity)),
+                    Cell::from(row.dest_port)
+                        .style(Style::default().fg(theme.color(Role::Identity))),
                     Cell::from(""),
                     Cell::from(Line::from(row.protocol).alignment(Alignment::Center))
                         .style(Style::default().fg(row.protocol_color)),
                     Cell::from(""),
                     Cell::from(Line::from(row.bytes).alignment(Alignment::Right))
-                        .style(Style::default().fg(theme.colors.total)),
+                        .style(Style::default().fg(theme.color(Role::Total))),
                 ])
             })
             .collect()
@@ -957,7 +959,7 @@ pub(in crate::tui) fn flow_table(
                 Cell::from(header)
             }
         }))
-        .style(Style::default().fg(theme.colors.header)),
+        .style(Style::default().fg(theme.color(Role::Header))),
     )
     .column_spacing(1)
     .block(block)
@@ -1036,7 +1038,7 @@ mod tests {
                     Block::default().borders(Borders::ALL),
                     area,
                     false,
-                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+                    &Theme::dark_for_test(),
                 );
                 frame.render_stateful_widget(
                     table,
@@ -1433,7 +1435,7 @@ mod tests {
                     Block::default().borders(Borders::ALL),
                     area,
                     false,
-                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+                    &Theme::dark_for_test(),
                 ));
             },
         );
@@ -1447,7 +1449,7 @@ mod tests {
                     Block::default().borders(Borders::ALL),
                     area,
                     false,
-                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+                    &Theme::dark_for_test(),
                 ));
             },
         );
@@ -1457,8 +1459,8 @@ mod tests {
             processes: vec![bidirectional_ipv4.clone()].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1508,8 +1510,8 @@ mod tests {
             processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1584,15 +1586,11 @@ mod tests {
 
         assert_ne!(
             rendered_cell_color(&terminal, "20 B", "127.0.0.2"),
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
         assert_eq!(
             rendered_cell_color(&terminal, "20 B", "127.0.0.1"),
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
     }
 
@@ -1621,15 +1619,11 @@ mod tests {
 
         assert_ne!(
             rendered_cell_color(&terminal, "30 B", "95.25.28.161"),
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
         assert_eq!(
             rendered_cell_color(&terminal, "30 B", "10.11.12.31"),
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
     }
 
@@ -1648,7 +1642,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1714,8 +1708,8 @@ mod tests {
             processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -1816,54 +1810,38 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[position_in(outbound_row, "192.0.2.10")].fg,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
         assert_ne!(
             buffer[position_in(outbound_row, "198.51.100.5")].fg,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
         assert_ne!(
             buffer[position_in(inbound_row, "203.0.113.8")].fg,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
         assert_eq!(
             buffer[position_in(inbound_row, "192.0.2.10")].fg,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .local_endpoint
+            Theme::dark_for_test().color(crate::theme::Role::LocalEndpoint)
         );
         assert_eq!(
             buffer[position_in(outbound_row, "49152")].fg,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .text
+            Theme::dark_for_test().color(crate::theme::Role::Text)
         );
         assert_eq!(
             buffer[position_in(outbound_row, "443")].fg,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .text
+            Theme::dark_for_test().color(crate::theme::Role::Text)
         );
         let tcp = buffer[position_in(outbound_row, "TCP")].fg;
         let udp = buffer[position_in(inbound_row, "UDP")].fg;
         let bytes = buffer[position_in(outbound_row, "40 B")].fg;
         assert_eq!(
             tcp,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .protocol
+            Theme::dark_for_test().color(crate::theme::Role::Protocol)
         );
         assert_eq!(
             udp,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .protocol
+            Theme::dark_for_test().color(crate::theme::Role::Protocol)
         );
         assert_ne!(tcp, bytes);
         assert_ne!(udp, bytes);
@@ -1894,7 +1872,7 @@ mod tests {
                 processes: vec![process.clone()].into(),
                 ..TrafficSnapshot::default()
             };
-            let mut state = AppState::new();
+            let mut state = AppState::for_test();
             state.page = Page::Processes;
             handle_key(
                 &mut state,
@@ -1997,7 +1975,7 @@ mod tests {
             processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2045,9 +2023,7 @@ mod tests {
         assert!(rendered.contains("?    1.50 KB"));
         assert_pending_indicator_color(
             &terminal,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .warning,
+            Theme::dark_for_test().color(crate::theme::Role::Warning),
         );
     }
 
@@ -2059,9 +2035,7 @@ mod tests {
         assert!(rendered.contains("?    0.00  B"));
         assert_pending_indicator_color(
             &terminal,
-            Theme::builtin(crate::palette::BuiltinTheme::Dark)
-                .colors
-                .secondary,
+            Theme::dark_for_test().color(crate::theme::Role::Secondary),
         );
     }
 
@@ -2101,7 +2075,7 @@ mod tests {
             pending_attribution_bytes: 1536,
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
         terminal
@@ -2114,18 +2088,9 @@ mod tests {
 
     #[test]
     fn pending_status_title_keeps_a_fixed_slot_and_degrades_when_narrow() {
-        let full = pending_status_title(
-            1536,
-            80,
-            &Theme::builtin(crate::palette::BuiltinTheme::Dark),
-        );
-        let empty =
-            pending_status_title(0, 80, &Theme::builtin(crate::palette::BuiltinTheme::Dark));
-        let narrow = pending_status_title(
-            1536,
-            40,
-            &Theme::builtin(crate::palette::BuiltinTheme::Dark),
-        );
+        let full = pending_status_title(1536, 80, &Theme::dark_for_test());
+        let empty = pending_status_title(0, 80, &Theme::dark_for_test());
+        let narrow = pending_status_title(1536, 40, &Theme::dark_for_test());
 
         assert_eq!(full.width(), PENDING_STATUS_SLOT_WIDTH);
         assert_eq!(empty.width(), PENDING_STATUS_SLOT_WIDTH);
@@ -2181,7 +2146,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
@@ -2231,7 +2196,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         state.proc_scroll = 1;
 
@@ -2296,7 +2261,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2346,7 +2311,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2395,11 +2360,7 @@ mod tests {
             crate::stats::ProcTraffic::default(),
             Vec::new(),
         );
-        let lines = process_attribution_detail_lines(
-            &process,
-            true,
-            &Theme::builtin(crate::palette::BuiltinTheme::Dark),
-        );
+        let lines = process_attribution_detail_lines(&process, true, &Theme::dark_for_test());
         let text: Vec<String> = lines
             .iter()
             .map(|line| {
@@ -2452,7 +2413,7 @@ mod tests {
             processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2572,7 +2533,7 @@ mod tests {
             processes: vec![selected].into(),
             ..TrafficSnapshot::default()
         });
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2622,7 +2583,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         });
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2674,7 +2635,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         });
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2759,7 +2720,7 @@ mod tests {
             140,
             160,
         );
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2828,7 +2789,7 @@ mod tests {
             processes: vec![selected].into(),
             ..TrafficSnapshot::default()
         });
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2910,7 +2871,7 @@ mod tests {
             processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         handle_key(
             &mut state,
@@ -2973,7 +2934,7 @@ mod tests {
                     &mut state,
                     &snapshot,
                     "2026-07-15T08:02:00Z".parse().unwrap(),
-                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+                    &Theme::dark_for_test(),
                 );
             })
             .unwrap();

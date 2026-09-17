@@ -84,14 +84,15 @@ FlowLens 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会
 ./flowlens eth0
 ```
 
-显式选择 TUI 主题，或加载 JSON 主题文件：
+选择内置 TUI 主题、按名称加载用户主题，或加载指定 JSON 主题文件：
 
 ```bash
 ./flowlens --theme ansi16
+./flowlens --theme ocean
 ./flowlens eth0 --theme ./my-theme.json
 ```
 
-`--theme` 只适用于前台交互 TUI。内置主题、自动选择和 JSON 主题文件见 [TUI 主题](docs/themes.md)。
+`--theme` 只适用于前台交互 TUI。主题选择、自动行为和 JSON 主题编写见 [TUI 主题](docs/theme.md)。
 
 将定时生成的 plain 文本快照写入文件：
 

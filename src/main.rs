@@ -7,13 +7,13 @@ mod domain_parse_http;
 mod domain_parse_tls;
 mod flow_table;
 mod history;
-mod palette;
 mod pipeline;
 mod proc_table;
 mod process_probe;
 mod report;
 mod session;
 mod stats;
+mod theme;
 mod tui;
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -70,15 +70,15 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
         return ExitCode::FAILURE;
     }
     let theme = if tui_mode {
-        match palette::parse_cli_theme(cli.theme.as_deref().unwrap_or("auto")) {
-            Ok(theme) => theme,
+        match theme::ThemeSession::load(cli.theme.as_deref()) {
+            Ok(theme) => Some(theme),
             Err(error) => {
                 eprintln!("Theme configuration error: {error}");
                 return ExitCode::FAILURE;
             }
         }
     } else {
-        (palette::ThemeSelection::Auto, None)
+        None
     };
     if let Err(message) = require_npcap() {
         eprintln!("{message}");
@@ -112,7 +112,7 @@ fn run(cli: Cli, require_npcap: impl FnOnce() -> Result<(), &'static str>) -> Ex
             proc_table,
             top_n,
             proc_flows,
-            palette::ThemeState::with_selection(theme.0, theme.1),
+            theme.expect("TUI mode initializes a theme session"),
         );
     }
 
@@ -132,7 +132,7 @@ fn run_tui_mode(
     proc_table: proc_table::SharedProcTable,
     top_n: usize,
     proc_flows: usize,
-    theme: palette::ThemeState,
+    theme: theme::ThemeSession,
 ) -> ExitCode {
     let mut session = match session::TrafficSession::discover(
         proc_table,

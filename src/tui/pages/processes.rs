@@ -5,9 +5,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Cell, Row, Table};
 
-use crate::palette::Theme;
 use crate::report::truncate;
 use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
+use crate::theme::{Role, Theme};
 
 use super::detail::{attribution_summary_lines, pending_status_title, relative_last_seen};
 use crate::tui::layout::*;
@@ -33,8 +33,8 @@ pub(in crate::tui) fn draw_process_preview(
         "proc",
         "Top Processes",
         Some(snapshot.processes.len()),
-        theme.colors.error,
-        theme.colors.border,
+        theme.color(Role::Error),
+        theme.color(Role::Border),
         Some(footer),
         theme,
     );
@@ -51,7 +51,7 @@ pub(in crate::tui) fn process_table(
 ) -> Table<'static> {
     let compact = mode == LayoutMode::Compact;
     let rows = process_rows(snapshot, compact, now, theme);
-    let header_style = Style::default().fg(theme.colors.header);
+    let header_style = Style::default().fg(theme.color(Role::Header));
     // ADR 0013: the Attr column — its header uses words consistent with the
     // other headers, the values stay single letters.
     let table = if compact {
@@ -119,7 +119,7 @@ pub(in crate::tui) fn process_rows(
                 Cell::from(""),
             ]
         };
-        return vec![Row::new(cells).style(Style::default().fg(theme.colors.placeholder))];
+        return vec![Row::new(cells).style(Style::default().fg(theme.color(Role::Placeholder)))];
     }
 
     snapshot
@@ -128,9 +128,9 @@ pub(in crate::tui) fn process_rows(
         .map(|process| {
             let name = Cell::from(process_name_span(process, 40)).style(Style::default().fg(
                 if process.name().is_some() {
-                    theme.colors.identity
+                    theme.color(Role::Identity)
                 } else {
-                    theme.colors.placeholder
+                    theme.color(Role::Placeholder)
                 },
             ));
             // ADR 0013: Attr values are single letters, E = exclusive-only,
@@ -145,15 +145,15 @@ pub(in crate::tui) fn process_rows(
                 process.rank
             };
             let attr = Cell::from(if process.is_mixed() { "M" } else { "E" })
-                .style(Style::default().fg(theme.colors.attribution));
+                .style(Style::default().fg(theme.color(Role::Attribution)));
             if compact {
                 Row::new(vec![
                     name,
                     Cell::from(format_rank_value(snapshot, traffic.total()))
-                        .style(Style::default().fg(theme.colors.total)),
+                        .style(Style::default().fg(theme.color(Role::Total))),
                     attr,
                     Cell::from(relative_last_seen(process.last_seen(), now))
-                        .style(Style::default().fg(theme.colors.time)),
+                        .style(Style::default().fg(theme.color(Role::Time))),
                 ])
             } else {
                 Row::new(vec![
@@ -164,16 +164,16 @@ pub(in crate::tui) fn process_rows(
                             .map(|pid| pid.to_string())
                             .unwrap_or_else(|| "-".to_string()),
                     )
-                    .style(Style::default().fg(theme.colors.identity)),
+                    .style(Style::default().fg(theme.color(Role::Identity))),
                     Cell::from(format_rank_value(snapshot, traffic.recv))
-                        .style(Style::default().fg(theme.colors.inbound)),
+                        .style(Style::default().fg(theme.color(Role::Inbound))),
                     Cell::from(format_rank_value(snapshot, traffic.sent))
-                        .style(Style::default().fg(theme.colors.outbound)),
+                        .style(Style::default().fg(theme.color(Role::Outbound))),
                     Cell::from(format_rank_value(snapshot, traffic.total()))
-                        .style(Style::default().fg(theme.colors.total)),
+                        .style(Style::default().fg(theme.color(Role::Total))),
                     attr,
                     Cell::from(relative_last_seen(process.last_seen(), now))
-                        .style(Style::default().fg(theme.colors.time)),
+                        .style(Style::default().fg(theme.color(Role::Time))),
                 ])
             }
         })
@@ -221,8 +221,8 @@ pub(in crate::tui) fn draw_processes(
         "proc",
         "Processes",
         Some(snapshot.processes.len()),
-        theme.colors.error,
-        theme.colors.border,
+        theme.color(Role::Error),
+        theme.color(Role::Border),
         Some(footer),
         theme,
     )
@@ -277,8 +277,8 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test();
         state.page = Page::Processes;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
@@ -320,28 +320,31 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
-        state.theme.resolved.colors.title = ratatui::style::Color::LightRed;
-        state.theme.resolved.colors.header = ratatui::style::Color::LightBlue;
-        state.theme.resolved.colors.total = ratatui::style::Color::LightGreen;
-        state.theme.resolved.colors.inbound = ratatui::style::Color::Yellow;
-        state.theme.resolved.colors.warning = ratatui::style::Color::LightMagenta;
-        state.theme.resolved.colors.panel_bg = ratatui::style::Color::DarkGray;
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test()
+            .with_role(crate::theme::Role::Title, ratatui::style::Color::LightRed)
+            .with_role(crate::theme::Role::Header, ratatui::style::Color::LightBlue)
+            .with_role(crate::theme::Role::Total, ratatui::style::Color::LightGreen)
+            .with_role(crate::theme::Role::Inbound, ratatui::style::Color::Yellow)
+            .with_role(
+                crate::theme::Role::Warning,
+                ratatui::style::Color::LightMagenta,
+            )
+            .with_role(crate::theme::Role::PanelBg, ratatui::style::Color::DarkGray);
         state.page = Page::Processes;
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal
             .draw(|frame| draw(frame, &mut state, &snapshot, "eth0", "host", Instant::now()))
             .unwrap();
 
-        let colors = &state.theme.resolved.colors;
+        let theme = state.theme.current();
         let cells = &terminal.backend().buffer().content;
         for expected in [
-            colors.title,
-            colors.header,
-            colors.total,
-            colors.inbound,
-            colors.warning,
+            theme.color(crate::theme::Role::Title),
+            theme.color(crate::theme::Role::Header),
+            theme.color(crate::theme::Role::Total),
+            theme.color(crate::theme::Role::Inbound),
+            theme.color(crate::theme::Role::Warning),
         ] {
             assert!(
                 cells.iter().any(|cell| cell.fg == expected),
@@ -351,7 +354,7 @@ mod tests {
         assert!(
             cells
                 .iter()
-                .any(|cell| cell.bg == state.theme.resolved.colors.panel_bg),
+                .any(|cell| cell.bg == state.theme.current().color(crate::theme::Role::PanelBg)),
             "configured panel background was not rendered"
         );
     }
@@ -377,7 +380,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
@@ -432,7 +435,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         assert!(matches!(
             handle_key(
@@ -495,7 +498,7 @@ mod tests {
                     &snapshot,
                     LayoutMode::Standard,
                     chrono::Utc::now(),
-                    &Theme::builtin(crate::palette::BuiltinTheme::Dark),
+                    &Theme::dark_for_test(),
                 );
             })
             .unwrap();

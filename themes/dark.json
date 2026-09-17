@@ -1,0 +1,20 @@
+{
+  "$schema": "./theme-v1.schema.json",
+  "version": 1,
+  "name": "FlowLens Dark",
+  "profile": "truecolor",
+  "colors": {
+    "ui.page_bg": "#0B1118", "ui.panel_bg": "#0B1118", "ui.popup_bg": "#131D29",
+    "ui.text": "#D8E0E8", "ui.title": "#F4F7FA", "ui.header": "#93A2B4",
+    "ui.label": "#93A2B4", "ui.secondary": "#93A2B4", "ui.placeholder": "#93A2B4",
+    "ui.border": "#3D4C5F", "ui.focus_border": "#93A2B4", "ui.active_tab_fg": "#F4F7FA",
+    "ui.inactive_tab_fg": "#93A2B4", "ui.active_tab_bg": "#1C2C3D", "ui.selection_bg": "#1C2C3D",
+    "ui.key": "#D8E0E8", "ui.setting_label": "#D8E0E8", "ui.hint": "#93A2B4",
+    "ui.setting_value": "#F4F7FA", "feedback.warning": "#F5BA45", "feedback.error": "#F18BA0",
+    "brand.foreground": "#B9A0F7", "data.inbound": "#F5BA45", "data.outbound": "#43C6E8",
+    "data.local_endpoint": "#16C60C", "data.remote_endpoint": "#D8E0E8", "data.identity": "#D8E0E8",
+    "data.protocol": "#D8E0E8", "data.address_family": "#D8E0E8", "data.attribution": "#D8E0E8",
+    "data.total": "#F4F7FA", "data.time": "#93A2B4", "chart.track": "#253443",
+    "chart.combined": "#93A2B4"
+  }
+}

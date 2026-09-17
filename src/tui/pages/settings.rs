@@ -26,17 +26,17 @@ pub(in crate::tui) fn settings_selection_prefix(selected: bool) -> &'static str 
 /// Centered settings overlay: lets the user pick the active palette tier for
 /// the session. Drawn on top of the current page when `state.settings_open`.
 pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &AppState) {
-    let theme = &state.theme.resolved;
+    let theme = state.theme.current();
     let popup = centered_rect(area, 70, 11);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.colors.border))
+        .border_style(Style::default().fg(theme.color(crate::theme::Role::Border)))
         .title(Line::from(vec![
             Span::raw(" "),
             Span::styled(
                 "Settings",
                 Style::default()
-                    .fg(theme.colors.title)
+                    .fg(theme.color(crate::theme::Role::Title))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -53,12 +53,12 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Span::styled(
             "Rank window: ",
             Style::default()
-                .fg(theme.colors.setting_label)
+                .fg(theme.color(crate::theme::Role::SettingLabel))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             rank_window_label,
-            Style::default().fg(theme.colors.setting_value),
+            Style::default().fg(theme.color(crate::theme::Role::SettingValue)),
         ),
     ]);
     let mut palette_line = Line::from(vec![
@@ -66,12 +66,12 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Span::styled(
             "Theme: ",
             Style::default()
-                .fg(theme.colors.setting_label)
+                .fg(theme.color(crate::theme::Role::SettingLabel))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             choice_label,
-            Style::default().fg(theme.colors.setting_value),
+            Style::default().fg(theme.color(crate::theme::Role::SettingValue)),
         ),
     ]);
     let mut diagnostics_line = Line::from(vec![
@@ -81,12 +81,12 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Span::styled(
             "Diagnostics: ",
             Style::default()
-                .fg(theme.colors.setting_label)
+                .fg(theme.color(crate::theme::Role::SettingLabel))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             diagnostics_label,
-            Style::default().fg(theme.colors.setting_value),
+            Style::default().fg(theme.color(crate::theme::Role::SettingValue)),
         ),
     ]);
     if palette_selected {
@@ -132,8 +132,14 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
     // never carries a selection marker and is never highlighted.
     let file_line = Line::from(vec![
         Span::raw("  "),
-        Span::styled("File: ", Style::default().fg(theme.colors.hint)),
-        Span::styled(file_label, Style::default().fg(theme.colors.hint)),
+        Span::styled(
+            "File: ",
+            Style::default().fg(theme.color(crate::theme::Role::Hint)),
+        ),
+        Span::styled(
+            file_label,
+            Style::default().fg(theme.color(crate::theme::Role::Hint)),
+        ),
     ]);
     let lines = vec![
         Line::from(""),
@@ -144,12 +150,12 @@ pub(in crate::tui) fn draw_settings(f: &mut ratatui::Frame, area: Rect, state: &
         Line::from(""),
         Line::from(Span::styled(
             "j/k select  h/l change  o or Esc close",
-            Style::default().fg(theme.colors.hint),
+            Style::default().fg(theme.color(crate::theme::Role::Hint)),
         )),
     ];
     f.render_widget(Clear, popup);
     f.render_widget(
-        Block::default().style(Style::default().bg(theme.colors.popup_bg)),
+        Block::default().style(Style::default().bg(theme.color(crate::theme::Role::PopupBg))),
         popup,
     );
     f.render_widget(block, popup);
@@ -163,7 +169,7 @@ mod tests {
 
     #[test]
     fn o_key_opens_and_closes_the_settings_overlay() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         assert!(!state.settings_open);
 
         assert_eq!(
@@ -190,7 +196,7 @@ mod tests {
     fn o_key_does_not_open_settings_over_modal_overlays() {
         let available_interfaces = interfaces();
 
-        let mut state = AppState::startup(&available_interfaces);
+        let mut state = AppState::startup_for_test(&available_interfaces);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('o')),
             KeyOutcome::Ignored
@@ -204,7 +210,7 @@ mod tests {
         );
         assert!(!state.settings_open);
 
-        let mut state = AppState::startup(&available_interfaces);
+        let mut state = AppState::startup_for_test(&available_interfaces);
         assert_eq!(
             send_key(&mut state, KeyCode::Char('i')),
             KeyOutcome::Changed
@@ -223,7 +229,7 @@ mod tests {
         );
         assert!(!state.settings_open);
 
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         assert_eq!(
             send_key(&mut state, KeyCode::Char('q')),
             KeyOutcome::Changed
@@ -239,7 +245,7 @@ mod tests {
     #[test]
     fn o_key_on_undersized_terminal_does_not_leave_settings_open() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(59, 15)).unwrap();
 
         assert_eq!(
@@ -261,7 +267,7 @@ mod tests {
     #[test]
     fn settings_overlay_renders_rows_and_hint() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
@@ -283,7 +289,7 @@ mod tests {
         // file hint is a muted, non-selectable sub-line and must not carry a
         // selection marker.
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -326,7 +332,7 @@ mod tests {
 
     #[test]
     fn settings_jk_moves_selection_and_clamps() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
         assert_eq!(state.settings_selection, 0);
@@ -356,7 +362,7 @@ mod tests {
 
     #[test]
     fn settings_hl_changes_the_selected_item_only() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
 
         // Rank window row selected by default: h/l cycle the rank window.
@@ -375,10 +381,7 @@ mod tests {
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
-        assert_eq!(
-            state.theme.selection,
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Dark)
-        );
+        assert_eq!(state.theme.selection_label(), "FlowLens Dark");
 
         // Select Diagnostics: h/l toggle only the draft; the actual state
         // (writer + shared flag) is committed when the overlay closes.
@@ -405,64 +408,49 @@ mod tests {
 
     #[test]
     fn theme_row_cycles_forward_and_backward_with_an_optional_file_theme() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         send_key(&mut state, KeyCode::Char('j'));
+        let last_builtin = state
+            .theme
+            .builtin_labels_for_test()
+            .pop()
+            .expect("catalog has a built-in theme");
 
-        for expected in [
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Dark),
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Ansi16),
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Mono),
-            crate::palette::ThemeSelection::Auto,
-        ] {
+        for expected in state.theme.clone().cycle_labels_for_test() {
             send_key(&mut state, KeyCode::Char('l'));
-            assert_eq!(state.theme.selection, expected);
+            assert_eq!(state.theme.selection_label(), expected);
         }
         send_key(&mut state, KeyCode::Char('h'));
-        assert_eq!(
-            state.theme.selection,
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Mono)
-        );
+        assert_eq!(state.theme.selection_label(), last_builtin);
 
-        let mut file_theme = crate::palette::Theme::builtin(crate::palette::BuiltinTheme::Dark);
-        file_theme.name = "Session file".to_string();
-        state.theme = crate::palette::ThemeState::for_test(
-            crate::palette::BuiltinTheme::Dark,
-            crate::palette::ThemeSelection::Auto,
-            Some(file_theme),
-        );
+        state.theme = crate::theme::ThemeSession::auto_for_test().with_external("Session file");
         send_key(&mut state, KeyCode::Char('h'));
-        assert_eq!(state.theme.selection, crate::palette::ThemeSelection::File);
+        assert_eq!(state.theme.selection_label(), "Session file");
         send_key(&mut state, KeyCode::Char('l'));
-        assert_eq!(state.theme.selection, crate::palette::ThemeSelection::Auto);
-        for expected in [
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Dark),
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Ansi16),
-            crate::palette::ThemeSelection::Builtin(crate::palette::BuiltinTheme::Mono),
-            crate::palette::ThemeSelection::File,
-            crate::palette::ThemeSelection::Auto,
-        ] {
+        assert_eq!(state.theme.selection_label(), "Auto (FlowLens Dark)");
+        for expected in state.theme.clone().cycle_labels_for_test() {
             send_key(&mut state, KeyCode::Char('l'));
-            assert_eq!(state.theme.selection, expected);
+            assert_eq!(state.theme.selection_label(), expected);
         }
     }
 
     #[test]
     fn settings_enter_is_ignored() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
 
         // Enter has no action in the settings overlay: it neither closes the
         // overlay nor commits the diagnostics draft.
         assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
         assert!(state.settings_open, "Enter must not close the overlay");
-        assert_eq!(state.theme.selection, crate::palette::ThemeSelection::Auto);
+        assert!(state.theme.selection_label().starts_with("Auto ("));
     }
 
     #[test]
     fn settings_overlay_renders_diagnostics_state_and_file() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
@@ -481,12 +469,18 @@ mod tests {
     #[test]
     fn settings_overlay_uses_distinct_setting_and_popup_roles() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
-        state.theme = crate::palette::ThemeState::dark_for_test();
-        state.theme.resolved.colors.setting_label = ratatui::style::Color::LightRed;
-        state.theme.resolved.colors.setting_value = ratatui::style::Color::LightGreen;
-        state.theme.resolved.colors.hint = ratatui::style::Color::LightBlue;
-        state.theme.resolved.colors.popup_bg = ratatui::style::Color::DarkGray;
+        let mut state = AppState::for_test();
+        state.theme = crate::theme::ThemeSession::dark_for_test()
+            .with_role(
+                crate::theme::Role::SettingLabel,
+                ratatui::style::Color::LightRed,
+            )
+            .with_role(
+                crate::theme::Role::SettingValue,
+                ratatui::style::Color::LightGreen,
+            )
+            .with_role(crate::theme::Role::Hint, ratatui::style::Color::LightBlue)
+            .with_role(crate::theme::Role::PopupBg, ratatui::style::Color::DarkGray);
         state.settings_open = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -495,9 +489,15 @@ mod tests {
 
         let cells = &terminal.backend().buffer().content;
         for expected in [
-            state.theme.resolved.colors.setting_label,
-            state.theme.resolved.colors.setting_value,
-            state.theme.resolved.colors.hint,
+            state
+                .theme
+                .current()
+                .color(crate::theme::Role::SettingLabel),
+            state
+                .theme
+                .current()
+                .color(crate::theme::Role::SettingValue),
+            state.theme.current().color(crate::theme::Role::Hint),
         ] {
             assert!(
                 cells.iter().any(|cell| cell.fg == expected),
@@ -507,7 +507,7 @@ mod tests {
         assert!(
             cells
                 .iter()
-                .any(|cell| cell.bg == state.theme.resolved.colors.popup_bg),
+                .any(|cell| cell.bg == state.theme.current().color(crate::theme::Role::PopupBg)),
             "configured popup background was not rendered"
         );
     }
@@ -524,7 +524,7 @@ mod tests {
         };
 
         // Actual OFF + draft ON: pending path marked (pending).
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         state.diagnostics_draft = true;
         state.diagnostics_pending_path = Some(PathBuf::from("flowlens-pending-1.log"));
@@ -533,7 +533,7 @@ mod tests {
         assert!(rendered.contains("flowlens-pending-1.log (pending)"));
 
         // Actual ON + draft OFF: live file marked as stopping on close.
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         state.diagnostics_enabled = true;
         state.diagnostics_draft = false;
@@ -543,7 +543,7 @@ mod tests {
         assert!(rendered.contains("flowlens-42.log (stops on close)"));
 
         // Actual OFF + draft OFF: no file.
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         let rendered = render(&mut state);
         assert!(rendered.contains("File: (none)"));
@@ -556,7 +556,7 @@ mod tests {
         // regenerated.
         let enabled = Arc::new(AtomicBool::new(false));
         let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
 
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
@@ -601,7 +601,7 @@ mod tests {
         // Layout rows (inside the bordered popup, after an initial blank line):
         // y+2 = Rank window, y+3 = Palette, y+4 = Diagnostics.
         let render_style = |x: u16, y: u16, selection: usize| {
-            let mut state = AppState::new();
+            let mut state = AppState::for_test();
             state.settings_open = true;
             state.settings_selection = selection;
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -632,7 +632,7 @@ mod tests {
     fn settings_marker_prefix_is_color_independent() {
         // The `> ` prefix is deliberately independent of the palette: 16-color
         // and monochrome tiers may not render the highlight style (covered by
-        // palette::tests::selection_style_reverses_below_truecolor), so the
+        // selection style reverses below truecolor, so the
         // selection must stay identifiable from the marker alone.
         assert_eq!(settings_selection_prefix(true), "> ");
         assert_eq!(settings_selection_prefix(false), "  ");
@@ -642,7 +642,7 @@ mod tests {
     fn settings_marker_and_padding_keep_rows_aligned() {
         let snapshot = TrafficSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.settings_open = true;
         state.settings_selection = 0;
         terminal
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn settings_overlay_clears_underlying_cells() {
-        let state = AppState::new();
+        let state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let area = Rect {
             x: 0,
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn settings_overlay_is_not_rendered_when_closed() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
         terminal

@@ -4,9 +4,9 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Cell, Row, Table};
 
-use crate::palette::Theme;
 use crate::report::truncate;
 use crate::stats::{RankWindow, TrafficSnapshot};
+use crate::theme::{Role, Theme};
 
 use super::detail::relative_last_seen;
 use super::processes::{preview_position, selected_position};
@@ -29,8 +29,8 @@ pub(in crate::tui) fn draw_domain_preview(
         "dom",
         "Top Domains",
         Some(snapshot.outbound_domains.len()),
-        theme.colors.brand,
-        theme.colors.border,
+        theme.color(Role::Brand),
+        theme.color(Role::Border),
         Some(footer),
         theme,
     );
@@ -58,8 +58,8 @@ pub(in crate::tui) fn draw_domains(
         "dom",
         "Domains",
         Some(snapshot.outbound_domains.len()),
-        theme.colors.brand,
-        theme.colors.border,
+        theme.color(Role::Brand),
+        theme.color(Role::Border),
         Some(footer),
         theme,
     );
@@ -86,7 +86,7 @@ pub(in crate::tui) fn domain_table(
 ) -> Table<'static> {
     let compact = mode == LayoutMode::Compact;
     let rows = domain_rows(snapshot, compact, now, theme);
-    let header_style = Style::default().fg(theme.colors.header);
+    let header_style = Style::default().fg(theme.color(Role::Header));
     let table = if compact {
         Table::new(
             rows,
@@ -136,7 +136,7 @@ pub(in crate::tui) fn domain_rows(
                 Cell::from(""),
             ]
         };
-        return vec![Row::new(cells).style(Style::default().fg(theme.colors.placeholder))];
+        return vec![Row::new(cells).style(Style::default().fg(theme.color(Role::Placeholder)))];
     }
 
     snapshot
@@ -145,7 +145,7 @@ pub(in crate::tui) fn domain_rows(
         .map(|domain| {
             let host = Cell::from(truncate(domain.host(), 40));
             let last_seen = Cell::from(relative_last_seen(domain.last_seen(), now))
-                .style(Style::default().fg(theme.colors.time));
+                .style(Style::default().fg(theme.color(Role::Time)));
             if compact {
                 Row::new(vec![
                     host,
@@ -153,21 +153,21 @@ pub(in crate::tui) fn domain_rows(
                         snapshot,
                         domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
                     ))
-                    .style(Style::default().fg(theme.colors.total)),
+                    .style(Style::default().fg(theme.color(Role::Total))),
                     last_seen,
                 ])
             } else {
                 Row::new(vec![
                     host,
                     Cell::from(format_rank_value(snapshot, domain.rank_in_bytes))
-                        .style(Style::default().fg(theme.colors.inbound)),
+                        .style(Style::default().fg(theme.color(Role::Inbound))),
                     Cell::from(format_rank_value(snapshot, domain.rank_out_bytes))
-                        .style(Style::default().fg(theme.colors.outbound)),
+                        .style(Style::default().fg(theme.color(Role::Outbound))),
                     Cell::from(format_rank_value(
                         snapshot,
                         domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
                     ))
-                    .style(Style::default().fg(theme.colors.total)),
+                    .style(Style::default().fg(theme.color(Role::Total))),
                     last_seen,
                 ])
             }
@@ -192,7 +192,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal
             .draw(|frame| {
@@ -260,7 +260,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Domains;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn domains_page_renders_empty_state_when_no_domains() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Domains;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
@@ -337,7 +337,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Domains;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
@@ -380,7 +380,7 @@ mod tests {
                 .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Domains;
 
         assert!(matches!(

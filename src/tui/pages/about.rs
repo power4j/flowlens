@@ -5,7 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::palette::Theme;
+use crate::theme::{Role, Theme};
 
 pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let version = env!("CARGO_PKG_VERSION");
@@ -30,7 +30,7 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &The
         .split(horizontal)[1];
     let frame = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(theme.colors.border));
+        .border_style(Style::default().fg(theme.color(Role::Border)));
     let content_area = frame.inner(frame_area);
     f.render_widget(frame, frame_area);
 
@@ -38,23 +38,23 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &The
         Line::from(Span::styled(
             "flowlens",
             Style::default()
-                .fg(theme.colors.brand)
+                .fg(theme.color(Role::Brand))
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Network Traffic Analyzer",
-            Style::default().fg(theme.colors.title),
+            Style::default().fg(theme.color(Role::Title)),
         )),
         Line::from(""),
         Line::from(Span::styled(
             format!("Version {version} ({commit})"),
-            Style::default().fg(theme.colors.secondary),
+            Style::default().fg(theme.color(Role::Secondary)),
         )),
         Line::from(""),
         Line::from(Span::styled(
             repository,
-            Style::default().fg(theme.colors.secondary),
+            Style::default().fg(theme.color(Role::Secondary)),
         )),
     ];
     let para = Paragraph::new(lines).alignment(Alignment::Center);
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn about_page_frames_identity_and_hides_capture_context() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::About;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
 
