@@ -249,6 +249,64 @@ fn ranking_summary_line(
     ])
 }
 
+fn aligned_ranking_summary_lines(
+    window: &str,
+    selected: crate::stats::ProcTraffic,
+    rank: crate::stats::ProcTraffic,
+    snapshot: &TrafficSnapshot,
+    theme: &Theme,
+) -> [Line<'static>; 2] {
+    let labels = [format!("Selected ({window}):"), format!("Rank ({window}):")];
+    let values = [
+        [
+            format_rank_value(snapshot, selected.total()),
+            format_rank_value(snapshot, selected.recv),
+            format_rank_value(snapshot, selected.sent),
+        ],
+        [
+            format_rank_value(snapshot, rank.total()),
+            format_rank_value(snapshot, rank.recv),
+            format_rank_value(snapshot, rank.sent),
+        ],
+    ];
+    let label_width = labels
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let value_widths: [usize; 3] = std::array::from_fn(|column| {
+        values
+            .iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    });
+
+    std::array::from_fn(|row| {
+        let [total, recv, sent] = &values[row];
+        Line::from(vec![
+            Span::styled(
+                format!("{:<label_width$} ", labels[row]),
+                Style::default().fg(theme.colors.attribution),
+            ),
+            Span::styled(
+                format!("{total:<width$}", width = value_widths[0]),
+                Style::default().fg(theme.colors.total),
+            ),
+            Span::styled("  Recv ", Style::default().fg(theme.colors.secondary)),
+            Span::styled(
+                format!("{recv:<width$}", width = value_widths[1]),
+                Style::default().fg(theme.colors.inbound),
+            ),
+            Span::styled("  Sent ", Style::default().fg(theme.colors.secondary)),
+            Span::styled(
+                format!("{sent:<width$}", width = value_widths[2]),
+                Style::default().fg(theme.colors.outbound),
+            ),
+        ])
+    })
+}
+
 fn render_attribution_column(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -466,11 +524,11 @@ pub(in crate::tui) fn draw_process_detail(
 
         let left = vec![
             Line::from(vec![
-                Span::styled("Name: ", label),
+                Span::styled(format!("{:<6}", "Name:"), label),
                 process_name_span(&process, columns[0].width.saturating_sub(6) as usize),
             ]),
             Line::from(vec![
-                Span::styled("PID: ", label),
+                Span::styled(format!("{:<6}", "PID:"), label),
                 Span::styled(
                     process
                         .pid()
@@ -490,15 +548,15 @@ pub(in crate::tui) fn draw_process_detail(
         ];
         let right = vec![
             Line::from(vec![
-                Span::styled("Recv: ", label),
+                Span::styled(format!("{:<7}", "Recv:"), label),
                 Span::styled(human_bytes(process.recv), recv_fg),
             ]),
             Line::from(vec![
-                Span::styled("Sent: ", label),
+                Span::styled(format!("{:<7}", "Sent:"), label),
                 Span::styled(human_bytes(process.sent), sent_fg),
             ]),
             Line::from(vec![
-                Span::styled("Total: ", label),
+                Span::styled(format!("{:<7}", "Total:"), label),
                 Span::styled(human_bytes(process.total()), total_fg),
             ]),
         ];
@@ -641,27 +699,21 @@ pub(in crate::tui) fn draw_process_detail(
             rows[2],
         );
 
-        let mut summary_lines = vec![
-            ranking_summary_line(
-                "Selected",
-                &ranking_window_indicator(snapshot),
-                selected,
-                snapshot,
-                theme,
-            ),
-            ranking_summary_line(
-                "Rank",
-                &ranking_window_indicator(snapshot),
-                process.rank,
-                snapshot,
-                theme,
-            ),
+        let ranking_window = ranking_window_indicator(snapshot);
+        let mut summary_lines = Vec::from(aligned_ranking_summary_lines(
+            &ranking_window,
+            selected,
+            process.rank,
+            snapshot,
+            theme,
+        ));
+        summary_lines.extend([
             Line::from("Shared traffic is included in Total and may appear in multiple processes."),
             Line::from(Span::styled(
                 "Attr: E = exclusive only, M = mixed (includes shared)",
                 Style::default().fg(theme.colors.secondary),
             )),
-        ];
+        ]);
         if paused.is_some() {
             summary_lines.push(Line::from(Span::styled(
                 "Tracking paused",
@@ -2427,9 +2479,9 @@ mod tests {
         let rendered = lines.join("\n");
         assert!(rendered.contains("Process Details"));
         assert!(rendered.contains("payment-worker"));
-        assert!(rendered.contains("PID: 7"));
-        assert!(rendered.contains("Recv: 1.50 KB"));
-        assert!(rendered.contains("Sent: 3.00 KB"));
+        assert!(rendered.contains("PID:  7"));
+        assert!(rendered.contains("Recv:  1.50 KB"));
+        assert!(rendered.contains("Sent:  3.00 KB"));
         assert!(rendered.contains("Total: 4.50 KB"));
         assert!(rendered.contains("Attribution (lifetime)"));
         assert!(rendered.contains("Exclusive:") && rendered.contains("3.00 KB"));
