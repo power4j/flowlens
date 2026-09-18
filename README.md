@@ -48,7 +48,7 @@ FlowLens includes four themes for true-color, ANSI 16-color, and monochrome term
   </tr>
 </table>
 
-## Platform availability
+## Supported platforms
 
 | Platform | Availability and runtime requirements |
 | --- | --- |
@@ -59,7 +59,7 @@ FlowLens includes four themes for true-color, ANSI 16-color, and monochrome term
 | macOS `x86_64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
 | macOS `aarch64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
 
-Windows `x86_64`/`aarch64` and Linux `x86_64`/`aarch64` are supported release platforms. Support means that the core functions and basic stability meet the minimum acceptance bar; it does not mean that every boundary condition has been exhaustively tested. The macOS archives are experimental target-platform builds and do not have the same support status.
+FlowLens supports Linux `x86_64`/`aarch64`, Windows `x86_64`/`aarch64`, and macOS `x86_64`/`aarch64`. Linux and Windows releases meet the minimum acceptance bar for core functionality and basic stability; this does not mean that every boundary condition has been exhaustively tested. macOS support is experimental and has not received the same level of runtime validation.
 
 ## Install
 
