@@ -11,6 +11,8 @@ This checklist records the manual checks around the GitHub Release workflow. The
 - [ ] The expected version is strictly greater than the current Cargo version.
 - [ ] Linux `x86_64` and `aarch64` manual smoke checks completed on supported hosts: start-up, interface discovery, capture, and representative output.
 - [ ] Windows `x86_64` and `aarch64` manual smoke checks completed on supported hosts: Npcap detection, interface discovery, capture, and representative output.
+- [ ] macOS `x86_64` and `aarch64` native CI builds and basic CLI checks are green.
+- [ ] The Release Notes identify macOS archives as unsigned, unnotarized, experimental, and not fully runtime-tested.
 - [ ] Any known platform limitation or incomplete boundary test is ready to state in the Release Notes.
 
 Real traffic and performance checks are manual. They are not required CI jobs and are not silently replaced by a passing unit-test job.
@@ -19,19 +21,23 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 
 - [ ] The Draft Release tag is the expected annotated `vX.Y.Z` tag.
 - [ ] The Release name is exactly `vX.Y.Z`.
-- [ ] Assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz`, `flowlens-vX.Y.Z-linux-aarch64.tar.gz`, `flowlens-vX.Y.Z-windows-x86_64.zip`, and `flowlens-vX.Y.Z-windows-aarch64.zip`.
+- [ ] Linux assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz` and `flowlens-vX.Y.Z-linux-aarch64.tar.gz`.
+- [ ] Windows assets are named `flowlens-vX.Y.Z-windows-x86_64.zip` and `flowlens-vX.Y.Z-windows-aarch64.zip`.
+- [ ] Experimental macOS assets are named `flowlens-vX.Y.Z-macos-x86_64.tar.gz` and `flowlens-vX.Y.Z-macos-aarch64.tar.gz`.
 - [ ] Each archive contains only its corresponding `flowlens` or `flowlens.exe` binary.
 - [ ] `SHA256SUMS` is present and covers all release archives.
 - [ ] The generated Release Notes have been reviewed and edited.
 - [ ] The `pre-release` option is selected when the release is not considered stable.
 - [ ] The Npcap Runtime prerequisite is stated for Windows releases.
 - [ ] The Linux glibc `2.28` and libpcap prerequisites are stated for Linux releases.
+- [ ] The macOS signing, notarization, minimum-version, capture-permission, and runtime-validation limits are stated.
 - [ ] The Draft Release is published manually after the text and assets are verified.
 
 ## After publishing
 
 - [ ] `flowlens --version` and `flowlens.exe --version` report `X.Y.Z`.
 - [ ] Optional: run `install.sh --version vX.Y.Z` in a temporary directory, then uninstall. This check does not block publishing.
+- [ ] Run the macOS Release smoke workflow for both `x86_64` and `aarch64`.
 - [ ] The GitHub Release, tag, Cargo metadata, and Release Notes use the same version.
 - [ ] The `[Unreleased]` entry in `CHANGELOG.md` is renamed to `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] A new empty `[Unreleased]` section is added to `CHANGELOG.md`.

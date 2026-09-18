@@ -306,6 +306,17 @@ test_unsupported_os_exits_3_before_network() {
   assert_eq "${status}" "3" "unsupported OS exits 3"
 }
 
+test_macos_exits_3_before_network() {
+  local arch out status
+  for arch in x86_64 arm64; do
+    out="${WORKDIR}/macos-${arch}.out"
+    install_fake_uname Darwin "${arch}"
+    status="$(run_installer "${out}" "${INSTALL_SH}" --version v0.3.0 --install-dir "${WORKDIR}/bin-install")"
+    assert_eq "${status}" "3" "macOS ${arch} exits 3"
+    assert_contains "$(cat "${out}")" "experimental" "macOS ${arch} explains experimental status"
+  done
+}
+
 test_http_404() {
   local out status
   out="${WORKDIR}/http-404.out"
@@ -544,6 +555,7 @@ main() {
     test_conflicting_dir_flags_exit_2
     test_uninstall_rejects_version
     test_unsupported_os_exits_3_before_network
+    test_macos_exits_3_before_network
   fi
   if [ "${slice}" = "all" ] || [ "${slice}" = "http" ]; then
     prepare_assets

@@ -41,20 +41,27 @@ jobs:
     runs-on: ${{ github.event.inputs.architecture == 'x86_64' && 'macos-15-intel' || 'macos-15' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - name: Expect missing macOS assets until published
+      - name: Download and verify macOS Release archive
         env:
-          HOME: ${{ runner.temp }}/flowlens-home
+          ARCH: ${{ github.event.inputs.architecture }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          mkdir -p "$HOME"
-          set +e
-          /bin/bash install.sh --version "${{ github.event.inputs.version }}" --install-dir "${{ runner.temp }}/flowlens-bin"
-          status=$?
-          set -e
-          if [ "$status" -eq 0 ]; then
-            "${{ runner.temp }}/flowlens-bin/flowlens" --help
-            /bin/bash install.sh --uninstall --install-dir "${{ runner.temp }}/flowlens-bin"
-          else
-            echo "installer failed as expected until macOS assets exist, status=$status"
-            [ "$status" -ne 0 ]
-          fi
+          set -euo pipefail
+          archive="flowlens-${VERSION}-macos-${ARCH}.tar.gz"
+          release_url="https://github.com/${REPOSITORY}/releases/download/${VERSION}"
+          curl --proto '=https' --tlsv1.2 -fsSLo "$archive" "${release_url}/${archive}"
+          curl --proto '=https' --tlsv1.2 -fsSLo SHA256SUMS "${release_url}/SHA256SUMS"
+
+          expected="$(awk -v name="$archive" '$2 == name { print $1 }' SHA256SUMS)"
+          test -n "$expected"
+          actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
+          test "$actual" = "$expected"
+          test "$(tar -tzf "$archive")" = "flowlens"
+
+          mkdir extracted
+          tar -xzf "$archive" -C extracted
+          file extracted/flowlens | grep -q "${ARCH/aarch64/arm64}"
+          otool -L extracted/flowlens | grep -q 'libpcap'
+          extracted/flowlens --help >/dev/null
+          test "$(extracted/flowlens --version)" = "flowlens ${VERSION#v}"

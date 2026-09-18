@@ -2,7 +2,7 @@
 
 English | [简体中文](README_CN.md)
 
-FlowLens is a command-line network traffic analyzer for resource-constrained Linux and Windows hosts. It shows interface traffic and provides best-effort process, IP, and outbound-domain attribution.
+FlowLens is a command-line network traffic analyzer for resource-constrained Linux and Windows hosts. It shows interface traffic and provides best-effort process, IP, and outbound-domain attribution. Experimental macOS builds are also available.
 
 ![FlowLens traffic overview](assets/screen/screen-main.jpg)
 
@@ -17,7 +17,7 @@ FlowLens is a command-line network traffic analyzer for resource-constrained Lin
 - **Outbound-domain visibility.** Identify domains from TLS ClientHello SNI and plaintext HTTP/1.x `Host` headers on locally initiated TCP connections.
 - **Interactive interface selection.** Switch capture interfaces in the TUI and inspect their IPv4 and IPv6 addresses.
 - **Multiple output modes.** Use the interactive TUI, plain-text snapshots, JSON Lines streams, formatted JSON files, or separate JSONL diagnostics.
-- **Cross-platform and themeable.** Run supported releases on Linux and Windows across `x86_64` and `aarch64`, with four built-in themes and custom JSON themes.
+- **Cross-platform and themeable.** Run supported releases on Linux and Windows, try experimental macOS builds on `x86_64` and `aarch64`, and choose from four built-in themes or custom JSON themes.
 
 ## Process details
 
@@ -50,14 +50,16 @@ FlowLens includes four themes for true-color, ANSI 16-color, and monochrome term
 
 ## Supported platforms
 
-| Platform | Runtime requirements |
+| Platform | Availability and runtime requirements |
 | --- | --- |
 | Linux `x86_64` | glibc `2.28` or newer, libpcap, and root or `CAP_NET_RAW` |
 | Linux `aarch64` | glibc `2.28` or newer, libpcap, and root or `CAP_NET_RAW` |
 | Windows `x86_64` | Windows with [Npcap Runtime](https://npcap.com/) installed |
 | Windows `aarch64` | Windows on ARM with [Npcap Runtime](https://npcap.com/) installed |
+| macOS `x86_64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
+| macOS `aarch64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
 
-Windows `x86_64`/`aarch64` and Linux `x86_64`/`aarch64` are supported release platforms. Support means that the core functions and basic stability meet the minimum acceptance bar; it does not mean that every boundary condition has been exhaustively tested.
+FlowLens supports Linux `x86_64`/`aarch64`, Windows `x86_64`/`aarch64`, and macOS `x86_64`/`aarch64`. Linux and Windows releases meet the minimum acceptance bar for core functionality and basic stability; this does not mean that every boundary condition has been exhaustively tested. macOS support is experimental and has not received the same level of runtime validation.
 
 ## Install
 
@@ -81,7 +83,7 @@ Pipe additional installer arguments with `bash -s --`:
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash -s -- --version v0.3.0
 ```
 
-The installer requires Bash 3.2+, `curl`, `tar`, and `sha256sum` or `shasum`. It does not install `libpcap`. macOS is recognized, but current Releases have no macOS archives, so the installer fails until those assets exist. Windows continues to use the zip archives below.
+The installer requires Bash 3.2+, `curl`, `tar`, and `sha256sum` or `shasum`. It does not install `libpcap`. The installer supports Linux only and rejects macOS. Windows and experimental macOS builds use the archives below.
 
 Download the archive for the target operating system and CPU architecture from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
 
@@ -111,6 +113,14 @@ sudo setcap cap_net_raw+ep ./flowlens
 Install [Npcap](https://npcap.com/) before starting FlowLens. The Windows archive contains only `flowlens.exe`; it does not include Npcap Runtime.
 
 FlowLens checks for `wpcap.dll` at startup and reports a missing Npcap Runtime before opening a capture device.
+
+### macOS (experimental)
+
+Download `flowlens-vX.Y.Z-macos-x86_64.tar.gz` for an Intel Mac or `flowlens-vX.Y.Z-macos-aarch64.tar.gz` for Apple Silicon from [GitHub Releases](https://github.com/power4j/flowlens/releases/latest), then extract the `flowlens` binary. These archives are not supported by `install.sh`.
+
+The macOS binary is unsigned and unnotarized, so macOS may block or warn about it. Review the downloaded archive and follow the security policy for the target Mac; FlowLens does not currently provide a signed build.
+
+Both architectures are built on native GitHub-hosted macOS runners and checked with `file`, `otool`, `flowlens --help`, and `flowlens --version`. A complete macOS runtime validation environment is not available, so real packet capture, permissions, interface behavior, process attribution, long-running stability, performance, and the minimum supported macOS version have not been fully tested.
 
 ## Usage
 
@@ -184,7 +194,7 @@ Outbound-domain statistics cover TCP TLS ClientHello SNI and plaintext HTTP/1.x 
 
 Loopback capture can show the same transfer as both inbound and outbound traffic. This reflects the operating system's capture semantics and does not mean that the public transfer happened twice.
 
-The process attribution and capture behavior may differ between Linux and Windows. The release notes document platform-specific prerequisites and known limitations for each version.
+The process attribution and capture behavior may differ between Linux, Windows, and macOS. macOS builds remain experimental under the validation limits described above. The release notes document platform-specific prerequisites and known limitations for each version.
 
 ## License
 
