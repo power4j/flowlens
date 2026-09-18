@@ -6,9 +6,16 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+- Configurable TUI themes with FlowLens Dark, Signal Deck, ANSI 16, and Mono built-ins; automatic terminal-capability selection; live switching in Settings; and custom JSON themes loaded by name or path with `--theme`.
+- Experimental, unsigned, and unnotarized macOS `x86_64` and `aarch64` Release archives, built and checked on native GitHub-hosted runners. Full runtime and packet-capture behavior remains unvalidated.
+
 ### Changed
 
+- Signal Deck is now the default theme for true-color, 256-color, and otherwise unclassified terminals. `NO_COLOR` and limited-color terminals still select Mono or ANSI 16.
+
 ### Fixed
+
+- Process details now align Name/PID, Recv/Sent/Total, and Selected/Rank summary values into consistent columns.
 
 ### Removed
 
