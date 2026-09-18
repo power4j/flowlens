@@ -4,7 +4,49 @@ English | [简体中文](README_CN.md)
 
 FlowLens is a command-line network traffic analyzer for resource-constrained Linux and Windows hosts. It shows interface traffic and provides best-effort process, IP, and outbound-domain attribution.
 
-![FlowLens overview](assets/screen/ui-overview.png)
+![FlowLens traffic overview](assets/screen/screen-main.jpg)
+
+*Traffic overview in the Signal Deck theme.*
+
+## Highlights
+
+- **At-a-glance traffic overview.** View interface totals, top processes, remote IPs, and outbound domains on one screen.
+- **Explainable process attribution.** Distinguish exclusive, shared, system, and unattributed traffic with a conservation summary.
+- **Process drill-down.** Inspect the PID, executable path, last-seen time, attribution breakdown, and ranked bidirectional TCP/UDP endpoint flows.
+- **Configurable ranking windows.** Switch between cumulative totals and 5-second, 10-second, 30-second, 60-second, or 5-minute average throughput, with warm-up coverage for finite windows.
+- **Outbound-domain visibility.** Identify domains from TLS ClientHello SNI and plaintext HTTP/1.x `Host` headers on locally initiated TCP connections.
+- **Interactive interface selection.** Switch capture interfaces in the TUI and inspect their IPv4 and IPv6 addresses.
+- **Multiple output modes.** Use the interactive TUI, plain-text snapshots, JSON Lines streams, formatted JSON files, or separate JSONL diagnostics.
+- **Cross-platform and themeable.** Run supported releases on Linux and Windows across `x86_64` and `aarch64`, with four built-in themes and custom JSON themes.
+
+## Process details
+
+Drill into a process to review its identity, attribution composition, traffic totals, and ranked endpoint flows.
+
+![FlowLens process details](assets/screen/screen-proc-detail.jpg)
+
+## Built-in themes
+
+FlowLens includes four themes for true-color, ANSI 16-color, and monochrome terminals. `Auto` selects a built-in theme from the detected terminal capabilities. See [TUI themes](docs/theme.md) for selection behavior and custom JSON themes.
+
+<table>
+  <tr>
+    <th width="50%">FlowLens Dark</th>
+    <th width="50%">Signal Deck</th>
+  </tr>
+  <tr>
+    <td><img src="assets/screen/theme-dark.jpg" alt="FlowLens Dark theme"></td>
+    <td><img src="assets/screen/theme-signal-deck.jpg" alt="Signal Deck theme"></td>
+  </tr>
+  <tr>
+    <th>ANSI 16</th>
+    <th>Mono</th>
+  </tr>
+  <tr>
+    <td><img src="assets/screen/theme-ansi16.jpg" alt="ANSI 16 theme"></td>
+    <td><img src="assets/screen/theme-mono.jpg" alt="Mono theme"></td>
+  </tr>
+</table>
 
 ## Supported platforms
 
@@ -133,14 +175,6 @@ Specify the diagnostics output file:
 In TUI mode, diagnostics are written to this file and never to the terminal.
 
 Use `flowlens --help` for the complete option list.
-
-## What it shows
-
-- Interface totals for inbound, outbound, and combined traffic.
-- Top processes with process name, PID, traffic totals, and best-effort executable identity.
-- Top remote IP addresses.
-- Outbound domains identified from TLS SNI or plaintext HTTP `Host` headers on locally initiated TCP connections.
-- TUI, plain-text, JSON, and JSON Lines output modes.
 
 ## Known limitations
 

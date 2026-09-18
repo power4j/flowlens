@@ -4,7 +4,49 @@
 
 FlowLens 是面向资源受限 Linux 和 Windows 主机的命令行网络流量分析工具，用于查看网卡流量，并以尽力而为的方式提供进程、IP 和出站域名归属信息。
 
-![FlowLens 概览](assets/screen/ui-overview.png)
+![FlowLens 流量总览](assets/screen/screen-main.jpg)
+
+*Signal Deck 主题下的流量总览。*
+
+## 功能亮点
+
+- **一屏总览。** 同时查看网卡流量总量、流量最高的进程、远端 IP 和出站域名。
+- **可解释的进程归属。** 区分独占、共享、系统和未归属流量，并提供流量守恒摘要。
+- **进程详情。** 查看 PID、可执行文件路径、最后活跃时间、归属构成，以及按流量排序的双向 TCP/UDP 端点流。
+- **可配置排行窗口。** 在累计总量与 5 秒、10 秒、30 秒、60 秒或 5 分钟平均吞吐量之间切换；有限窗口会显示预热覆盖率。
+- **出站域名识别。** 从本机发起的 TCP 连接中提取 TLS ClientHello SNI 和明文 HTTP/1.x `Host` 头。
+- **交互式网卡选择。** 在 TUI 中切换抓包网卡，并查看网卡的 IPv4 和 IPv6 地址。
+- **多种输出方式。** 支持交互式 TUI、纯文本快照、JSON Lines 流、格式化 JSON 文件和独立的 JSONL 诊断日志。
+- **跨平台与主题支持。** 支持 Linux 和 Windows 的 `x86_64`、`aarch64` 发布版本，并提供四种内建主题和自定义 JSON 主题。
+
+## 进程详情
+
+进入进程详情页，可以查看进程身份、归属构成、流量总量和按流量排序的端点流。
+
+![FlowLens 进程详情](assets/screen/screen-proc-detail.jpg)
+
+## 内建主题
+
+FlowLens 提供四种主题，适配真彩色、ANSI 16 色和单色终端。`Auto` 会根据检测到的终端能力选择内建主题。主题选择行为和自定义 JSON 主题见 [TUI 主题](docs/theme.md)。
+
+<table>
+  <tr>
+    <th width="50%">FlowLens Dark</th>
+    <th width="50%">Signal Deck</th>
+  </tr>
+  <tr>
+    <td><img src="assets/screen/theme-dark.jpg" alt="FlowLens Dark 主题"></td>
+    <td><img src="assets/screen/theme-signal-deck.jpg" alt="Signal Deck 主题"></td>
+  </tr>
+  <tr>
+    <th>ANSI 16</th>
+    <th>Mono</th>
+  </tr>
+  <tr>
+    <td><img src="assets/screen/theme-ansi16.jpg" alt="ANSI 16 主题"></td>
+    <td><img src="assets/screen/theme-mono.jpg" alt="Mono 主题"></td>
+  </tr>
+</table>
 
 ## 支持平台
 
@@ -84,7 +126,7 @@ FlowLens 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会
 ./flowlens eth0
 ```
 
-选择内置 TUI 主题、按名称加载用户主题，或加载指定 JSON 主题文件：
+选择内建 TUI 主题、按名称加载用户主题，或加载指定 JSON 主题文件：
 
 ```bash
 ./flowlens --theme ansi16
@@ -133,14 +175,6 @@ FlowLens 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会
 TUI 模式下诊断信息同样只写入该文件，不写入终端屏幕。
 
 完整参数列表请运行 `flowlens --help` 查看。
-
-## 可查看的信息
-
-- 入站、出站和合计流量。
-- 进程名称、PID、流量总量和尽力而为的可执行文件身份。
-- 远端 IP 地址排行。
-- 本机主动发起的 TCP 连接中，从 TLS SNI 或明文 HTTP `Host` 头识别出的出站域名。
-- TUI、plain 文本、JSON 和 JSON Lines 输出。
 
 ## 已知限制
 
