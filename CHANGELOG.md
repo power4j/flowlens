@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.7.0] - 2026-09-18
+
+### Added
+
 - Configurable TUI themes with FlowLens Dark, Signal Deck, ANSI 16, and Mono built-ins; automatic terminal-capability selection; live switching in Settings; and custom JSON themes loaded by name or path with `--theme`.
 - Experimental, unsigned, and unnotarized macOS `x86_64` and `aarch64` Release archives, built and checked on native GitHub-hosted runners. Full runtime and packet-capture behavior remains unvalidated.
 
