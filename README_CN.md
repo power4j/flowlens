@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-FlowLens 是面向资源受限 Linux 和 Windows 主机的命令行网络流量分析工具，用于查看网卡流量，并以尽力而为的方式提供进程、IP 和出站域名归属信息。
+FlowLens 是面向资源受限 Linux 和 Windows 主机的命令行网络流量分析工具，用于查看网卡流量，并以尽力而为的方式提供进程、IP 和出站域名归属信息。项目同时提供实验性 macOS 构建。
 
 ![FlowLens 流量总览](assets/screen/screen-main.jpg)
 
@@ -17,7 +17,7 @@ FlowLens 是面向资源受限 Linux 和 Windows 主机的命令行网络流量�
 - **出站域名识别。** 从本机发起的 TCP 连接中提取 TLS ClientHello SNI 和明文 HTTP/1.x `Host` 头。
 - **交互式网卡选择。** 在 TUI 中切换抓包网卡，并查看网卡的 IPv4 和 IPv6 地址。
 - **多种输出方式。** 支持交互式 TUI、纯文本快照、JSON Lines 流、格式化 JSON 文件和独立的 JSONL 诊断日志。
-- **跨平台与主题支持。** 支持 Linux 和 Windows 的 `x86_64`、`aarch64` 发布版本，并提供四种内建主题和自定义 JSON 主题。
+- **跨平台与主题支持。** 支持 Linux 和 Windows 发布版本，提供 `x86_64`、`aarch64` 实验性 macOS 构建，并内建四种主题和自定义 JSON 主题。
 
 ## 进程详情
 
@@ -48,16 +48,18 @@ FlowLens 提供四种主题，适配真彩色、ANSI 16 色和单色终端。`Au
   </tr>
 </table>
 
-## 支持平台
+## 平台可用性
 
-| 平台 | 运行前置条件 |
+| 平台 | 可用性与运行前置条件 |
 | --- | --- |
 | Linux `x86_64` | glibc `2.28` 或更新版本、libpcap，以及 root 权限或 `CAP_NET_RAW` |
 | Linux `aarch64` | glibc `2.28` 或更新版本、libpcap，以及 root 权限或 `CAP_NET_RAW` |
 | Windows `x86_64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows 系统 |
 | Windows `aarch64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows on ARM 系统 |
+| macOS `x86_64` | 实验性、未签名、未经公证的压缩包；尚未验证最低 macOS 版本和完整运行行为 |
+| macOS `aarch64` | 实验性、未签名、未经公证的压缩包；尚未验证最低 macOS 版本和完整运行行为 |
 
-Windows `x86_64`/`aarch64` 以及 Linux `x86_64`/`aarch64` 属于支持平台。「支持平台」表示核心功能和基本稳定性达到最低验收线，不表示所有边界情况都已完成穷尽测试。
+Windows `x86_64`/`aarch64` 以及 Linux `x86_64`/`aarch64` 属于支持平台。「支持平台」表示核心功能和基本稳定性达到最低验收线，不表示所有边界情况都已完成穷尽测试。macOS 压缩包属于实验性目标平台构建，不具有相同的支持状态。
 
 ## 安装
 
@@ -81,7 +83,7 @@ bash install.sh --version v0.3.0
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash -s -- --version v0.3.0
 ```
 
-安装器需要 Bash 3.2+、`curl`、`tar`，以及 `sha256sum` 或 `shasum`。它不会自动安装 `libpcap`。安装器可以识别 macOS，但当前 Release 没有 macOS 资产，因此会明确失败。Windows 仍使用下面的 zip 压缩包。
+安装器需要 Bash 3.2+、`curl`、`tar`，以及 `sha256sum` 或 `shasum`。它不会自动安装 `libpcap`。安装器仅支持 Linux，并会拒绝在 macOS 上安装。Windows 和实验性 macOS 构建使用下面的压缩包。
 
 从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应操作系统和 CPU 架构的压缩包，解压其中唯一的可执行文件即可。
 
@@ -111,6 +113,14 @@ sudo setcap cap_net_raw+ep ./flowlens
 启动 FlowLens 前请安装 [Npcap](https://npcap.com/)。Windows 压缩包只包含 `flowlens.exe`，不包含 Npcap Runtime。
 
 FlowLens 启动时会检查 `wpcap.dll`。如果缺少 Npcap Runtime，程序会在打开抓包设备前报告错误。
+
+### macOS（实验性）
+
+Intel Mac 从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载 `flowlens-vX.Y.Z-macos-x86_64.tar.gz`，Apple Silicon 下载 `flowlens-vX.Y.Z-macos-aarch64.tar.gz`，然后解压其中的 `flowlens`。`install.sh` 不支持这些实验性压缩包。
+
+macOS 二进制文件未签名且未经公证，因此 macOS 可能阻止运行或显示警告。运行前应审查下载的压缩包，并遵守目标 Mac 的安全策略。FlowLens 当前不提供已签名构建。
+
+两个架构均在 GitHub 托管的原生 macOS runner 上构建，并通过 `file`、`otool`、`flowlens --help` 和 `flowlens --version` 基础检查。由于缺少完整的 macOS 运行验证环境，真实抓包、权限、网卡行为、进程归属、长时间稳定性、性能和最低支持的 macOS 版本尚未完成充分测试。
 
 ## 使用
 
@@ -184,7 +194,7 @@ TUI 模式下诊断信息同样只写入该文件，不写入终端屏幕。
 
 loopback 抓包可能同时显示同一传输的入站和出站流量。这是操作系统的抓包语义，不表示公网传输实际发生了两次。
 
-Linux 和 Windows 的进程归属及抓包行为可能存在差异。每个版本的 Release Notes 会说明平台前置条件和已知限制。
+Linux、Windows 和 macOS 的进程归属及抓包行为可能存在差异。macOS 构建仍受上述验证范围限制，属于实验性版本。每个版本的 Release Notes 会说明平台前置条件和已知限制。
 
 ## 许可证
 

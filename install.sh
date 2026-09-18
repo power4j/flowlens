@@ -950,9 +950,7 @@ do_install() {
   if [ "${WANT_SETCAP}" -eq 1 ] && ! command -v setcap >/dev/null 2>&1; then
     die 2 "--setcap requires the setcap command"
   fi
-  if [ "${PLATFORM}" = "macos" ]; then
-    log "macOS is reserved; current Releases have no macOS assets"
-  fi
+  [ "${PLATFORM}" != "macos" ] || die 3 "macOS Release archives are experimental; download and inspect them manually"
   resolve_dirs
   prepare_privileges
   fetch_version

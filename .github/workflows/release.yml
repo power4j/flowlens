@@ -293,9 +293,86 @@ jobs:
           path: dist/flowlens-*.zip
           if-no-files-found: error
 
+  build-macos:
+    name: build-macos-${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            file_arch: arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            target_dir: aarch64-apple-darwin
+          - arch: x86_64
+            file_arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            target_dir: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-
+      - name: Inspect macOS build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcrun --show-sdk-path
+          pkg-config --modversion libpcap || true
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --version "$CARGO_EDIT_VERSION" --locked
+      - name: Apply release version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: cargo set-version "$RELEASE_VERSION"
+      - name: Build macOS distribution binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Verify macOS binary
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target_dir }}/release/flowlens"
+          test -x "$binary"
+          file "$binary" | grep -q '${{ matrix.file_arch }}'
+          otool -L "$binary" | grep -q 'libpcap'
+          "$binary" --help >/dev/null
+          test "$("$binary" --version)" = "flowlens ${RELEASE_VERSION}"
+      - name: Package macOS binary
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist
+          tar -C "target/${{ matrix.target_dir }}/release" \
+            -czf "dist/flowlens-v${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz" flowlens
+          test "$(tar -tzf "dist/flowlens-v${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz")" = "flowlens"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: dist/flowlens-*.tar.gz
+          if-no-files-found: error
+
   commit:
     name: commit-release-metadata
-    needs: [prepare, build-linux, build-windows]
+    needs: [prepare, build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:

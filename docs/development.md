@@ -9,6 +9,7 @@ This document covers source development and CI reproduction. User installation a
 - Version bumps: `cargo-edit` `0.13.13`.
 - Linux: libpcap development headers and libraries.
 - Windows: MSVC build tools and Npcap SDK `1.16`.
+- macOS: native `x86_64` or Apple Silicon host with the system libpcap.
 
 Npcap SDK is a Windows build dependency only. The SDK provides `wpcap.lib` and `Packet.lib`; Npcap Runtime remains an end-user prerequisite and is not bundled by FlowLens.
 
@@ -82,7 +83,7 @@ The CI checks run on Linux, Windows, and native macOS runners for pull requests 
 
 The macOS jobs use `macos-15-intel` for `x86_64` (`x86_64-apple-darwin`) and `macos-15` for `arm64` (`aarch64-apple-darwin`). They build and test on native runners rather than cross-compiling. The jobs use the system `libpcap`; Homebrew is not required by CI. The workflow prints the SDK, `libpcap`, and binary linkage information to make runner-specific dependency failures diagnosable.
 
-The macOS CI jobs do not run real network capture, long-running traffic tests, or performance benchmarks. The `Build Test` workflow now packages and uploads unsigned macOS trial artifacts separately from the validation jobs. Signing, notarization, installer integration, and Release publication remain separate follow-up work because they depend on host permissions, adapters, traffic generators, and system load.
+The macOS CI jobs do not run real network capture, long-running traffic tests, or performance benchmarks. The `Build Test` workflow packages and uploads unsigned macOS trial artifacts separately from the validation jobs. Signing, notarization, installer integration, minimum-version compatibility, and complete runtime validation remain separate follow-up work because they depend on credentials, host permissions, adapters, traffic generators, representative systems, and system load.
 
 ## On-demand test builds
 
@@ -100,12 +101,8 @@ Linux artifacts use the glibc `2.28` baseline for both `x86_64` and `aarch64`. W
 
 ## Release development
 
-The Release workflow currently publishes Linux and Windows artifacts only; macOS Release packaging is intentionally out of scope for the initial CI feasibility phase.
+The Release workflow uses `cargo-edit` for `major`, `minor`, and `patch` bumps. Before pushing the version commit and annotated tag, it builds and validates Linux, Windows, and macOS artifacts for `x86_64` and `aarch64`. A failed macOS build or binary check blocks the release transaction. The maintainer checklist is in [`release-checklist.md`](release-checklist.md).
 
-The Release workflow uses `cargo-edit` for `major`, `minor`, and `patch` bumps. It builds and validates Linux `x86_64`/`aarch64` and Windows `x86_64`/`aarch64` artifacts before pushing the version commit and annotated tag. The maintainer checklist is in [`release-checklist.md`](release-checklist.md).
+The macOS Release archives contain only the unsigned, unnotarized `flowlens` binary. The workflow verifies the Mach-O architecture, system libpcap linkage, CLI help, embedded version, and single-file archive shape. It does not set `MACOSX_DEPLOYMENT_TARGET`, claim a minimum supported macOS version, or run real packet capture. Publishing these archives makes experimental builds available for manual download; it does not make macOS a supported platform or enable macOS in `install.sh`.
 
-## macOS CI rollout
-
-The macOS jobs should initially be observed without adding them to branch protection as required checks. After 3–5 successful runs across pull requests and pushes to `main`, confirm that runner availability, system `libpcap`, native tests, and binary smoke tests are stable. Then add both `validate-macos-arm64` and `validate-macos-x86_64` to the repository branch protection rules as required checks.
-
-This rollout only establishes that GitHub can build and test the two native macOS targets. It does not claim runtime support, packet-capture permissions, a minimum supported macOS version, signed distribution, or installer compatibility.
+After a Release is published, the manually dispatched `release-smoke.yml` workflow downloads the selected macOS architecture, verifies it against `SHA256SUMS`, checks the archive and Mach-O metadata, and runs `flowlens --help` and `flowlens --version` on the matching native runner.
