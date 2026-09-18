@@ -7,12 +7,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::pages::detail::directional_flow_row_count;
 use super::pages::settings::{
-    DIAGNOSTICS_ROW, PALETTE_CHOICES, PALETTE_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS,
+    DIAGNOSTICS_ROW, RANK_WINDOW_ROW, SETTINGS_SELECTABLE_ROWS, THEME_ROW,
 };
 use super::selector::InterfaceIpPopup;
 use super::state::*;
 use crate::capture::InterfaceInfo;
-use crate::palette;
 use crate::session::Activation;
 use crate::stats::TrafficSnapshot;
 
@@ -155,17 +154,12 @@ where
                 KeyOutcome::Changed
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Right | KeyCode::Char('l') => {
-                if state.settings_selection == PALETTE_ROW {
-                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
-                    state.palette_choice = if forward {
-                        next_palette_choice(state.palette_choice)
+                if state.settings_selection == THEME_ROW {
+                    if matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
+                        state.theme.next();
                     } else {
-                        prev_palette_choice(state.palette_choice)
-                    };
-                    palette::set_active_tier(palette::resolve(
-                        state.palette_choice,
-                        state.detected_tier,
-                    ));
+                        state.theme.previous();
+                    }
                 } else if state.settings_selection == DIAGNOSTICS_ROW {
                     // Only the draft changes here; the writer and the shared
                     // enable flag are touched once, when the overlay closes
@@ -359,23 +353,6 @@ pub(super) fn next_page(p: Page) -> Page {
     Page::ALL[(idx + 1) % Page::ALL.len()]
 }
 
-pub(super) fn next_palette_choice(choice: palette::PaletteChoice) -> palette::PaletteChoice {
-    let idx = PALETTE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0);
-    PALETTE_CHOICES[(idx + 1) % PALETTE_CHOICES.len()]
-}
-
-pub(super) fn prev_palette_choice(choice: palette::PaletteChoice) -> palette::PaletteChoice {
-    let idx = PALETTE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0);
-    let len = PALETTE_CHOICES.len();
-    PALETTE_CHOICES[(idx + len - 1) % len]
-}
-
 pub(super) fn scroll(state: &mut AppState, delta: isize) {
     if let Some(detail) = state.process_detail.as_ref() {
         let max_index = directional_flow_row_count(&detail.process).saturating_sub(1) as isize;
@@ -456,7 +433,7 @@ mod tests {
 
     #[test]
     fn page_key_four_opens_domains_and_five_opens_about() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let snapshot = TrafficSnapshot::default();
 
         let outcome = handle_key(
@@ -478,7 +455,7 @@ mod tests {
 
     #[test]
     fn page_key_reports_changed() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let snapshot = TrafficSnapshot::default();
 
         let outcome = handle_key(
@@ -496,7 +473,7 @@ mod tests {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let draw_calls = calls.clone();
         let latest_calls = calls.clone();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut snapshot = Arc::new(TrafficSnapshot::default());
 
         let quit = process_iteration(
@@ -521,7 +498,7 @@ mod tests {
     #[test]
     fn interface_switch_keeps_diagnostics_enabled_and_file() {
         let interfaces = interfaces();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
         state.diagnostics_file = Some("flowlens-42.log".to_string());
@@ -563,7 +540,7 @@ mod tests {
 
     #[test]
     fn overlay_swallows_page_keys_but_q_still_quits() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
 
@@ -587,7 +564,7 @@ mod tests {
 
     #[test]
     fn quit_requires_confirmation_and_can_be_cancelled() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         assert_eq!(
             send_key(&mut state, KeyCode::Char('q')),
             KeyOutcome::Changed
@@ -614,7 +591,7 @@ mod tests {
 
     #[test]
     fn quit_confirm_overlay_renders_prompt() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.quit_confirm = true;
         let snapshot = TrafficSnapshot::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

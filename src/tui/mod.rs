@@ -17,10 +17,10 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use crate::diagnostics::DiagnosticsWriter;
-use crate::palette;
 use crate::report::hostname;
 use crate::session::TrafficSession;
 use crate::stats::{RankWindow, TrafficSnapshot};
+use crate::theme::ThemeSession;
 
 #[cfg(test)]
 use crate::session::Activation;
@@ -49,8 +49,8 @@ pub fn run(
     diagnostics_writer: Option<DiagnosticsWriter>,
     diagnostics_enabled: Arc<AtomicBool>,
     rank_window: Arc<AtomicU8>,
+    theme: ThemeSession,
 ) -> io::Result<()> {
-    palette::set_active_tier(palette::detect_tier());
     let started_at = Instant::now();
     let host = hostname();
     let mut snapshot = session
@@ -65,9 +65,9 @@ pub fn run(
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = if session.active_interface().is_some() {
-        AppState::new()
+        AppState::new(theme)
     } else {
-        AppState::startup(session.interfaces())
+        AppState::startup(session.interfaces(), theme)
     };
     state.rank_window = RankWindow::from_u8(rank_window.load(Ordering::Acquire));
     state.rank_window_draft = state.rank_window;
@@ -274,12 +274,14 @@ fn rendered_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn render_processes_with_pending(bytes: u64) -> Terminal<TestBackend> {
     let snapshot = TrafficSnapshot {
         pending_attribution_bytes: bytes,
         ..TrafficSnapshot::default()
     };
-    let mut state = AppState::new();
+    let mut state = AppState::for_test();
+    state.theme = crate::theme::ThemeSession::dark_for_test();
     state.page = Page::Processes;
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal
@@ -289,6 +291,7 @@ fn render_processes_with_pending(bytes: u64) -> Terminal<TestBackend> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn assert_pending_indicator_color(terminal: &Terminal<TestBackend>, expected: Color) {
     let indicator = terminal
         .backend()
@@ -315,6 +318,7 @@ fn send_key(state: &mut AppState, key: KeyCode) -> KeyOutcome {
 #[cfg(test)]
 /// Unique path for a real diagnostics writer under the temp dir, so the
 /// deferred-commit tests never touch the working directory.
+#[allow(dead_code)]
 fn diagnostics_temp_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "flowlens-tui-{label}-{}-{}.log",

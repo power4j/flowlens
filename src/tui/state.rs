@@ -10,8 +10,8 @@ use ratatui::layout::Rect;
 use super::selector::InterfaceSelector;
 use crate::capture::InterfaceInfo;
 use crate::diagnostics::DiagnosticsWriter;
-use crate::palette;
 use crate::stats::{ProcessSnapshot, RankWindow, TrafficSnapshot};
+use crate::theme::ThemeSession;
 
 /// Which page is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,10 +116,8 @@ pub(super) struct AppState {
     pub(super) interface_selector: Option<InterfaceSelector>,
     /// Whether the settings overlay is open.
     pub(super) settings_open: bool,
-    /// User-facing palette selection, adjusted in the settings overlay.
-    pub(super) palette_choice: palette::PaletteChoice,
-    /// Terminal color tier detected at startup; `Auto` follows this.
-    pub(super) detected_tier: palette::ColorTier,
+    /// The only session-owned theme state. Rendering never consults globals.
+    pub(super) theme: ThemeSession,
     pub(super) diagnostics_error: Option<String>,
     /// Actual diagnostics state: true while a writer is open. Kept in sync
     /// with `DiagnosticsRuntime::writer` and the shared enable flag.
@@ -134,7 +132,7 @@ pub(super) struct AppState {
     /// actual state is OFF. Never turned into a real file except by a final
     /// ON commit; discarded when the final state is OFF.
     pub(super) diagnostics_pending_path: Option<PathBuf>,
-    /// Selected settings row (0 = Palette, 1 = Diagnostics, 2 = Rank window).
+    /// Selected settings row (0 = Rank window, 1 = Theme, 2 = Diagnostics).
     pub(super) settings_selection: usize,
     /// Actual ranking window used by the pipeline.
     pub(super) rank_window: RankWindow,
@@ -145,7 +143,7 @@ pub(super) struct AppState {
 }
 
 impl AppState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(theme: ThemeSession) -> Self {
         Self {
             page: Page::Overview,
             proc_scroll: 0,
@@ -162,8 +160,7 @@ impl AppState {
             domain_view_height: 1,
             interface_selector: None,
             settings_open: false,
-            palette_choice: palette::PaletteChoice::Auto,
-            detected_tier: palette::detect_tier(),
+            theme,
             diagnostics_error: None,
             diagnostics_enabled: false,
             diagnostics_draft: false,
@@ -176,8 +173,8 @@ impl AppState {
         }
     }
 
-    pub(super) fn startup(interfaces: &[InterfaceInfo]) -> Self {
-        let mut state = Self::new();
+    pub(super) fn startup(interfaces: &[InterfaceInfo], theme: ThemeSession) -> Self {
+        let mut state = Self::new(theme);
         state.open_interface_selector(interfaces, None, false);
         state
     }
@@ -213,11 +210,12 @@ impl AppState {
     /// actual diagnostics state, so an open writer, its file name and any
     /// pending error survive the reset instead of being silently disabled.
     pub(super) fn reset_after_interface_switch(&mut self) {
+        let theme = self.theme.clone();
         let diagnostics_enabled = self.diagnostics_enabled;
         let diagnostics_draft = self.diagnostics_draft;
         let diagnostics_file = self.diagnostics_file.clone();
         let diagnostics_error = self.diagnostics_error.clone();
-        *self = AppState::new();
+        *self = AppState::new(theme);
         self.diagnostics_enabled = diagnostics_enabled;
         self.diagnostics_draft = diagnostics_draft;
         self.diagnostics_file = diagnostics_file;
@@ -248,6 +246,17 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
+impl AppState {
+    pub(super) fn for_test() -> Self {
+        Self::new(ThemeSession::auto_for_test())
+    }
+
+    pub(super) fn startup_for_test(interfaces: &[InterfaceInfo]) -> Self {
+        Self::startup(interfaces, ThemeSession::auto_for_test())
+    }
+}
+
 /// Runtime side of the diagnostics toggle: the open writer plus the shared
 /// enable flag that gates pipeline-side collection.
 pub(super) struct DiagnosticsRuntime {
@@ -257,6 +266,7 @@ pub(super) struct DiagnosticsRuntime {
 }
 
 impl DiagnosticsRuntime {
+    #[cfg_attr(test, allow(dead_code))]
     #[cfg(test)]
     pub(super) fn new(writer: Option<DiagnosticsWriter>, enabled: Arc<AtomicBool>) -> Self {
         Self::new_with_rank(
@@ -391,7 +401,7 @@ mod tests {
             processes: vec![process].into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Processes;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
 
@@ -417,7 +427,7 @@ mod tests {
 
     #[test]
     fn diagnostics_pending_path_is_generated_once_per_overlay_open() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         assert!(state.settings_open);
         assert!(state.diagnostics_pending_path.is_some());
@@ -444,7 +454,7 @@ mod tests {
     fn diagnostics_final_on_commits_a_single_writer_at_the_pending_path() {
         let enabled = Arc::new(AtomicBool::new(false));
         let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let pending = diagnostics_temp_path("final-on");
         assert!(!pending.exists());
         state.diagnostics_pending_path = Some(pending.clone());
@@ -491,7 +501,7 @@ mod tests {
     fn diagnostics_final_off_creates_no_file_and_discards_the_pending_path() {
         let enabled = Arc::new(AtomicBool::new(false));
         let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let pending = diagnostics_temp_path("final-off");
         state.diagnostics_pending_path = Some(pending.clone());
         assert!(!pending.exists());
@@ -527,7 +537,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
 
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
         state.diagnostics_file = Some(file_name.clone());
@@ -570,7 +580,7 @@ mod tests {
         // writer, and the pending path is discarded.
         let enabled = Arc::new(AtomicBool::new(false));
         let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         let pending = state.diagnostics_pending_path.clone().unwrap();
         assert_eq!(send_key(&mut state, KeyCode::Esc), KeyOutcome::Changed);
@@ -588,7 +598,7 @@ mod tests {
     fn diagnostics_commit_failure_keeps_actual_state_and_reports_error() {
         let enabled = Arc::new(AtomicBool::new(false));
         let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         // Point the pending path at an existing file so create_new fails.
         let blocking = diagnostics_temp_path("block");
         std::fs::write(&blocking, "occupied").unwrap();
@@ -628,7 +638,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
 
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
         state.diagnostics_file = Some("flowlens-42.log".to_string());
@@ -677,7 +687,7 @@ mod tests {
         // toggle the draft ON manually and commit a fresh writer.
         let enabled = Arc::new(AtomicBool::new(false));
         let mut runtime = DiagnosticsRuntime::new(None, Arc::clone(&enabled));
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
         runtime.note_write_failure(&mut state, io::Error::other("disk full"));
@@ -724,7 +734,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         let mut runtime = DiagnosticsRuntime::new(Some(writer), Arc::clone(&enabled));
 
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.diagnostics_enabled = true;
         state.diagnostics_draft = true;
         state.diagnostics_file = Some(file_name.clone());
@@ -747,5 +757,48 @@ mod tests {
 
         runtime.writer = None;
         std::fs::remove_file(&pending).unwrap();
+    }
+
+    #[test]
+    fn interface_switch_preserves_every_theme_state_field() {
+        let mut state = AppState::for_test();
+        state.theme = ThemeSession::dark_for_test()
+            .with_role(crate::theme::Role::Title, ratatui::style::Color::LightRed)
+            .with_external("Session file")
+            .select_external_for_test();
+
+        state.reset_after_interface_switch();
+
+        assert_eq!(state.theme.selection_label(), "Session file");
+        assert_eq!(
+            state.theme.current().color(crate::theme::Role::Title),
+            ratatui::style::Color::LightRed
+        );
+        state.theme.next();
+        state.theme.previous();
+        assert_eq!(state.theme.selection_label(), "Session file");
+    }
+
+    #[test]
+    fn supplied_theme_session_survives_construction_interface_and_data_resets() {
+        let session = ThemeSession::dark_for_test()
+            .with_role(crate::theme::Role::Title, ratatui::style::Color::LightRed)
+            .with_external("Selected external")
+            .select_external_for_test();
+        let mut state = AppState::new(session);
+        assert_eq!(state.theme.selection_label(), "Selected external");
+        assert_eq!(
+            state.theme.current().color(crate::theme::Role::Title),
+            ratatui::style::Color::LightRed
+        );
+
+        state.reset_after_interface_switch();
+        // The normal data reset replaces only the traffic snapshot.
+        let _snapshot = Arc::new(TrafficSnapshot::default());
+        assert_eq!(state.theme.selection_label(), "Selected external");
+        assert_eq!(
+            state.theme.current().color(crate::theme::Role::Title),
+            ratatui::style::Color::LightRed
+        );
     }
 }

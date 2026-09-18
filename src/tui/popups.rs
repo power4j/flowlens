@@ -7,21 +7,21 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
 
 use crate::capture::InterfaceInfo;
 
-use crate::palette;
+use crate::theme::{Role, Theme};
 
 use super::layout::{centered_rect, ratatui_state};
 
-pub(super) fn draw_quit_confirm(f: &mut ratatui::Frame, area: Rect) {
+pub(super) fn draw_quit_confirm(f: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let popup = centered_rect(area, 50, 7);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::warn()))
+        .border_style(Style::default().fg(theme.color(Role::Border)))
         .title(Line::from(vec![
             Span::raw(" "),
             Span::styled(
                 "Confirm",
                 Style::default()
-                    .fg(palette::warn())
+                    .fg(theme.color(Role::Title))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -32,18 +32,18 @@ pub(super) fn draw_quit_confirm(f: &mut ratatui::Frame, area: Rect) {
         Line::from(Span::styled(
             "Quit FlowLens?",
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.color(Role::Title))
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "q/y/Enter quit   n/Esc cancel",
-            Style::default().fg(palette::muted()),
+            Style::default().fg(theme.color(Role::Hint)),
         )),
     ];
     f.render_widget(Clear, popup);
     f.render_widget(
-        Block::default().style(Style::default().bg(palette::bg())),
+        Block::default().style(Style::default().bg(theme.color(Role::PopupBg))),
         popup,
     );
     f.render_widget(block, popup);
@@ -55,18 +55,19 @@ pub(super) fn draw_interface_ip_popup(
     area: Rect,
     interface: &InterfaceInfo,
     selected: usize,
+    theme: &Theme,
 ) {
     let popup_height = area.height.saturating_sub(4).clamp(8, 18);
     let popup = centered_rect(area, 80, popup_height);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::border()))
+        .border_style(Style::default().fg(theme.color(Role::Border)))
         .title(Line::from(vec![
             Span::raw(" "),
             Span::styled(
                 "IP addresses",
                 Style::default()
-                    .fg(palette::accent())
+                    .fg(theme.color(Role::Title))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -83,7 +84,7 @@ pub(super) fn draw_interface_ip_popup(
         .split(inner);
     f.render_widget(Clear, popup);
     f.render_widget(
-        Block::default().style(Style::default().bg(palette::bg())),
+        Block::default().style(Style::default().bg(theme.color(Role::PopupBg))),
         popup,
     );
     f.render_widget(block, popup);
@@ -91,7 +92,7 @@ pub(super) fn draw_interface_ip_popup(
         Paragraph::new(Span::styled(
             interface.name.clone(),
             Style::default()
-                .fg(palette::strong())
+                .fg(theme.color(Role::Title))
                 .add_modifier(Modifier::BOLD),
         )),
         chunks[0],
@@ -100,7 +101,7 @@ pub(super) fn draw_interface_ip_popup(
         f.render_widget(
             Paragraph::new(Span::styled(
                 "No IP addresses",
-                Style::default().fg(palette::muted()),
+                Style::default().fg(theme.color(Role::Placeholder)),
             )),
             chunks[1],
         );
@@ -108,7 +109,10 @@ pub(super) fn draw_interface_ip_popup(
         let rows = interface.addresses.iter().map(|address| {
             let family = if address.is_ipv4() { "IPv4" } else { "IPv6" };
             Row::new([Cell::from(Line::from(vec![
-                Span::styled(family, Style::default().fg(palette::accent())),
+                Span::styled(
+                    family,
+                    Style::default().fg(theme.color(Role::AddressFamily)),
+                ),
                 Span::raw("  "),
                 Span::raw(address.to_string()),
             ]))])
@@ -116,7 +120,7 @@ pub(super) fn draw_interface_ip_popup(
         let table = Table::new(rows, [Constraint::Min(1)])
             .row_highlight_style(
                 Style::default()
-                    .patch(palette::selection_style())
+                    .patch(theme.selection_style())
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("> ");
@@ -128,7 +132,7 @@ pub(super) fn draw_interface_ip_popup(
     }
     f.render_widget(
         Paragraph::new("j/k or ↑/↓:select  PgUp/PgDn:page  Home/End:jump  Esc/i:close")
-            .style(Style::default().fg(palette::muted())),
+            .style(Style::default().fg(theme.color(Role::Hint))),
         chunks[2],
     );
 }

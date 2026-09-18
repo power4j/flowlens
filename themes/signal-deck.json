@@ -1,0 +1,20 @@
+{
+  "$schema": "./theme-v1.schema.json",
+  "version": 1,
+  "name": "Signal Deck",
+  "profile": "truecolor",
+  "colors": {
+    "ui.page_bg": "#07131F", "ui.panel_bg": "#0B1D2B", "ui.popup_bg": "#10283A",
+    "ui.text": "#D7E5F0", "ui.title": "#F4FAFF", "ui.header": "#A6C0D2",
+    "ui.label": "#9FB6C9", "ui.secondary": "#89A5B8", "ui.placeholder": "#7895A9",
+    "ui.border": "#2B5168", "ui.focus_border": "#49D7FF", "ui.active_tab_fg": "#F4FAFF",
+    "ui.inactive_tab_fg": "#91ADBF", "ui.active_tab_bg": "#123B55", "ui.selection_bg": "#123B55",
+    "ui.key": "#D7E5F0", "ui.setting_label": "#D7E5F0", "ui.hint": "#89A5B8",
+    "ui.setting_value": "#F4FAFF", "feedback.warning": "#FFB454", "feedback.error": "#FFB454",
+    "brand.foreground": "#C792EA", "data.inbound": "#FFB454", "data.outbound": "#43D9FF",
+    "data.local_endpoint": "#16C60C", "data.remote_endpoint": "#C8D9E7", "data.identity": "#D7E5F0",
+    "data.protocol": "#D7E5F0", "data.address_family": "#D7E5F0", "data.attribution": "#D7E5F0",
+    "data.total": "#FFF2C2", "data.time": "#91ADBF", "chart.track": "#173246",
+    "chart.combined": "#72B6E3"
+  }
+}

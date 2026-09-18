@@ -8,9 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 
 use crate::capture::InterfaceInfo;
-use crate::palette;
 use crate::session::Activation;
 use crate::stats::TrafficSnapshot;
+use crate::theme::{Role, Theme};
 
 use super::layout::ratatui_state;
 use super::popups::draw_interface_ip_popup;
@@ -74,6 +74,7 @@ pub(super) fn draw_interface_selector(
     selector: &InterfaceSelector,
     interfaces: &[InterfaceInfo],
     active: Option<&str>,
+    theme: &Theme,
 ) {
     let content = area.inner(Margin {
         horizontal: 1,
@@ -92,13 +93,13 @@ pub(super) fn draw_interface_selector(
             Span::styled(
                 " flowlens ",
                 Style::default()
-                    .fg(palette::accent())
+                    .fg(theme.color(Role::Brand))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Select an interface",
                 Style::default()
-                    .fg(palette::strong())
+                    .fg(theme.color(Role::Title))
                     .add_modifier(Modifier::BOLD),
             ),
         ])),
@@ -109,7 +110,7 @@ pub(super) fn draw_interface_selector(
     let rows = if interfaces.is_empty() {
         vec![
             Row::new(vec![Cell::from(""), Cell::from("No interfaces available")])
-                .style(Style::default().fg(palette::muted())),
+                .style(Style::default().fg(theme.color(Role::Placeholder))),
         ]
     } else {
         interfaces
@@ -149,7 +150,7 @@ pub(super) fn draw_interface_selector(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette::border()));
+        .border_style(Style::default().fg(theme.color(Role::Border)));
     let table = if compact {
         Table::new(rows, [Constraint::Length(3), Constraint::Min(1)])
     } else {
@@ -167,8 +168,8 @@ pub(super) fn draw_interface_selector(
     .block(block)
     .row_highlight_style(
         Style::default()
-            .fg(palette::strong())
-            .patch(palette::selection_style())
+            .fg(theme.color(Role::Title))
+            .patch(theme.selection_style())
             .add_modifier(Modifier::BOLD),
     )
     .highlight_symbol("> ");
@@ -194,9 +195,9 @@ pub(super) fn draw_interface_selector(
     f.render_widget(
         Paragraph::new(hint)
             .style(Style::default().fg(if selector.error.is_some() {
-                palette::coral()
+                theme.color(Role::Error)
             } else {
-                palette::muted()
+                theme.color(Role::Secondary)
             }))
             .wrap(Wrap { trim: true }),
         chunks[2],
@@ -205,7 +206,7 @@ pub(super) fn draw_interface_selector(
     if let Some(popup) = selector.ip_popup.as_ref()
         && let Some(interface) = interfaces.get(popup.interface_index)
     {
-        draw_interface_ip_popup(f, area, interface, popup.scroll);
+        draw_interface_ip_popup(f, area, interface, popup.scroll, theme);
     }
 }
 
@@ -218,7 +219,7 @@ mod tests {
     fn startup_selector_renders_structured_interfaces_and_cannot_cancel() {
         let interfaces = interfaces();
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
         terminal
@@ -287,7 +288,7 @@ mod tests {
             addresses: Vec::new(),
             is_default_route: false,
         });
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut snapshot = Arc::new(TrafficSnapshot::default());
 
         assert_eq!(
@@ -364,7 +365,7 @@ mod tests {
             is_default_route: true,
         }];
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
 
         terminal
@@ -404,7 +405,7 @@ mod tests {
     #[test]
     fn active_interface_selector_cancels_and_successful_switch_resets_view() {
         let interfaces = interfaces();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::About;
         let mut snapshot = Arc::new(TrafficSnapshot {
             in_bytes: 99,
@@ -469,7 +470,7 @@ mod tests {
     #[test]
     fn selector_error_keeps_current_view_and_traffic() {
         let interfaces = interfaces();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::About;
         let mut snapshot = Arc::new(TrafficSnapshot {
             in_bytes: 99,
@@ -531,7 +532,7 @@ mod tests {
     #[test]
     fn pending_interface_activation_keeps_the_tui_responsive_until_completion() {
         let interfaces = interfaces();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::About;
         let mut snapshot = Arc::new(TrafficSnapshot {
             in_bytes: 99,
@@ -610,7 +611,7 @@ mod tests {
     fn interface_selector_is_usable_at_compact_minimum_size() {
         let interfaces = interfaces();
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
 
         terminal
@@ -644,7 +645,7 @@ mod tests {
             is_default_route: false,
         }];
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
         terminal
@@ -689,7 +690,7 @@ mod tests {
             is_default_route: false,
         }];
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
 
         terminal
@@ -725,7 +726,7 @@ mod tests {
                 .collect(),
             is_default_route: true,
         }];
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut snapshot = Arc::new(TrafficSnapshot::default());
 
         assert_eq!(
@@ -857,7 +858,7 @@ mod tests {
             addresses: Vec::new(),
             is_default_route: false,
         }];
-        let mut state = AppState::startup(&interfaces);
+        let mut state = AppState::startup_for_test(&interfaces);
         let mut snapshot = Arc::new(TrafficSnapshot::default());
 
         handle_tui_key(

@@ -4,8 +4,8 @@ use ratatui::layout::{Constraint, Direction as LayoutDir, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Cell, Row, Table};
 
-use crate::palette;
 use crate::stats::{IpSnapshot, TrafficSnapshot};
+use crate::theme::{Role, Theme};
 
 use super::detail::relative_last_seen;
 use super::processes::{preview_position, selected_position};
@@ -18,30 +18,35 @@ pub(in crate::tui) fn draw_ip_preview(
     snapshot: &TrafficSnapshot,
     inbound: bool,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) {
     let entries = if inbound {
         snapshot.inbound_ips.as_ref()
     } else {
         snapshot.outbound_ips.as_ref()
     };
-    let (prefix, title, color) = ip_theme(inbound);
+    let (prefix, title, color) = ip_theme(inbound, theme);
     let block = panel_block(
         prefix,
         title,
         Some(entries.len()),
         color,
-        palette::border(),
+        theme.color(Role::Border),
         Some(preview_position(entries.len(), area.height)),
+        theme,
     );
-    let table = ip_table(entries, color, block, snapshot, now);
+    let table = ip_table(entries, color, block, snapshot, now, theme);
     f.render_widget(table, area);
 }
 
-pub(in crate::tui) fn ip_theme(inbound: bool) -> (&'static str, &'static str, Color) {
+pub(in crate::tui) fn ip_theme(
+    inbound: bool,
+    theme: &Theme,
+) -> (&'static str, &'static str, Color) {
     if inbound {
-        ("in", "Inbound IPs", palette::inbound())
+        ("in", "Inbound IPs", theme.color(Role::Inbound))
     } else {
-        ("out", "Outbound IPs", palette::outbound())
+        ("out", "Outbound IPs", theme.color(Role::Outbound))
     }
 }
 
@@ -51,11 +56,12 @@ pub(in crate::tui) fn ip_table(
     block: Block<'static>,
     snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) -> Table<'static> {
     let rows = if entries.is_empty() {
         vec![
             Row::new(vec!["No traffic observed", "", ""])
-                .style(Style::default().fg(palette::muted())),
+                .style(Style::default().fg(theme.color(Role::Placeholder))),
         ]
     } else {
         entries
@@ -80,7 +86,7 @@ pub(in crate::tui) fn ip_table(
     )
     .header(
         Row::new(vec!["Remote address", "Total", "Last seen"])
-            .style(Style::default().fg(palette::muted())),
+            .style(Style::default().fg(theme.color(Role::Header))),
     )
     .column_spacing(1)
     .block(block)
@@ -93,6 +99,7 @@ pub(in crate::tui) fn draw_ips(
     snapshot: &TrafficSnapshot,
     mode: LayoutMode,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) {
     let panes = if mode == LayoutMode::Compact {
         Layout::default()
@@ -134,6 +141,7 @@ pub(in crate::tui) fn draw_ips(
         state.ip_in_scroll,
         snapshot,
         now,
+        theme,
     );
     draw_ip_table(
         f,
@@ -144,6 +152,7 @@ pub(in crate::tui) fn draw_ips(
         state.ip_out_scroll,
         snapshot,
         now,
+        theme,
     );
 }
 
@@ -157,21 +166,36 @@ pub(in crate::tui) fn draw_ip_table(
     selected: usize,
     snapshot: &TrafficSnapshot,
     now: chrono::DateTime<chrono::Utc>,
+    theme: &Theme,
 ) {
-    let (prefix, title, color) = ip_theme(inbound);
+    let (prefix, title, color) = ip_theme(inbound, theme);
+    let border = if focused {
+        theme.color(Role::FocusBorder)
+    } else {
+        theme.color(Role::Border)
+    };
     let block = panel_block(
         prefix,
         title,
         Some(entries.len()),
         color,
-        palette::border(),
+        border,
         Some(selected_position(selected, entries.len())),
+        theme,
     );
-    let table = ip_table(entries, color, block, snapshot, now)
+    let block = if focused {
+        block.border_style(
+            Style::default()
+                .fg(theme.color(Role::FocusBorder))
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        block
+    };
+    let table = ip_table(entries, color, block, snapshot, now, theme)
         .row_highlight_style(if focused {
             Style::default()
-                .fg(palette::strong())
-                .patch(palette::selection_style())
+                .patch(theme.selection_style())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -188,7 +212,7 @@ mod tests {
     #[test]
     fn compact_ips_stack_themed_panels_vertically() {
         let snapshot = TrafficSnapshot::default();
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Ips;
         let mut terminal = Terminal::new(TestBackend::new(72, 24)).unwrap();
 
@@ -226,7 +250,7 @@ mod tests {
             .into(),
             ..TrafficSnapshot::default()
         };
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         state.page = Page::Ips;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
