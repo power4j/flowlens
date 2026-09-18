@@ -428,7 +428,7 @@ mod tests {
         send_key(&mut state, KeyCode::Char('h'));
         assert_eq!(state.theme.selection_label(), "Session file");
         send_key(&mut state, KeyCode::Char('l'));
-        assert_eq!(state.theme.selection_label(), "Auto (FlowLens Dark)");
+        assert_eq!(state.theme.selection_label(), "Auto (Signal Deck)");
         for expected in state.theme.clone().cycle_labels_for_test() {
             send_key(&mut state, KeyCode::Char('l'));
             assert_eq!(state.theme.selection_label(), expected);

@@ -430,19 +430,19 @@ fn detect_from(
     }
     let color_term = color_term.unwrap_or_default().trim().to_ascii_lowercase();
     if matches!(color_term.as_str(), "truecolor" | "24bit") {
-        return "dark";
+        return "signal-deck";
     }
     let term = term.unwrap_or_default().trim().to_ascii_lowercase();
     if term == "dumb" {
         "mono"
     } else if term.contains("256color") {
-        "dark"
+        "signal-deck"
     } else if matches!(term.as_str(), "ansi" | "linux" | "screen" | "xterm")
         || term.starts_with("vt")
     {
         "ansi16"
     } else {
-        "dark"
+        "signal-deck"
     }
 }
 fn runtime_home(request: &str) -> Result<PathBuf, ThemeError> {
@@ -461,7 +461,7 @@ impl ThemeSession {
         session.detected = session
             .themes
             .iter()
-            .position(|(id, _)| *id == "dark")
+            .position(|(id, _)| *id == "signal-deck")
             .unwrap();
         session
     }
@@ -539,44 +539,53 @@ mod tests {
     }
 
     #[test]
-    fn auto_no_color_wins() {
+    fn auto_no_color_selects_mono() {
         assert_eq!(
             detect_from(Some("1"), Some("truecolor"), Some("xterm-256color")),
             "mono"
         );
     }
     #[test]
-    fn auto_empty_no_color_is_ignored() {
+    fn auto_empty_no_color_preserves_ansi16_detection() {
         assert_eq!(detect_from(Some(""), None, Some("xterm")), "ansi16");
     }
     #[test]
-    fn auto_colorterm_truecolor_wins() {
+    fn auto_colorterm_truecolor_selects_signal_deck() {
         assert_eq!(
             detect_from(None, Some(" TrueColor "), Some("linux")),
-            "dark"
+            "signal-deck"
         );
     }
     #[test]
-    fn auto_colorterm_24bit_wins() {
-        assert_eq!(detect_from(None, Some("24bit"), Some("dumb")), "dark");
+    fn auto_colorterm_24bit_selects_signal_deck() {
+        assert_eq!(
+            detect_from(None, Some("24bit"), Some("dumb")),
+            "signal-deck"
+        );
     }
     #[test]
-    fn auto_dumb_is_mono() {
+    fn auto_dumb_selects_mono() {
         assert_eq!(detect_from(None, None, Some(" dumb ")), "mono");
     }
     #[test]
-    fn auto_256color_is_dark() {
-        assert_eq!(detect_from(None, None, Some("screen-256color")), "dark");
+    fn auto_256color_selects_signal_deck() {
+        assert_eq!(
+            detect_from(None, None, Some("screen-256color")),
+            "signal-deck"
+        );
     }
     #[test]
-    fn auto_known_ansi_terms() {
+    fn auto_known_ansi_terms_select_ansi16() {
         for term in ["ansi", "linux", "screen", "xterm", "vt220"] {
             assert_eq!(detect_from(None, None, Some(term)), "ansi16");
         }
     }
     #[test]
-    fn auto_unknown_defaults_to_dark() {
-        assert_eq!(detect_from(None, Some("unknown"), Some("custom")), "dark");
+    fn auto_unknown_fallback_selects_signal_deck() {
+        assert_eq!(
+            detect_from(None, Some("unknown"), Some("custom")),
+            "signal-deck"
+        );
     }
     #[test]
     fn path_classification_is_exact() {
@@ -785,6 +794,36 @@ mod tests {
                 .contains(Modifier::REVERSED)
         );
     }
+
+    #[test]
+    fn signal_deck_preserves_its_semantic_accents_and_truecolor_styles() {
+        let session = ThemeSession::load(Some("signal-deck")).unwrap();
+        let theme = session.current();
+
+        assert_eq!(theme.color(Role::PageBg), Color::Rgb(7, 19, 31));
+        assert_eq!(theme.color(Role::PanelBg), Color::Rgb(11, 29, 43));
+        assert_eq!(theme.color(Role::PopupBg), Color::Rgb(16, 40, 58));
+        assert_eq!(theme.color(Role::Inbound), Color::Rgb(255, 180, 84));
+        assert_eq!(theme.color(Role::Outbound), Color::Rgb(67, 217, 255));
+        assert_eq!(theme.color(Role::LocalEndpoint), Color::Rgb(22, 198, 12));
+        assert_eq!(theme.color(Role::Brand), Color::Rgb(199, 146, 234));
+        assert_eq!(theme.color(Role::Error), theme.color(Role::Warning));
+        assert_eq!(theme.color(Role::Warning), theme.color(Role::Inbound));
+        assert_eq!(
+            theme.selection_style(),
+            Style::default()
+                .bg(Color::Rgb(18, 59, 85))
+                .add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            theme.active_tab_style(),
+            Style::default()
+                .fg(Color::Rgb(244, 250, 255))
+                .bg(Color::Rgb(18, 59, 85))
+                .add_modifier(Modifier::BOLD)
+        );
+    }
+
     #[test]
     fn all_builtin_roles_and_fixed_styles_match_the_approved_palette() {
         let dark = [
@@ -890,8 +929,13 @@ mod tests {
             assert_eq!(active, expected_active, "{id} active tab");
         }
         let mut ansi = ThemeSession::load(Some("ansi16")).unwrap();
-        ansi.themes[1].1.set(Role::SelectionBg, Color::Blue);
-        ansi.themes[1].1.set(Role::ActiveTabBg, Color::Yellow);
+        let ansi_index = catalog::builtin_index(&ansi.themes, "ansi16").unwrap();
+        ansi.themes[ansi_index]
+            .1
+            .set(Role::SelectionBg, Color::Blue);
+        ansi.themes[ansi_index]
+            .1
+            .set(Role::ActiveTabBg, Color::Yellow);
         assert_eq!(
             ansi.current().selection_style(),
             Style::default()

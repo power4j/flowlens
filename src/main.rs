@@ -438,7 +438,7 @@ struct Cli {
     /// Output format: plain (default) or json
     #[arg(long = "format", short = 'f', default_value = "plain", value_parser = ["plain", "json"])]
     format: String,
-    /// TUI theme: auto, dark, ansi16, mono, or a JSON theme file
+    /// TUI theme: auto, a built-in theme ID, a short name, or a JSON theme path
     #[arg(long)]
     theme: Option<String>,
     /// Number of entries per top-N list (default: 10, min: 1)

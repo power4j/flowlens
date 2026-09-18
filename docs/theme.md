@@ -17,22 +17,23 @@ flowlens --theme ocean
 flowlens eth0 --theme ./my-theme.json
 ```
 
-FlowLens has three built-in themes:
+FlowLens ships the following built-in themes:
 
 | ID | Display name | Profile | Behavior |
 | --- | --- | --- | --- |
 | `dark` | FlowLens Dark | `truecolor` | Uses FlowLens RGB colors. |
+| `signal-deck` | Signal Deck | `truecolor` | Uses a layered blue-black surface with focused cyan, orange traffic, and a purple brand accent. |
 | `ansi16` | ANSI 16 | `ansi16` | Uses the terminal default background and ANSI color slots. |
 | `mono` | Mono | `mono` | Uses terminal default colors and fixed text styles. |
 
 `auto` is the default when `--theme` is omitted. It is a selection strategy, not a fourth theme. At TUI startup, it chooses a built-in in this order:
 
 1. A present, non-empty `NO_COLOR` selects Mono.
-2. `COLORTERM=truecolor` or `COLORTERM=24bit` selects FlowLens Dark.
+2. `COLORTERM=truecolor` or `COLORTERM=24bit` selects Signal Deck.
 3. `TERM=dumb` selects Mono.
-4. A `TERM` value containing `256color` selects FlowLens Dark.
+4. A `TERM` value containing `256color` selects Signal Deck.
 5. `TERM` equal to `ansi`, `linux`, `screen`, or `xterm`, or beginning with `vt`, selects ANSI 16.
-6. All other values select FlowLens Dark.
+6. All other values select Signal Deck.
 
 `COLORTERM` and `TERM` ignore leading and trailing whitespace and case. An empty `NO_COLOR` has no effect. An explicit built-in or file theme takes precedence over Auto.
 
@@ -53,7 +54,7 @@ A value is an explicit path when it is absolute, contains `/` or `\`, begins wit
 
 Press `o` in the TUI to open Settings. Select `Theme` with the arrow keys or `j` and `k`; change it with the left and right arrow keys or `h` and `l`. Press `Esc` or `o` to close Settings.
 
-Settings offers Auto, every registered built-in, and an external theme that was successfully loaded at startup. Auto displays its resolved built-in, for example `Auto (ANSI 16)`. A change applies immediately and remains selected when switching network interfaces or resetting displayed data.
+Settings offers Auto, every registered built-in, and an external theme that was successfully loaded at startup. Auto displays its resolved built-in, for example `Auto (Signal Deck)`. A change applies immediately and remains selected when switching network interfaces or resetting displayed data.
 
 FlowLens validates the catalog, detects Auto, and reads an external file only at startup. It then retains an in-memory validated theme snapshot. Rendering and Settings changes perform no file or environment reads; FlowLens does not write settings, generate theme files, or hot-reload a changed file. The snapshot is discarded when the process exits.
 
@@ -68,7 +69,7 @@ Every file uses exactly one v1 form:
 | Complete theme | `profile`, `colors` | `profile` is `truecolor`, `ansi16`, or `mono`; `base` is absent; `colors` contains all 34 roles. Every built-in uses this form. |
 | Override | `base` | `base` names a registered built-in; `colors` may be partial, empty, or omitted. It inherits the base profile and every omitted role. |
 
-Complete examples are the tracked built-in files: [FlowLens Dark](../themes/dark.json), [ANSI 16](../themes/ansi16.json), and [Mono](../themes/mono.json).
+Complete examples are the tracked built-in files: [FlowLens Dark](../themes/dark.json), [Signal Deck](../themes/signal-deck.json), [ANSI 16](../themes/ansi16.json), and [Mono](../themes/mono.json).
 
 An override can change only the roles it needs:
 
@@ -104,7 +105,7 @@ The `profile` determines which color values a complete theme accepts. An overrid
 
 ## Roles and fixed styles
 
-Roles describe UI meaning. Equal defaults do not merge responsibilities: each role can be overridden independently. `default` is a terminal color, not a missing or inherited value. Every Mono role is `default`.
+Roles describe UI meaning. Equal defaults do not merge responsibilities: each role can be overridden independently. `default` is a terminal color, not a missing or inherited value. Every Mono role is `default`. Signal Deck's canonical role values are in [signal-deck.json](../themes/signal-deck.json).
 
 | Role | FlowLens Dark | ANSI 16 | Meaning |
 | --- | --- | --- |
@@ -147,20 +148,20 @@ For a single-direction IP page, `Total` uses `data.inbound` or `data.outbound`. 
 
 Theme files set colors only. They cannot configure bold, reverse video, or the `> ` row marker.
 
-| State | FlowLens Dark | ANSI 16 | Mono |
+| State | Truecolor (FlowLens Dark and Signal Deck) | ANSI 16 | Mono |
 | --- | --- | --- | --- |
 | Selected data row | Selection background, bold, and `> `; preserves cell foreground colors. | Selection background when configured, bold, and `> `; preserves cell foreground colors. | Reverse video, bold, and `> `. |
 | Active navigation | Active foreground and background, bold. | Reverse video and bold when using the default background. | Reverse video and bold. |
 | Operable panel | Focus-border color, bold, and existing row marker. | Bold focus border and existing row marker. | Bold border and existing row marker. |
 
-Every profile renders the operable-panel focus border in bold. FlowLens Dark also applies the `ui.focus_border` color. The marker and modifiers preserve selection and focus when terminal colors are unavailable or low contrast.
+Every profile renders the operable-panel focus border in bold. Truecolor themes apply the `ui.focus_border` color. The marker and modifiers preserve selection and focus when terminal colors are unavailable or low contrast.
 
 ## Validate and publish a built-in
 
 Run this local-schema validation from the repository root after editing the schema or built-in JSON files:
 
 ```bash
-npx --yes ajv-cli@5 validate -s themes/theme-v1.schema.json -d themes/dark.json -d themes/ansi16.json -d themes/mono.json --spec=draft2020
+npx --yes ajv-cli@5 validate -s themes/theme-v1.schema.json -d themes/dark.json -d themes/signal-deck.json -d themes/ansi16.json -d themes/mono.json --spec=draft2020
 ```
 
 The command validates local files. If `ajv-cli` is not already cached, `npx` may access the network to install it; use an installed CLI when validation must run offline.

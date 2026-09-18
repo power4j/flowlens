@@ -5,10 +5,14 @@ pub(super) struct Entry {
     pub(super) json: &'static str,
 }
 
-const ENTRIES: [Entry; 3] = [
+const ENTRIES: [Entry; 4] = [
     Entry {
         id: "dark",
         json: include_str!("../../themes/dark.json"),
+    },
+    Entry {
+        id: "signal-deck",
+        json: include_str!("../../themes/signal-deck.json"),
     },
     Entry {
         id: "ansi16",
