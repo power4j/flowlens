@@ -18,6 +18,9 @@ temp/
 # local doc
 docs/local/
 
+# codegraph
+.codegraph/
+
 # AI
 .claude/
 .codex/
