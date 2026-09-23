@@ -139,8 +139,9 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p dist
+          cp LICENSE target/${{ matrix.target_dir }}/release/LICENSE
           tar -C target/${{ matrix.target_dir }}/release \
-            -czf "dist/flowlens-v${RELEASE_VERSION}-linux-${{ matrix.arch }}.tar.gz" flowlens
+            -czf "dist/flowlens-v${RELEASE_VERSION}-linux-${{ matrix.arch }}.tar.gz" flowlens LICENSE
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux-${{ matrix.arch }}
@@ -286,7 +287,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path 'target\${{ matrix.target_dir }}\release\flowlens.exe' -DestinationPath "dist\flowlens-v$env:RELEASE_VERSION-windows-${{ matrix.arch }}.zip"
+          Copy-Item -LiteralPath 'LICENSE' -Destination 'target\${{ matrix.target_dir }}\release\LICENSE'
+          Compress-Archive -Path 'target\${{ matrix.target_dir }}\release\flowlens.exe', 'target\${{ matrix.target_dir }}\release\LICENSE' -DestinationPath "dist\flowlens-v$env:RELEASE_VERSION-windows-${{ matrix.arch }}.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows-${{ matrix.arch }}
@@ -361,9 +363,10 @@ jobs:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p dist
+          cp LICENSE "target/${{ matrix.target_dir }}/release/LICENSE"
           tar -C "target/${{ matrix.target_dir }}/release" \
-            -czf "dist/flowlens-v${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz" flowlens
-          test "$(tar -tzf "dist/flowlens-v${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz")" = "flowlens"
+            -czf "dist/flowlens-v${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz" flowlens LICENSE
+          test "$(tar -tzf "dist/flowlens-v${RELEASE_VERSION}-macos-${{ matrix.arch }}.tar.gz")" = "$(printf 'flowlens\nLICENSE')"
       - uses: actions/upload-artifact@v7
         with:
           name: release-macos-${{ matrix.arch }}

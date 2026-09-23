@@ -7,6 +7,7 @@ This checklist records the manual checks around the GitHub Release workflow. The
 - [ ] `main` contains the intended source changes and has no uncommitted changes.
 - [ ] Required CI checks are green on the intended `main` commit.
 - [ ] `CHANGELOG.md` has a complete `[Unreleased]` entry for this release.
+- [ ] `LICENSE`, Cargo SPDX metadata, and both READMEs state the same license for the release.
 - [ ] The bump type is selected intentionally: `patch`, `minor`, or `major`.
 - [ ] The expected version is strictly greater than the current Cargo version.
 - [ ] Linux `x86_64` and `aarch64` manual smoke checks completed on supported hosts: start-up, interface discovery, capture, and representative output.
@@ -24,7 +25,8 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 - [ ] Linux assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz` and `flowlens-vX.Y.Z-linux-aarch64.tar.gz`.
 - [ ] Windows assets are named `flowlens-vX.Y.Z-windows-x86_64.zip` and `flowlens-vX.Y.Z-windows-aarch64.zip`.
 - [ ] Experimental macOS assets are named `flowlens-vX.Y.Z-macos-x86_64.tar.gz` and `flowlens-vX.Y.Z-macos-aarch64.tar.gz`.
-- [ ] Each archive contains only its corresponding `flowlens` or `flowlens.exe` binary.
+- [ ] Each archive contains its corresponding `flowlens` or `flowlens.exe` binary and the canonical `LICENSE` file, with no other files.
+- [ ] The tagged source archives are available from the Release page and contain the same canonical `LICENSE` file.
 - [ ] `SHA256SUMS` is present and covers all release archives.
 - [ ] The generated Release Notes have been reviewed and edited.
 - [ ] The `pre-release` option is selected when the release is not considered stable.

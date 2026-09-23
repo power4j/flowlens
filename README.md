@@ -198,6 +198,10 @@ The process attribution and capture behavior may differ between Linux, Windows, 
 
 ## License
 
-FlowLens is licensed under the [Apache License 2.0](LICENSE).
+The current development tree and all FlowLens releases after v0.7.0 are licensed under the [GNU General Public License version 3 only](LICENSE) (`GPL-3.0-only`).
+
+Copyright (C) 2026 power4j. Contact: power4j@outlook.com.
+
+Releases up to and including v0.7.0 remain licensed under the Apache License 2.0 included with those releases. Individual contribution attribution remains in the Git history.
 
 For development and source-build instructions, see [`docs/development.md`](docs/development.md).

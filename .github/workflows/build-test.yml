@@ -94,8 +94,9 @@ jobs:
           BUILD_SHA: ${{ needs.metadata.outputs.short_sha }}
         run: |
           mkdir -p dist
+          cp LICENSE target/${{ matrix.target_dir }}/release/LICENSE
           tar -C target/${{ matrix.target_dir }}/release \
-            -czf "dist/flowlens-${BUILD_SHA}-linux-${{ matrix.arch }}.tar.gz" flowlens
+            -czf "dist/flowlens-${BUILD_SHA}-linux-${{ matrix.arch }}.tar.gz" flowlens LICENSE
       - uses: actions/upload-artifact@v7
         with:
           name: flowlens-${{ needs.metadata.outputs.short_sha }}-linux-${{ matrix.arch }}
@@ -188,7 +189,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path 'target\${{ matrix.target_dir }}\release\flowlens.exe' -DestinationPath "dist\flowlens-$env:BUILD_SHA-windows-${{ matrix.arch }}.zip"
+          Copy-Item -LiteralPath 'LICENSE' -Destination 'target\${{ matrix.target_dir }}\release\LICENSE'
+          Compress-Archive -Path 'target\${{ matrix.target_dir }}\release\flowlens.exe', 'target\${{ matrix.target_dir }}\release\LICENSE' -DestinationPath "dist\flowlens-$env:BUILD_SHA-windows-${{ matrix.arch }}.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: flowlens-${{ needs.metadata.outputs.short_sha }}-windows-${{ matrix.arch }}
@@ -251,8 +253,9 @@ jobs:
           BUILD_SHA: ${{ needs.metadata.outputs.short_sha }}
         run: |
           mkdir -p dist
+          cp LICENSE "target/${{ matrix.target_dir }}/release/LICENSE"
           tar -C "target/${{ matrix.target_dir }}/release" \
-            -czf "dist/flowlens-${BUILD_SHA}-macos-${{ matrix.arch }}.tar.gz" flowlens
+            -czf "dist/flowlens-${BUILD_SHA}-macos-${{ matrix.arch }}.tar.gz" flowlens LICENSE
       - uses: actions/upload-artifact@v7
         with:
           name: flowlens-${{ needs.metadata.outputs.short_sha }}-macos-${{ matrix.arch }}

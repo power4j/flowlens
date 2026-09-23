@@ -57,10 +57,11 @@ jobs:
           test -n "$expected"
           actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
           test "$actual" = "$expected"
-          test "$(tar -tzf "$archive")" = "flowlens"
+          test "$(tar -tzf "$archive")" = "$(printf 'flowlens\nLICENSE')"
 
           mkdir extracted
           tar -xzf "$archive" -C extracted
+          grep -q 'GNU GENERAL PUBLIC LICENSE' extracted/LICENSE
           file extracted/flowlens | grep -q "${ARCH/aarch64/arm64}"
           otool -L extracted/flowlens | grep -q 'libpcap'
           extracted/flowlens --help >/dev/null

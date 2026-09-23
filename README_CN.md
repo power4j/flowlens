@@ -198,6 +198,10 @@ Linux、Windows 和 macOS 的进程归属及抓包行为可能存在差异。mac
 
 ## 许可证
 
-FlowLens 使用 [Apache License 2.0](LICENSE) 许可证。
+当前开发分支以及 v0.7.0 之后发布的所有 FlowLens 版本仅使用 [GNU General Public License 第 3 版](LICENSE)（`GPL-3.0-only`）。
+
+Copyright (C) 2026 power4j。联系方式：power4j@outlook.com。
+
+v0.7.0 及更早版本仍按各自发布时所附的 Apache License 2.0 授权。各贡献者的署名保留在 Git 历史中。
 
 开发和源码构建说明见 [`docs/development.md`](docs/development.md)。

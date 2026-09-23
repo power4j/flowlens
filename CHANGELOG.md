@@ -8,6 +8,8 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Changed
 
+- Relicensed the current development tree and future releases under GPL-3.0-only. Releases up to and including v0.7.0 remain under Apache-2.0.
+
 ### Fixed
 
 ### Removed

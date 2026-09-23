@@ -428,6 +428,26 @@ test_archive_extra_file_exits_5() {
   assert_eq "${status}" "5" "archive extra file exits 5"
 }
 
+test_gpl_archive_requires_license() {
+  local out status
+  mkdir -p "${WORKDIR}/pack-gpl" "${WORKDIR}/www/v0.7.1" "${WORKDIR}/www/v0.7.2"
+  printf '%s\n' '#!/bin/sh' 'echo flowlens-fixture' > "${WORKDIR}/pack-gpl/flowlens"
+  cp "${ROOT}/LICENSE" "${WORKDIR}/pack-gpl/LICENSE"
+  chmod 0755 "${WORKDIR}/pack-gpl/flowlens"
+
+  tar -C "${WORKDIR}/pack-gpl" -czf "${WORKDIR}/www/v0.7.1/flowlens-v0.7.1-linux-x86_64.tar.gz" flowlens LICENSE
+  write_sums_for "${WORKDIR}/www/v0.7.1/flowlens-v0.7.1-linux-x86_64.tar.gz" v0.7.1
+  out="${WORKDIR}/gpl-license.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --dry-run --version v0.7.1 --install-dir "${WORKDIR}/gpl/bin")"
+  assert_eq "${status}" "0" "GPL archive with LICENSE is accepted"
+
+  tar -C "${WORKDIR}/pack-gpl" -czf "${WORKDIR}/www/v0.7.2/flowlens-v0.7.2-linux-x86_64.tar.gz" flowlens
+  write_sums_for "${WORKDIR}/www/v0.7.2/flowlens-v0.7.2-linux-x86_64.tar.gz" v0.7.2
+  out="${WORKDIR}/gpl-missing-license.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --dry-run --version v0.7.2 --install-dir "${WORKDIR}/gpl/bin")"
+  assert_eq "${status}" "5" "GPL archive without LICENSE exits 5"
+}
+
 test_archive_path_traversal_exits_5() {
   local out status
   mkdir -p "${WORKDIR}/pack-trav/sub" "${WORKDIR}/www/v0.3.2"
@@ -577,6 +597,7 @@ main() {
     test_no_modify_path_prints_hint
     test_sha256_mismatch_exits_5
     test_archive_extra_file_exits_5
+    test_gpl_archive_requires_license
     test_archive_path_traversal_exits_5
     test_setcap_non_linux_exits_2
     test_setcap_missing_exits_2

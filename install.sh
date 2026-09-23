@@ -4,6 +4,7 @@ set -eu
 
 FLOWLENS_REPO="power4j/flowlens"
 MIN_VERSION="v0.3.0"
+LAST_APACHE_VERSION="v0.7.0"
 MAX_COMPONENT=2147483647
 API_BASE="https://api.github.com"
 DOWNLOAD_BASE="https://github.com"
@@ -802,15 +803,33 @@ download_assets() {
 }
 
 extract_asset() {
-  local list count
+  local list count entry binary_found license_found
   mkdir -p "${TMP_DIR}/extract"
   list="$(tar -tzf "${TMP_DIR}/${ASSET_NAME}")" || die 5 "invalid archive"
   count="$(printf '%s\n' "${list}" | awk 'NF{c++} END{print c+0}')"
-  [ "${count}" = "1" ] || die 5 "archive must contain only flowlens"
-  case "${list}" in
-    flowlens|./flowlens) ;;
-    *) die 5 "archive contains unexpected path: ${list}" ;;
+  case "${count}" in
+    1)
+      [ "$(version_cmp "${VERSION}" "${LAST_APACHE_VERSION}")" != "gt" ] || \
+        die 5 "archive must contain flowlens and LICENSE"
+      ;;
+    2) ;;
+    *) die 5 "archive must contain only flowlens and LICENSE" ;;
   esac
+  binary_found=0
+  license_found=0
+  while IFS= read -r entry; do
+    case "${entry}" in
+      flowlens|./flowlens) binary_found=1 ;;
+      LICENSE|./LICENSE) license_found=1 ;;
+      *) die 5 "archive contains unexpected path: ${entry}" ;;
+    esac
+  done <<EOF
+${list}
+EOF
+  [ "${binary_found}" -eq 1 ] || die 5 "archive does not contain flowlens"
+  if [ "${count}" = "2" ]; then
+    [ "${license_found}" -eq 1 ] || die 5 "archive does not contain LICENSE"
+  fi
   tar -xzf "${TMP_DIR}/${ASSET_NAME}" -C "${TMP_DIR}/extract" || die 5 "failed to extract archive"
   [ -f "${TMP_DIR}/extract/flowlens" ] || die 5 "extracted binary is missing"
   chmod 0755 "${TMP_DIR}/extract/flowlens"

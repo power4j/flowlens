@@ -24,7 +24,7 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &The
         .direction(LayoutDir::Vertical)
         .constraints([
             Constraint::Fill(1),
-            Constraint::Length(9),
+            Constraint::Length(12),
             Constraint::Fill(1),
         ])
         .split(horizontal)[1];
@@ -41,7 +41,6 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &The
                 .fg(theme.color(Role::Brand))
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(""),
         Line::from(Span::styled(
             "Network Traffic Analyzer",
             Style::default().fg(theme.color(Role::Title)),
@@ -51,7 +50,23 @@ pub(in crate::tui) fn draw_about(f: &mut ratatui::Frame, area: Rect, theme: &The
             format!("Version {version} ({commit})"),
             Style::default().fg(theme.color(Role::Secondary)),
         )),
+        Line::from(Span::styled(
+            "Copyright (C) 2026 power4j",
+            Style::default().fg(theme.color(Role::Secondary)),
+        )),
+        Line::from(Span::styled(
+            "GPL-3.0-only | Redistribution allowed | NO WARRANTY",
+            Style::default().fg(theme.color(Role::Secondary)),
+        )),
+        Line::from(Span::styled(
+            "See LICENSE in the distribution",
+            Style::default().fg(theme.color(Role::Secondary)),
+        )),
         Line::from(""),
+        Line::from(Span::styled(
+            "power4j@outlook.com",
+            Style::default().fg(theme.color(Role::Secondary)),
+        )),
         Line::from(Span::styled(
             repository,
             Style::default().fg(theme.color(Role::Secondary)),
@@ -105,8 +120,40 @@ mod tests {
         assert!(rendered.contains("Network Traffic Analyzer"));
         assert!(rendered.contains("Version"));
         assert!(rendered.contains(env!("FLOWLENS_BUILD_COMMIT")));
+        assert!(rendered.contains("Copyright (C) 2026 power4j"));
+        assert!(rendered.contains("GPL-3.0-only | Redistribution allowed | NO WARRANTY"));
+        assert!(rendered.contains("See LICENSE in the distribution"));
+        assert!(rendered.contains("power4j@outlook.com"));
         assert!(rendered.contains(env!("CARGO_PKG_REPOSITORY")));
         assert!(!rendered.contains("private-interface"));
         assert!(!rendered.contains("private-host"));
+    }
+
+    #[test]
+    fn about_page_keeps_legal_notice_at_minimum_size() {
+        let snapshot = TrafficSnapshot::default();
+        let mut state = AppState::for_test();
+        state.page = Page::About;
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &mut state,
+                    &snapshot,
+                    "private-interface",
+                    "private-host",
+                    Instant::now(),
+                )
+            })
+            .unwrap();
+
+        let rendered = rendered_lines(&terminal).join("\n");
+        assert!(rendered.contains("Copyright (C) 2026 power4j"));
+        assert!(rendered.contains("GPL-3.0-only | Redistribution allowed | NO WARRANTY"));
+        assert!(rendered.contains("See LICENSE in the distribution"));
+        assert!(rendered.contains("power4j@outlook.com"));
+        assert!(rendered.contains(env!("CARGO_PKG_REPOSITORY")));
     }
 }

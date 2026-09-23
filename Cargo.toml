@@ -1,10 +1,11 @@
 [package]
 name = "flowlens"
 version = "0.7.0"
+authors = ["power4j <power4j@outlook.com>"]
 edition = "2024"
 rust-version = "1.96"
 description = "A command-line network traffic analyzer with process and IP attribution"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/power4j/flowlens"
 readme = "README.md"
 
