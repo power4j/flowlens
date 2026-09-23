@@ -381,7 +381,7 @@ mod tests {
             send_key(&mut state, KeyCode::Char('l')),
             KeyOutcome::Changed
         );
-        assert_eq!(state.theme.selection_label(), "FlowLens Dark");
+        assert_eq!(state.theme.selection_label(), "ANSI 16");
 
         // Select Diagnostics: h/l toggle only the draft; the actual state
         // (writer + shared flag) is committed when the overlay closes.
@@ -411,24 +411,18 @@ mod tests {
         let mut state = AppState::for_test();
         send_key(&mut state, KeyCode::Char('o'));
         send_key(&mut state, KeyCode::Char('j'));
-        let last_builtin = state
-            .theme
-            .builtin_labels_for_test()
-            .pop()
-            .expect("catalog has a built-in theme");
-
         for expected in state.theme.clone().cycle_labels_for_test() {
             send_key(&mut state, KeyCode::Char('l'));
             assert_eq!(state.theme.selection_label(), expected);
         }
         send_key(&mut state, KeyCode::Char('h'));
-        assert_eq!(state.theme.selection_label(), last_builtin);
+        assert_eq!(state.theme.selection_label(), "FlowLens Dark");
 
-        state.theme = crate::theme::ThemeSession::auto_for_test().with_external("Session file");
-        send_key(&mut state, KeyCode::Char('h'));
-        assert_eq!(state.theme.selection_label(), "Session file");
+        state.theme = crate::theme::ThemeSession::signal_deck_for_test()
+            .with_external("Session file")
+            .select_external_for_test();
         send_key(&mut state, KeyCode::Char('l'));
-        assert_eq!(state.theme.selection_label(), "Auto (Signal Deck)");
+        assert_eq!(state.theme.selection_label(), "FlowLens Dark");
         for expected in state.theme.clone().cycle_labels_for_test() {
             send_key(&mut state, KeyCode::Char('l'));
             assert_eq!(state.theme.selection_label(), expected);
@@ -444,7 +438,7 @@ mod tests {
         // overlay nor commits the diagnostics draft.
         assert_eq!(send_key(&mut state, KeyCode::Enter), KeyOutcome::Ignored);
         assert!(state.settings_open, "Enter must not close the overlay");
-        assert!(state.theme.selection_label().starts_with("Auto ("));
+        assert_eq!(state.theme.selection_label(), "Signal Deck");
     }
 
     #[test]

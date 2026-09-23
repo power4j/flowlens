@@ -476,7 +476,7 @@ impl TrafficPipeline {
 
     fn stop_in_background(&mut self) {
         self.signal_stop();
-        let workers: Vec<_> = self.workers.drain(..).collect();
+        let workers = std::mem::take(&mut self.workers);
         if workers.is_empty() {
             return;
         }

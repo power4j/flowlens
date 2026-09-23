@@ -38,14 +38,6 @@ pub(super) fn builtins_from(entries: &[Entry]) -> Result<Vec<(&'static str, Them
                 "must not be empty",
             ));
         }
-        if entry.id == "auto" {
-            return Err(ThemeError::field_value(
-                "catalog",
-                "id",
-                entry.id,
-                "reserved for automatic selection",
-            ));
-        }
         if entry_index(&entries[..index], entry.id).is_some() {
             return Err(ThemeError::field_value(
                 "catalog",

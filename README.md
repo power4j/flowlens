@@ -27,7 +27,7 @@ Drill into a process to review its identity, attribution composition, traffic to
 
 ## Built-in themes
 
-FlowLens includes four themes for true-color, ANSI 16-color, and monochrome terminals. `Auto` selects a built-in theme from the detected terminal capabilities. See [TUI themes](docs/theme.md) for selection behavior and custom JSON themes.
+FlowLens includes four themes for true-color, ANSI 16-color, and monochrome terminals. Signal Deck is the default when `--theme` is omitted. See [TUI themes](docs/theme.md) for selection behavior and custom JSON themes.
 
 <table>
   <tr>
@@ -144,7 +144,7 @@ Choose a built-in TUI theme, load a named user theme, or load an explicit JSON t
 ./flowlens eth0 --theme ./my-theme.json
 ```
 
-`--theme` is available only in the foreground interactive TUI. See [TUI themes](docs/theme.md) for selection, automatic behavior, and JSON theme authoring.
+`--theme` is available only in the foreground interactive TUI. See [TUI themes](docs/theme.md) for default and explicit selection, and JSON theme authoring.
 
 Write periodic plain-text snapshots to a file:
 

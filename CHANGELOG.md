@@ -9,6 +9,7 @@ All notable changes to FlowLens are recorded in this file.
 ### Changed
 
 - Relicensed the current development tree and future releases under GPL-3.0-only. Releases up to and including v0.7.0 remain under Apache-2.0.
+- Omitted `--theme` now always selects Signal Deck. Removed `NO_COLOR`, `COLORTERM`, and `TERM`-based theme selection; `--theme auto` now resolves as an ordinary named custom theme and loads `auto.json` when present.
 
 ### Fixed
 

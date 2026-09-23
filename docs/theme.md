@@ -26,27 +26,18 @@ FlowLens ships the following built-in themes:
 | `ansi16` | ANSI 16 | `ansi16` | Uses the terminal default background and ANSI color slots. |
 | `mono` | Mono | `mono` | Uses terminal default colors and fixed text styles. |
 
-`auto` is the default when `--theme` is omitted. It is a selection strategy, not a fourth theme. At TUI startup, it chooses a built-in in this order:
-
-1. A present, non-empty `NO_COLOR` selects Mono.
-2. `COLORTERM=truecolor` or `COLORTERM=24bit` selects Signal Deck.
-3. `TERM=dumb` selects Mono.
-4. A `TERM` value containing `256color` selects Signal Deck.
-5. `TERM` equal to `ansi`, `linux`, `screen`, or `xterm`, or beginning with `vt`, selects ANSI 16.
-6. All other values select Signal Deck.
-
-`COLORTERM` and `TERM` ignore leading and trailing whitespace and case. An empty `NO_COLOR` has no effect. An explicit built-in or file theme takes precedence over Auto.
+Signal Deck is the default when `--theme` is omitted. Select FlowLens Dark, ANSI 16, Mono, or a custom theme explicitly when a different presentation is required.
 
 ### Name and path resolution
 
 FlowLens resolves a `--theme` value in this fixed order:
 
-1. An omitted value or `auto` keeps Auto and does not look in the user theme directory.
+1. An omitted value selects the Signal Deck built-in.
 2. An exact registered built-in ID selects that built-in.
 3. An explicit path loads that exact file.
 4. Any other short name loads one file from the user theme directory.
 
-`--theme ocean` therefore selects a built-in named `ocean` when one is registered. Otherwise, it reads exactly `~/.flowlens/themes/ocean.json` on Linux, or `%USERPROFILE%\.flowlens\themes\ocean.json` on Windows. FlowLens does not enumerate the directory.
+`--theme ocean` therefore selects a built-in named `ocean` when one is registered. Otherwise, it reads exactly `~/.flowlens/themes/ocean.json` on Linux, or `%USERPROFILE%\.flowlens\themes\ocean.json` on Windows. `--theme auto` follows the same rule and reads `auto.json` unless a future registered built-in uses that ID. FlowLens does not enumerate the directory.
 
 A value is an explicit path when it is absolute, contains `/` or `\`, begins with `./`, `../`, or `~`, or has a file extension. Relative explicit paths use the working directory from which FlowLens started. Prefix a no-extension filename with `./` to force path handling. Only `~/` and `~\` expand from the current user's home directory. `~custom.json` is a literal explicit relative path and does not need a home directory. File extensions are not restricted for explicit paths.
 
@@ -54,9 +45,9 @@ A value is an explicit path when it is absolute, contains `/` or `\`, begins wit
 
 Press `o` in the TUI to open Settings. Select `Theme` with the arrow keys or `j` and `k`; change it with the left and right arrow keys or `h` and `l`. Press `Esc` or `o` to close Settings.
 
-Settings offers Auto, every registered built-in, and an external theme that was successfully loaded at startup. Auto displays its resolved built-in, for example `Auto (Signal Deck)`. A change applies immediately and remains selected when switching network interfaces or resetting displayed data.
+Settings offers every registered built-in and an external theme that was successfully loaded at startup. A change applies immediately and remains selected when switching network interfaces or resetting displayed data.
 
-FlowLens validates the catalog, detects Auto, and reads an external file only at startup. It then retains an in-memory validated theme snapshot. Rendering and Settings changes perform no file or environment reads; FlowLens does not write settings, generate theme files, or hot-reload a changed file. The snapshot is discarded when the process exits.
+FlowLens validates the catalog and reads an external file only at startup. It then retains an in-memory validated theme snapshot. Rendering and Settings changes perform no file or environment reads; FlowLens does not write settings, generate theme files, or hot-reload a changed file. The snapshot is discarded when the process exits.
 
 ## Theme JSON v1
 
@@ -166,10 +157,10 @@ npx --yes ajv-cli@5 validate -s themes/theme-v1.schema.json -d themes/dark.json 
 
 The command validates local files. If `ajv-cli` is not already cached, `npx` may access the network to install it; use an installed CLI when validation must run offline.
 
-To add a built-in, add one complete JSON file under `themes/` and one ID-to-JSON registration in `src/theme/catalog.rs`. The catalog registration makes it selectable through the CLI, Settings, and override `base` without a separate UI list. Built-in JSON is embedded with `include_str!`, so released binaries remain a single executable with no adjacent theme-resource lookup. Adding a built-in does not change Auto's explicit default mapping.
+To add a built-in, add one complete JSON file under `themes/` and one ID-to-JSON registration in `src/theme/catalog.rs`. The catalog registration makes it selectable through the CLI, Settings, and override `base` without a separate UI list. Built-in JSON is embedded with `include_str!`, so released binaries remain a single executable with no adjacent theme-resource lookup.
 
 ## Errors and recovery
 
 Invalid JSON, unknown top-level fields or roles, non-string or malformed colors, an incomplete complete theme, an incompatible profile value, or an unknown base are configuration errors. FlowLens writes one English stderr message beginning with `Theme configuration error:` and exits with a non-zero status before Npcap checks, interface discovery, diagnostics output, capture setup, or TUI construction.
 
-The message identifies the built-in ID or external path. JSON syntax errors include a line and column when available; field errors identify the field, and where relevant the role and value. Correct the reported file or select a known built-in such as `--theme dark`, then start FlowLens again. FlowLens does not silently fall back to Auto or edit the file.
+The message identifies the built-in ID or external path. JSON syntax errors include a line and column when available; field errors identify the field, and where relevant the role and value. Correct the reported file or select a known built-in such as `--theme dark`, then start FlowLens again. FlowLens does not silently fall back to another theme or edit the file.

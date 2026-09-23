@@ -323,41 +323,41 @@ impl std::error::Error for ThemeError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Choice {
-    Auto,
     Builtin(usize),
     External,
 }
 #[derive(Clone)]
 pub(crate) struct ThemeSession {
     themes: Vec<(&'static str, Theme)>,
-    detected: usize,
     choice: Choice,
     external: Option<Theme>,
 }
 impl ThemeSession {
     pub(crate) fn load(request: Option<&str>) -> Result<Self, ThemeError> {
+        Self::load_with_home(request, None)
+    }
+    fn load_with_home(
+        request: Option<&str>,
+        home: Option<&std::path::Path>,
+    ) -> Result<Self, ThemeError> {
         let themes = catalog::builtins()?;
-        let detected_id = detect();
-        let detected = catalog::builtin_index(&themes, detected_id).ok_or_else(|| {
-            ThemeError::source(
-                "catalog",
-                format!("Auto default `{detected_id}` is not registered"),
-            )
+        let default = catalog::builtin_index(&themes, "signal-deck").ok_or_else(|| {
+            ThemeError::source("catalog", "default `signal-deck` is not registered")
         })?;
         let mut session = Self {
             themes,
-            detected,
-            choice: Choice::Auto,
+            choice: Choice::Builtin(default),
             external: None,
         };
-        if let Some(request) = request
-            && request != "auto"
-        {
+        if let Some(request) = request {
             let ids = session.themes.iter().map(|(id, _)| *id).collect::<Vec<_>>();
             let home = if ids.contains(&request) || !resolve::requires_home(request) {
                 None
             } else {
-                Some(runtime_home(request)?)
+                Some(match home {
+                    Some(home) => home.to_owned(),
+                    None => runtime_home(request)?,
+                })
             };
             match resolve::resolve_source(request, &ids, home.as_deref())? {
                 resolve::Source::Builtin(index) => session.choice = Choice::Builtin(index),
@@ -371,7 +371,6 @@ impl ThemeSession {
     }
     pub(crate) fn current(&self) -> &Theme {
         match self.choice {
-            Choice::Auto => &self.themes[self.detected].1,
             Choice::Builtin(index) => &self.themes[index].1,
             Choice::External => self
                 .external
@@ -381,7 +380,6 @@ impl ThemeSession {
     }
     pub(crate) fn selection_label(&self) -> String {
         match self.choice {
-            Choice::Auto => format!("Auto ({})", self.themes[self.detected].1.name),
             Choice::Builtin(index) => self.themes[index].1.name.clone(),
             Choice::External => self.external.as_ref().expect("external theme").name.clone(),
         }
@@ -393,56 +391,21 @@ impl ThemeSession {
         self.advance(false);
     }
     fn advance(&mut self, forward: bool) {
-        let len = self.themes.len() + usize::from(self.external.is_some()) + 1;
+        let len = self.themes.len() + usize::from(self.external.is_some());
         let index = match self.choice {
-            Choice::Auto => 0,
-            Choice::Builtin(index) => index + 1,
-            Choice::External => self.themes.len() + 1,
+            Choice::Builtin(index) => index,
+            Choice::External => self.themes.len(),
         };
         let next = if forward {
             (index + 1) % len
         } else {
             (index + len - 1) % len
         };
-        self.choice = if next == 0 {
-            Choice::Auto
-        } else if next <= self.themes.len() {
-            Choice::Builtin(next - 1)
+        self.choice = if next < self.themes.len() {
+            Choice::Builtin(next)
         } else {
             Choice::External
         };
-    }
-}
-fn detect() -> &'static str {
-    detect_from(
-        std::env::var("NO_COLOR").ok().as_deref(),
-        std::env::var("COLORTERM").ok().as_deref(),
-        std::env::var("TERM").ok().as_deref(),
-    )
-}
-fn detect_from(
-    no_color: Option<&str>,
-    color_term: Option<&str>,
-    term: Option<&str>,
-) -> &'static str {
-    if no_color.is_some_and(|value| !value.is_empty()) {
-        return "mono";
-    }
-    let color_term = color_term.unwrap_or_default().trim().to_ascii_lowercase();
-    if matches!(color_term.as_str(), "truecolor" | "24bit") {
-        return "signal-deck";
-    }
-    let term = term.unwrap_or_default().trim().to_ascii_lowercase();
-    if term == "dumb" {
-        "mono"
-    } else if term.contains("256color") {
-        "signal-deck"
-    } else if matches!(term.as_str(), "ansi" | "linux" | "screen" | "xterm")
-        || term.starts_with("vt")
-    {
-        "ansi16"
-    } else {
-        "signal-deck"
     }
 }
 fn runtime_home(request: &str) -> Result<PathBuf, ThemeError> {
@@ -455,22 +418,14 @@ impl ThemeSession {
     pub(crate) fn dark_for_test() -> Self {
         Self::load(Some("dark")).expect("embedded dark theme is valid")
     }
-    pub(crate) fn auto_for_test() -> Self {
-        let mut session = Self::dark_for_test();
-        session.choice = Choice::Auto;
-        session.detected = session
-            .themes
-            .iter()
-            .position(|(id, _)| *id == "signal-deck")
-            .unwrap();
-        session
+    pub(crate) fn signal_deck_for_test() -> Self {
+        Self::load(None).expect("embedded signal-deck theme is valid")
     }
 }
 #[cfg(test)]
 impl ThemeSession {
     pub(crate) fn with_role(mut self, role: Role, color: Color) -> Self {
         match self.choice {
-            Choice::Auto => self.themes[self.detected].1.set(role, color),
             Choice::Builtin(index) => self.themes[index].1.set(role, color),
             Choice::External => self.external.as_mut().unwrap().set(role, color),
         }
@@ -487,18 +442,12 @@ impl ThemeSession {
         self
     }
     pub(crate) fn cycle_labels_for_test(&mut self) -> Vec<String> {
-        let count = self.themes.len() + usize::from(self.external.is_some()) + 1;
+        let count = self.themes.len() + usize::from(self.external.is_some());
         (0..count)
             .map(|_| {
                 self.next();
                 self.selection_label()
             })
-            .collect()
-    }
-    pub(crate) fn builtin_labels_for_test(&self) -> Vec<String> {
-        self.themes
-            .iter()
-            .map(|(_, theme)| theme.name.clone())
             .collect()
     }
 }
@@ -539,53 +488,41 @@ mod tests {
     }
 
     #[test]
-    fn auto_no_color_selects_mono() {
+    fn omitted_theme_uses_signal_deck_and_explicit_choices_select_each_builtin() {
         assert_eq!(
-            detect_from(Some("1"), Some("truecolor"), Some("xterm-256color")),
-            "mono"
+            ThemeSession::load(None).unwrap().selection_label(),
+            "Signal Deck"
         );
-    }
-    #[test]
-    fn auto_empty_no_color_preserves_ansi16_detection() {
-        assert_eq!(detect_from(Some(""), None, Some("xterm")), "ansi16");
-    }
-    #[test]
-    fn auto_colorterm_truecolor_selects_signal_deck() {
-        assert_eq!(
-            detect_from(None, Some(" TrueColor "), Some("linux")),
-            "signal-deck"
-        );
-    }
-    #[test]
-    fn auto_colorterm_24bit_selects_signal_deck() {
-        assert_eq!(
-            detect_from(None, Some("24bit"), Some("dumb")),
-            "signal-deck"
-        );
-    }
-    #[test]
-    fn auto_dumb_selects_mono() {
-        assert_eq!(detect_from(None, None, Some(" dumb ")), "mono");
-    }
-    #[test]
-    fn auto_256color_selects_signal_deck() {
-        assert_eq!(
-            detect_from(None, None, Some("screen-256color")),
-            "signal-deck"
-        );
-    }
-    #[test]
-    fn auto_known_ansi_terms_select_ansi16() {
-        for term in ["ansi", "linux", "screen", "xterm", "vt220"] {
-            assert_eq!(detect_from(None, None, Some(term)), "ansi16");
+        for (id, label) in [
+            ("dark", "FlowLens Dark"),
+            ("signal-deck", "Signal Deck"),
+            ("ansi16", "ANSI 16"),
+            ("mono", "Mono"),
+        ] {
+            assert_eq!(
+                ThemeSession::load(Some(id)).unwrap().selection_label(),
+                label
+            );
         }
     }
+
     #[test]
-    fn auto_unknown_fallback_selects_signal_deck() {
-        assert_eq!(
-            detect_from(None, Some("unknown"), Some("custom")),
-            "signal-deck"
-        );
+    fn auto_is_an_ordinary_named_theme() {
+        let home = std::env::temp_dir().join(format!("flowlens-auto-home-{}", std::process::id()));
+        let theme_dir = home.join(".flowlens/themes");
+        std::fs::create_dir_all(&theme_dir).unwrap();
+        let auto = theme_dir.join("auto.json");
+        std::fs::write(&auto, r#"{"name":"Auto file","base":"dark"}"#).unwrap();
+
+        let session = ThemeSession::load_with_home(Some("auto"), Some(&home)).unwrap();
+        assert_eq!(session.selection_label(), "Auto file");
+        std::fs::remove_file(&auto).unwrap();
+        let Err(error) = ThemeSession::load_with_home(Some("auto"), Some(&home)) else {
+            panic!("missing auto theme must fail to load");
+        };
+        let error = error.to_string();
+        std::fs::remove_dir_all(home).unwrap();
+        assert!(error.contains("auto.json"), "{error}");
     }
     #[test]
     fn path_classification_is_exact() {
@@ -951,7 +888,7 @@ mod tests {
         );
     }
     #[test]
-    fn catalog_registration_drives_selection_override_and_auto_defaults() {
+    fn catalog_registration_drives_selection_and_override_bases() {
         let entries = [
             catalog::Entry {
                 id: "ocean",
@@ -978,17 +915,15 @@ mod tests {
         );
         let mut session = ThemeSession {
             themes,
-            detected: 0,
-            choice: Choice::Auto,
+            choice: Choice::Builtin(1),
             external: None,
         };
-        session.detected = catalog::builtin_index(&session.themes, "dark").unwrap();
         assert_eq!(
             session.current().color(Role::LocalEndpoint),
             Color::Rgb(22, 198, 12)
         );
         session.next();
-        assert_eq!(session.choice, Choice::Builtin(0));
+        assert_eq!(session.choice, Choice::Builtin(2));
 
         let path = std::env::temp_dir().join(format!("flowlens-ocean-{}.json", std::process::id()));
         std::fs::write(
@@ -999,7 +934,6 @@ mod tests {
         let external = resolve::load_external(&path, &session.themes).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!(external.color(Role::Title), Color::Rgb(1, 2, 3));
-        assert_eq!(detect_from(None, None, Some("xterm")), "ansi16");
     }
     #[test]
     fn external_complete_copy_and_name_fallbacks_preserve_theme_values() {
@@ -1049,14 +983,6 @@ mod tests {
                 "must not be empty",
             ),
             (
-                vec![catalog::Entry {
-                    id: "auto",
-                    json: "",
-                }],
-                "auto",
-                "reserved for automatic selection",
-            ),
-            (
                 vec![
                     catalog::Entry {
                         id: "dark",
@@ -1075,6 +1001,16 @@ mod tests {
             let error = catalog::builtins_from(&entries).unwrap_err().to_string();
             assert_eq!(error, format!("catalog: id `{value}`: {reason}"));
         }
+    }
+
+    #[test]
+    fn catalog_allows_auto_as_a_builtin_name() {
+        let themes = catalog::builtins_from(&[catalog::Entry {
+            id: "auto",
+            json: include_str!("../../themes/dark.json"),
+        }])
+        .unwrap();
+        assert_eq!(catalog::builtin_index(&themes, "auto"), Some(0));
     }
 
     #[test]

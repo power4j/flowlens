@@ -249,11 +249,11 @@ impl AppState {
 #[cfg(test)]
 impl AppState {
     pub(super) fn for_test() -> Self {
-        Self::new(ThemeSession::auto_for_test())
+        Self::new(ThemeSession::signal_deck_for_test())
     }
 
     pub(super) fn startup_for_test(interfaces: &[InterfaceInfo]) -> Self {
-        Self::startup(interfaces, ThemeSession::auto_for_test())
+        Self::startup(interfaces, ThemeSession::signal_deck_for_test())
     }
 }
 
