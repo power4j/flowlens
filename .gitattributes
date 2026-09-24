@@ -29,6 +29,7 @@ debian/** text eol=lf
 *.rules text eol=lf
 
 # Text documentation and data files.
+LICENSE text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
 *.json text eol=lf
