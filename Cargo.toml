@@ -1,6 +1,6 @@
 [package]
 name = "flowlens"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["power4j <power4j@outlook.com>"]
 edition = "2024"
 rust-version = "1.96"
