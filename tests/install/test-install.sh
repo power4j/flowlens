@@ -6,6 +6,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INSTALL_SH="${ROOT}/install.sh"
 FIXTURES="${ROOT}/tests/install/fixtures"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/flowlens-install-test.XXXXXX")"
+WORKDIR="$(cd "${WORKDIR}" && pwd)"
+FIXTURE_MV="$(command -v mv)"
+export FIXTURE_MV
 PASS=0
 FAIL=0
 SERVER_PID=""
@@ -43,7 +46,7 @@ assert_contains() {
   local name="$3"
   case "${haystack}" in
     *"${needle}"*) pass "${name}" ;;
-    *) fail "${name}: missing '${needle}'" ;;
+    *) fail "${name}: missing '${needle}'"; printf '%s\n' "${haystack}" ;;
   esac
 }
 
@@ -540,13 +543,14 @@ case "$dest" in
     exit 1
     ;;
 esac
-/usr/bin/mv "$@"
+"${FIXTURE_MV}" "$@"
 EOF
   chmod +x "${WORKDIR}/bin/mv"
   out="${WORKDIR}/rb.out"
   status="$(run_installer "${out}" "${WORKDIR}/install.sh" --force --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
   rm -f "${WORKDIR}/bin/mv"
   assert_eq "${status}" "1" "manifest publish failure exits 1"
+  assert_contains "$(cat "${out}")" "failed to publish manifest" "failure reaches manifest publication"
   assert_eq "$(cat "${WORKDIR}/opt/bin/flowlens")" "${old}" "manifest publish failure restores binary"
 }
 
@@ -597,7 +601,7 @@ test_system_sudo_n_fails_closed() {
 }
 
 test_system_scope_and_manifest_publication() {
-  local out status
+  local out status old_binary old_manifest
   local TEST_HOME="${WORKDIR}/system-home"
   mkdir -p "${TEST_HOME}"
   : > "${FIXTURE_SUDO_LOG}"
@@ -615,25 +619,34 @@ test_system_scope_and_manifest_publication() {
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/install-manifest ${SYSTEM_MANIFEST}/install-manifest.new." "manifest is staged then copied with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n chmod 0644 ${SYSTEM_MANIFEST}/install-manifest.new." "manifest permissions are set with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n mv -f ${SYSTEM_MANIFEST}/install-manifest.new." "manifest publication uses privileged atomic rename"
+  old_binary="$(cat "${SYSTEM_BIN}/flowlens")"
+  old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
+  mkdir -p "${WORKDIR}/pack-update" "${WORKDIR}/www/v0.3.5"
+  printf '%s\n' '#!/bin/sh' 'echo flowlens-updated-fixture' > "${WORKDIR}/pack-update/flowlens"
+  tar -C "${WORKDIR}/pack-update" -czf "${WORKDIR}/www/v0.3.5/flowlens-v0.3.5-linux-x86_64.tar.gz" flowlens
+  write_sums_for "${WORKDIR}/www/v0.3.5/flowlens-v0.3.5-linux-x86_64.tar.gz" v0.3.5
   # Model a protected system manifest directory even on hosts without Unix permissions.
   cat > "${WORKDIR}/bin/mv" <<'EOF'
 #!/bin/sh
 case "$*" in
   *install-manifest.new.*) exit 1 ;;
 esac
-/usr/bin/mv "$@"
+"${FIXTURE_MV}" "$@"
 EOF
   chmod +x "${WORKDIR}/bin/mv"
   : > "${FIXTURE_SUDO_LOG}"
-  status="$(FIXTURE_MANIFEST_WRITABLE=0 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  status="$(FIXTURE_MANIFEST_WRITABLE=0 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.5)"
   rm -f "${WORKDIR}/bin/mv"
   assert_eq "${status}" "1" "privileged manifest publication failure exits 1"
+  assert_contains "$(cat "${out}")" "failed to publish manifest" "privileged failure reaches manifest publication"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n cp -p ${SYSTEM_BIN}/flowlens" "binary rollback snapshot preserves ownership and mode with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n cp -p ${SYSTEM_MANIFEST}/install-manifest" "manifest rollback snapshot preserves ownership and mode with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/rollback-binary ${SYSTEM_BIN}/flowlens" "privileged rollback restores binary"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/rollback-manifest ${SYSTEM_MANIFEST}/install-manifest" "privileged rollback restores manifest"
   assert_file "${SYSTEM_BIN}/flowlens" "privileged rollback retains installed binary"
   assert_file "${SYSTEM_MANIFEST}/install-manifest" "privileged rollback retains installed manifest"
+  assert_eq "$(cat "${SYSTEM_BIN}/flowlens")" "${old_binary}" "privileged rollback restores original binary content after upgrade"
+  assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "privileged rollback restores original manifest content after upgrade"
   status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
   assert_eq "${status}" "0" "default uninstall exits 0"
   assert_not_file "${SYSTEM_BIN}/flowlens" "default uninstall removes system binary"
