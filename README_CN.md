@@ -63,10 +63,10 @@ FlowLens 支持 Linux `x86_64`/`aarch64`、Windows `x86_64`/`aarch64` 和 macOS 
 
 ## 安装
 
-Linux `x86_64` 和 `aarch64` 可以使用安装脚本。默认命令安装最新稳定版到 `~/.local/bin`，并在当前 Bash 或 Zsh 可识别时维护 PATH：
+Linux `x86_64` 和 `aarch64` 可以使用安装脚本。默认命令安装最新稳定版到 `/usr/local/bin`，安装清单位于 `/usr/local/share/flowlens`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | sudo bash
 ```
 
 也可以先下载脚本审查，再安装指定版本：
@@ -74,14 +74,40 @@ curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
 less install.sh
-bash install.sh --version v0.3.0
+sudo bash install.sh --version v0.3.0
 ```
 
 管道传参示例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash -s -- --version v0.3.0
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | sudo bash -s -- --version v0.3.0
 ```
+
+不使用 sudo，显式传入 `--user` 可保留原来的 `~/.local/bin` 安装方式，并在需要时配置 Bash 或 Zsh 的 PATH：
+
+```bash
+bash install.sh --user
+sudo "$HOME/.local/bin/flowlens"
+```
+
+修改当前 shell 的 PATH 不会改变 sudo 的命令搜索路径；用户安装应使用上面的绝对路径启动。`--system` 显式选择默认的系统安装范围，不能与 `--user` 或自定义目录同时使用。单独指定 `--install-dir DIR` 或 `FLOWLENS_INSTALL_DIR` 仍保留自定义目录行为，安装清单位于用户目录 `~/.local/share/flowlens`；命令行目录优先于环境变量。安装器内部仅尝试非交互式 `sudo -n`。系统目录不可写时，它会报错并提示使用 sudo 运行脚本或选择 `--user`，不会自动询问密码，也不会回退到用户安装。
+
+卸载安装器管理的系统版本，使用 `sudo bash install.sh --uninstall`。卸载用户版本，必须由原用户执行 `bash install.sh --user --uninstall`，不要加 sudo。自定义安装需传入安装时使用的目录参数或环境变量。
+
+从现有用户安装迁移时，先下载新版脚本，确认系统版本可用后再清理旧版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
+sudo bash install.sh
+sudo /usr/local/bin/flowlens --version
+sudo /usr/local/bin/flowlens
+# 确认成功启动后退出 FlowLens，再由原用户执行，不要加 sudo：
+bash install.sh --user --uninstall
+# 重新打开 shell，确认以下命令解析到 /usr/local/bin/flowlens：
+command -v flowlens
+```
+
+系统安装会保留原有的 `~/.local/bin/flowlens`，并提示它可能在 shell 中优先于系统版本被找到。上述清理命令仅适用于安装器管理的旧版本；手动安装的旧版本应在验证系统版本后自行检查并清理。
 
 安装器需要 Bash 3.2+、`curl`、`tar`，以及 `sha256sum` 或 `shasum`。它不会自动安装 `libpcap`。安装器仅支持 Linux，并会拒绝在 macOS 上安装。Windows 和实验性 macOS 构建使用下面的压缩包。
 
@@ -99,14 +125,18 @@ sudo apt install libpcap0.8
 sudo dnf install libpcap
 ```
 
-以 root 身份运行 FlowLens，或者为可执行文件授予 `CAP_NET_RAW`：
+系统安装后，以 root 身份运行 FlowLens，或者为可执行文件授予 `CAP_NET_RAW`：
 
 ```bash
-sudo ./flowlens
+sudo flowlens
+# 如果 sudo 找不到命令，或找到了其他版本：
+sudo /usr/local/bin/flowlens
 # 或
-sudo setcap cap_net_raw+ep ./flowlens
-./flowlens
+sudo setcap cap_net_raw+ep /usr/local/bin/flowlens
+/usr/local/bin/flowlens
 ```
+
+手动解压压缩包时，在解压目录执行 `sudo ./flowlens`。
 
 ### Windows
 
@@ -123,6 +153,8 @@ macOS 二进制文件未签名且未经公证，因此 macOS 可能阻止运行�
 两个架构均在 GitHub 托管的原生 macOS runner 上构建，并通过 `file`、`otool`、`flowlens --help` 和 `flowlens --version` 基础检查。由于缺少完整的 macOS 运行验证环境，真实抓包、权限、网卡行为、进程归属、长时间稳定性、性能和最低支持的 macOS 版本尚未完成充分测试。
 
 ## 使用
+
+以下示例使用手动解压的 `./flowlens`。Linux 脚本安装后，请将 `./flowlens` 替换为 `sudo flowlens`，用户安装则使用上文所示的绝对路径命令。
 
 不指定网卡，直接启动前台 TUI：
 

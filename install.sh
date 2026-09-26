@@ -20,12 +20,13 @@ Usage:
 Options:
   --version VERSION      Install an exact version, for example v0.3.0
   --install-dir DIR      Install into DIR
-  --system               Install into /usr/local/bin
+  --system               Install into /usr/local/bin (default)
+  --user                 Install into ~/.local/bin
   --force                Allow overwrite or downgrade of installer-owned files
   --dry-run              Report actions without committing an install
   --no-modify-path       Do not modify shell PATH files
   --setcap               Set CAP_NET_RAW on Linux after install
-  --uninstall            Remove an installer-owned install
+  --uninstall            Remove an installer-owned install (system by default)
   --help                 Show this help and exit
 EOF
 }
@@ -452,10 +453,10 @@ fail_http() {
 
 cleanup() {
   if [ -n "${TMP_BIN:-}" ] && [ -f "${TMP_BIN}" ]; then
-    rm -f "${TMP_BIN}"
+    priv rm -f "${TMP_BIN}"
   fi
   if [ -n "${TMP_MANIFEST:-}" ] && [ -f "${TMP_MANIFEST}" ]; then
-    rm -f "${TMP_MANIFEST}"
+    priv rm -f "${TMP_MANIFEST}"
   fi
   if [ -n "${TMP_PATH_FILE:-}" ] && [ -f "${TMP_PATH_FILE}" ]; then
     rm -f "${TMP_PATH_FILE}"
@@ -474,6 +475,7 @@ priv() {
 }
 
 prepare_privileges() {
+  local hint
   USE_SUDO=0
   if [ "${WANT_SYSTEM}" -ne 1 ]; then
     return
@@ -481,14 +483,19 @@ prepare_privileges() {
   if [ "$(id -u)" -eq 0 ]; then
     return
   fi
-  if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ]; then
+  if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ] && \
+     [ -d "${MANIFEST_DIR}" ] && [ -w "${MANIFEST_DIR}" ]; then
     return
   fi
+  hint="run sudo bash install.sh, or use --user for a per-user install"
+  if [ "${WANT_UNINSTALL}" -eq 1 ]; then
+    hint="run sudo bash install.sh --uninstall, or run bash install.sh --user --uninstall as the original user without sudo"
+  fi
   if ! command -v sudo >/dev/null 2>&1; then
-    die 6 "system install needs write access to ${INSTALL_DIR}"
+    die 6 "system operation needs write access to ${INSTALL_DIR} and ${MANIFEST_DIR}; ${hint}"
   fi
   if ! sudo -n true >/dev/null 2>&1; then
-    die 6 "system install needs write access to ${INSTALL_DIR}; sudo -n failed"
+    die 6 "system operation needs write access to ${INSTALL_DIR} and ${MANIFEST_DIR}; sudo -n failed; ${hint}"
   fi
   USE_SUDO=1
 }
@@ -525,6 +532,7 @@ parse_args() {
   WANT_HELP=0
   WANT_UNINSTALL=0
   WANT_SYSTEM=0
+  WANT_USER=0
   WANT_FORCE=0
   WANT_DRY_RUN=0
   WANT_NO_MODIFY_PATH=0
@@ -536,6 +544,7 @@ parse_args() {
       --help) WANT_HELP=1; shift ;;
       --uninstall) WANT_UNINSTALL=1; shift ;;
       --system) WANT_SYSTEM=1; shift ;;
+      --user) WANT_USER=1; shift ;;
       --force) WANT_FORCE=1; shift ;;
       --dry-run) WANT_DRY_RUN=1; shift ;;
       --no-modify-path) WANT_NO_MODIFY_PATH=1; shift ;;
@@ -580,6 +589,9 @@ apply_env() {
 }
 
 validate_args() {
+  if [ "${WANT_SYSTEM}" -eq 1 ] && [ "${WANT_USER}" -eq 1 ]; then
+    die 2 "--system cannot be combined with --user"
+  fi
   if [ "${WANT_UNINSTALL}" -eq 1 ]; then
     if [ -n "${ARG_VERSION}" ] || [ -n "${FLOWLENS_VERSION:-}" ]; then
       die 2 "--uninstall cannot be combined with --version or FLOWLENS_VERSION"
@@ -607,6 +619,9 @@ validate_args() {
 resolve_dirs() {
   HOME_DIR="${HOME}"
   [ -n "${HOME_DIR}" ] || die 1 "HOME is not set"
+  if [ "${WANT_USER}" -eq 0 ] && [ -z "${ARG_INSTALL_DIR}" ]; then
+    WANT_SYSTEM=1
+  fi
   if [ "${WANT_SYSTEM}" -eq 1 ]; then
     INSTALL_DIR="/usr/local/bin"
     MANIFEST_DIR="/usr/local/share/flowlens"
@@ -617,8 +632,50 @@ resolve_dirs() {
     INSTALL_DIR="${HOME_DIR}/.local/bin"
     MANIFEST_DIR="${HOME_DIR}/.local/share/flowlens"
   fi
+  case "${INSTALL_DIR}" in
+    /*) ;;
+    *) INSTALL_DIR="$(pwd)/${INSTALL_DIR}" ;;
+  esac
   BINARY_PATH="${INSTALL_DIR}/flowlens"
   MANIFEST_PATH="${MANIFEST_DIR}/install-manifest"
+}
+
+quote_path() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+warn_user_install() {
+  local caller_home account old_binary old_manifest
+  [ "${WANT_SYSTEM}" -eq 1 ] || return 0
+  caller_home="${HOME_DIR}"
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ -n "${SUDO_UID:-}" ]; then
+    if command -v getent >/dev/null 2>&1; then
+      account="$(getent passwd "${SUDO_USER}" 2>/dev/null || true)"
+    else
+      account="$(awk -F: -v user="${SUDO_USER}" '$1 == user { print; exit }' /etc/passwd)"
+    fi
+    caller_home="$(printf '%s\n' "${account}" | awk -F: -v user="${SUDO_USER}" -v uid="${SUDO_UID}" \
+      '$1 == user && $3 == uid && $6 ~ /^\// { print $6; exit }')"
+    if [ -z "${caller_home}" ]; then
+      log "Warning: could not resolve the sudo caller's home; check their ~/.local/bin/flowlens for a command that may shadow ${BINARY_PATH}."
+      return
+    fi
+  fi
+  old_binary="${caller_home}/.local/bin/flowlens"
+  old_manifest="${caller_home}/.local/share/flowlens/install-manifest"
+  [ -e "${old_binary}" ] || [ -L "${old_binary}" ] || return 0
+  log "Warning: ${old_binary} may shadow ${BINARY_PATH}; the old file is left unchanged."
+  if [ -f "${old_binary}" ] && [ ! -L "${old_binary}" ] && \
+     [ -f "${old_manifest}" ] && [ ! -L "${old_manifest}" ] && \
+     validate_manifest_file "${old_manifest}" && [ "${MF_BINARY_PATH}" = "${old_binary}" ] && \
+     [ "$(sha256_file "${old_binary}")" = "${MF_DIGEST}" ]; then
+    log "After verifying sudo $(quote_path "${BINARY_PATH}") --version and launching sudo $(quote_path "${BINARY_PATH}"), remove the installer-managed user copy with the downloaded new script:"
+    log "  bash install.sh --user --uninstall"
+    log "Run that cleanup as the original user, without sudo."
+  else
+    log "The old file has no matching installer manifest; review and remove it manually as the original user when ready."
+  fi
+  log "After cleanup, reopen the shell and run command -v flowlens to confirm command resolution."
 }
 
 choose_path_file() {
@@ -871,16 +928,24 @@ preflight_install() {
 
 print_post_install_notes() {
   local path_updated="$1"
+  local quoted_binary
+  quoted_binary="$(quote_path "${BINARY_PATH}")"
   if [ "${PLATFORM}" = "linux" ]; then
     log "Linux binaries require glibc 2.28 or newer."
     log "libpcap is required at runtime; this installer does not install it."
     if [ "${WANT_SETCAP}" -eq 1 ]; then
       log "Capture requires root or CAP_NET_RAW."
     else
-      log "Capture requires root or CAP_NET_RAW. Re-run with --setcap, or: sudo setcap cap_net_raw+ep ${BINARY_PATH}"
+      log "Capture requires root or CAP_NET_RAW. Re-run with --setcap, or: sudo setcap cap_net_raw+ep ${quoted_binary}"
     fi
   fi
-  if [ "${WANT_NO_MODIFY_PATH}" -eq 1 ]; then
+  if [ "${WANT_SYSTEM}" -eq 1 ]; then
+    log "Start capture with sudo flowlens. If sudo cannot find it, or another copy is selected, run: sudo ${quoted_binary}"
+  else
+    log "Start capture with: sudo ${quoted_binary}"
+    log "Your shell PATH does not control sudo's command search path."
+  fi
+  if [ "${WANT_SYSTEM}" -eq 0 ] && [ "${WANT_NO_MODIFY_PATH}" -eq 1 ]; then
     log "PATH was not modified. Add ${INSTALL_DIR} to PATH to run flowlens."
   elif [ "${path_updated}" = "1" ]; then
     log "Restart the shell, or source ${PATH_FILE}, to use the flowlens command."
@@ -918,7 +983,9 @@ commit_install() {
   tmp_manifest="${TMP_MANIFEST}"
   priv cp "${TMP_DIR}/extract/flowlens" "${tmp_bin}"
   priv chmod 0755 "${tmp_bin}"
-  write_manifest_file "${tmp_manifest}" "${VERSION}" "${NEW_DIGEST}" "${path_file_out}" "${setcap_val}"
+  write_manifest_file "${TMP_DIR}/install-manifest" "${VERSION}" "${NEW_DIGEST}" "${path_file_out}" "${setcap_val}"
+  priv cp "${TMP_DIR}/install-manifest" "${tmp_manifest}"
+  priv chmod 0644 "${tmp_manifest}"
   if [ -n "${path_file_out}" ]; then
     TMP_PATH_FILE="${path_file_out}.flowlens.new.$$"
     tmp_path="${TMP_PATH_FILE}"
@@ -927,10 +994,10 @@ commit_install() {
     tmp_path=""
   fi
   if [ -f "${BINARY_PATH}" ]; then
-    cp "${BINARY_PATH}" "${TMP_DIR}/rollback-binary" || die 1 "failed to snapshot existing binary"
+    priv cp -p "${BINARY_PATH}" "${TMP_DIR}/rollback-binary" || die 1 "failed to snapshot existing binary"
   fi
   if [ -f "${MANIFEST_PATH}" ]; then
-    cp "${MANIFEST_PATH}" "${TMP_DIR}/rollback-manifest" || die 1 "failed to snapshot existing manifest"
+    priv cp -p "${MANIFEST_PATH}" "${TMP_DIR}/rollback-manifest" || die 1 "failed to snapshot existing manifest"
   fi
   if [ -n "${path_file_out}" ] && [ -f "${path_file_out}" ]; then
     cp "${path_file_out}" "${TMP_DIR}/rollback-path" || die 1 "failed to snapshot PATH file"
@@ -972,6 +1039,7 @@ do_install() {
   [ "${PLATFORM}" != "macos" ] || die 3 "macOS Release archives are experimental; download and inspect them manually"
   resolve_dirs
   prepare_privileges
+  warn_user_install
   fetch_version
   download_assets
   extract_asset

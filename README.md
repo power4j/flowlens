@@ -63,10 +63,10 @@ FlowLens supports Linux `x86_64`/`aarch64`, Windows `x86_64`/`aarch64`, and macO
 
 ## Install
 
-Linux `x86_64` and `aarch64` can use the installer script. The default command installs the latest stable Release into `~/.local/bin` and updates the current Bash or Zsh PATH when needed:
+Linux `x86_64` and `aarch64` can use the installer script. The default command installs the latest stable Release into `/usr/local/bin`, with an installer manifest under `/usr/local/share/flowlens`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | sudo bash
 ```
 
 Pin a reviewed script and an exact version:
@@ -74,14 +74,40 @@ Pin a reviewed script and an exact version:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
 less install.sh
-bash install.sh --version v0.3.0
+sudo bash install.sh --version v0.3.0
 ```
 
-Pipe additional installer arguments with `bash -s --`:
+Pipe additional installer arguments with `sudo bash -s --`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | bash -s -- --version v0.3.0
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | sudo bash -s -- --version v0.3.0
 ```
+
+Use `--user` without sudo for the previous `~/.local/bin` installation behavior, including Bash or Zsh PATH setup when needed:
+
+```bash
+bash install.sh --user
+sudo "$HOME/.local/bin/flowlens"
+```
+
+Updating your shell PATH does not change sudo's command search path; use the absolute path above for a user installation. `--system` explicitly selects the default system scope and cannot be combined with `--user` or a custom directory. A standalone `--install-dir DIR` or `FLOWLENS_INSTALL_DIR` keeps the custom directory behavior and user manifest location (`~/.local/share/flowlens`); the command-line directory takes precedence over the environment variable. The installer only attempts noninteractive `sudo -n` internally. If it cannot write the system directories, it fails with directions to run the script with sudo or choose `--user`; it does not prompt for a password or fall back to a user installation.
+
+Uninstall an installer-managed system copy with `sudo bash install.sh --uninstall`. To uninstall a user copy, run `bash install.sh --user --uninstall` as the original user, without sudo. Custom installations require the same directory option or environment variable used to install them.
+
+To migrate an existing user installation, download the new script and verify the system copy before removing the old one:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
+sudo bash install.sh
+sudo /usr/local/bin/flowlens --version
+sudo /usr/local/bin/flowlens
+# After successful startup, exit FlowLens, then run as the original user without sudo:
+bash install.sh --user --uninstall
+# Reopen your shell, then confirm that this resolves to /usr/local/bin/flowlens:
+command -v flowlens
+```
+
+System installation leaves an old `~/.local/bin/flowlens` in place and warns that it may take precedence in your shell. The cleanup command above applies only to installer-managed copies; review and remove unmanaged copies manually after verifying the system installation.
 
 The installer requires Bash 3.2+, `curl`, `tar`, and `sha256sum` or `shasum`. It does not install `libpcap`. The installer supports Linux only and rejects macOS. Windows and experimental macOS builds use the archives below.
 
@@ -99,14 +125,18 @@ sudo apt install libpcap0.8
 sudo dnf install libpcap
 ```
 
-Run FlowLens as root, or grant the executable `CAP_NET_RAW`:
+For a system installation, run FlowLens as root, or grant the executable `CAP_NET_RAW`:
 
 ```bash
-sudo ./flowlens
+sudo flowlens
+# If sudo cannot find it, or another copy is selected:
+sudo /usr/local/bin/flowlens
 # or
-sudo setcap cap_net_raw+ep ./flowlens
-./flowlens
+sudo setcap cap_net_raw+ep /usr/local/bin/flowlens
+/usr/local/bin/flowlens
 ```
+
+For a manually extracted archive, use `sudo ./flowlens` from the extraction directory.
 
 ### Windows
 
@@ -123,6 +153,8 @@ The macOS binary is unsigned and unnotarized, so macOS may block or warn about i
 Both architectures are built on native GitHub-hosted macOS runners and checked with `file`, `otool`, `flowlens --help`, and `flowlens --version`. A complete macOS runtime validation environment is not available, so real packet capture, permissions, interface behavior, process attribution, long-running stability, performance, and the minimum supported macOS version have not been fully tested.
 
 ## Usage
+
+These examples use a manually extracted `./flowlens` binary. For a Linux script installation, replace `./flowlens` with `sudo flowlens`, or the absolute user-install command shown above.
 
 Start the foreground TUI without selecting an interface:
 

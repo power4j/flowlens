@@ -179,8 +179,15 @@ stop_server() {
 }
 
 make_test_installer() {
+  SYSTEM_BIN="${WORKDIR}/system/bin"
+  SYSTEM_MANIFEST="${WORKDIR}/system/share/flowlens"
+  # Keep shell expressions literal in the fixture's permission check.
+  # shellcheck disable=SC2016
   sed -e "s#https://api.github.com#http://127.0.0.1:${SERVER_PORT}#g" \
       -e "s#https://github.com#http://127.0.0.1:${SERVER_PORT}#g" \
+      -e "s#/usr/local/bin#${SYSTEM_BIN}#g" \
+      -e "s#/usr/local/share/flowlens#${SYSTEM_MANIFEST}#g" \
+      -e 's/\[ -w "${MANIFEST_DIR}" \]/[ "${FIXTURE_MANIFEST_WRITABLE:-1}" -eq 1 ] \&\& [ -w "${MANIFEST_DIR}" ]/' \
       "${INSTALL_SH}" > "${WORKDIR}/install.sh"
 }
 
@@ -289,6 +296,12 @@ test_conflicting_dir_flags_exit_2() {
   out="${WORKDIR}/conflict.out"
   status="$(run_installer "${out}" "${INSTALL_SH}" --system --install-dir "${WORKDIR}/bin-install")"
   assert_eq "${status}" "2" "--system with --install-dir exits 2"
+  status="$(FLOWLENS_INSTALL_DIR="${WORKDIR}/env-bin" run_installer "${out}" "${INSTALL_SH}" --system)"
+  assert_eq "${status}" "2" "--system with FLOWLENS_INSTALL_DIR exits 2"
+  status="$(run_installer "${out}" "${INSTALL_SH}" --user --system)"
+  assert_eq "${status}" "2" "--user --system exits 2"
+  status="$(run_installer "${out}" "${INSTALL_SH}" --system --user --uninstall)"
+  assert_eq "${status}" "2" "--system --user --uninstall exits 2"
 }
 
 test_uninstall_rejects_version() {
@@ -537,25 +550,193 @@ EOF
   assert_eq "$(cat "${WORKDIR}/opt/bin/flowlens")" "${old}" "manifest publish failure restores binary"
 }
 
-test_system_sudo_n_fails_closed() {
-  local out status
-  if [ -w /usr/local/bin ]; then
-    pass "--system sudo -n skipped because /usr/local/bin is writable"
-    return
-  fi
-  cat > "${WORKDIR}/bin/sudo" <<'EOF'
+install_fake_privileges() {
+  cat > "${WORKDIR}/bin/id" <<'EOF'
 #!/bin/sh
-if [ "$1" = "-n" ]; then
-  exit 1
-fi
-sleep 30
+if [ "$1" = "-u" ]; then printf '%s\n' "${FIXTURE_UID:-1001}"; exit 0; fi
 exit 1
 EOF
-  chmod +x "${WORKDIR}/bin/sudo"
+  cat > "${WORKDIR}/bin/sudo" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${FIXTURE_SUDO_LOG}"
+[ "$1" = "-n" ] || exit 99
+[ "${FIXTURE_SUDO_FAIL:-0}" -eq 0 ] || exit 1
+shift
+"$@"
+EOF
+  chmod +x "${WORKDIR}/bin/id" "${WORKDIR}/bin/sudo"
+  FIXTURE_SUDO_LOG="${WORKDIR}/sudo.log"
+  export FIXTURE_SUDO_LOG
+  : > "${FIXTURE_SUDO_LOG}"
+}
+
+test_system_sudo_n_fails_closed() {
+  local out status scope
+  install_fake_privileges
+  # A writable binary directory must not hide a manifest directory that needs sudo.
+  mkdir -p "${SYSTEM_BIN}"
   out="${WORKDIR}/system.out"
+  for scope in default explicit; do
+    if [ "${scope}" = default ]; then
+      status="$(FIXTURE_SUDO_FAIL=1 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+    else
+      status="$(FIXTURE_SUDO_FAIL=1 run_installer "${out}" "${WORKDIR}/install.sh" --system --version v0.3.0)"
+    fi
+    assert_eq "${status}" "6" "${scope} system install without sudo -n exits 6"
+    assert_contains "$(cat "${out}")" "sudo -n failed" "${scope} system install explains noninteractive failure"
+    assert_contains "$(cat "${out}")" "sudo bash install.sh" "${scope} system install gives sudo direction"
+    assert_contains "$(cat "${out}")" "--user" "${scope} system install gives user direction"
+  done
+  assert_eq "$(cat "${FIXTURE_SUDO_LOG}")" "$(printf '%s\n' '-n true' '-n true')" "sudo is only called noninteractively"
+  assert_not_file "${SYSTEM_BIN}/flowlens" "sudo failure does not install system binary"
+  assert_not_file "${TEST_HOME}/.local/bin/flowlens" "sudo failure does not fall back to user install"
+  status="$(FIXTURE_SUDO_FAIL=1 run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "6" "default uninstall requires system privileges"
+  assert_contains "$(cat "${out}")" "sudo bash install.sh --uninstall" "uninstall privilege failure gives system command"
+  assert_contains "$(cat "${out}")" "original user without sudo" "uninstall privilege failure gives user direction"
+}
+
+test_system_scope_and_manifest_publication() {
+  local out status
+  local TEST_HOME="${WORKDIR}/system-home"
+  mkdir -p "${TEST_HOME}"
+  : > "${FIXTURE_SUDO_LOG}"
+  out="${WORKDIR}/system-install.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  assert_eq "${status}" "0" "default system install exits 0"
+  assert_file "${SYSTEM_BIN}/flowlens" "default install writes system binary"
+  assert_file "${SYSTEM_MANIFEST}/install-manifest" "default install writes system manifest"
+  assert_not_file "${TEST_HOME}/.local/bin/flowlens" "default install does not write user binary"
+  assert_not_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "default install does not write user manifest"
+  assert_not_file "${TEST_HOME}/.bashrc" "system install does not modify shell PATH"
+  assert_contains "$(cat "${out}")" "sudo flowlens" "system launch hint gives command"
+  assert_contains "$(cat "${out}")" "sudo '${SYSTEM_BIN}/flowlens'" "system launch hint gives absolute fallback"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "binary_path=${SYSTEM_BIN}/flowlens" "system manifest records system binary"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/install-manifest ${SYSTEM_MANIFEST}/install-manifest.new." "manifest is staged then copied with privileges"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n chmod 0644 ${SYSTEM_MANIFEST}/install-manifest.new." "manifest permissions are set with privileges"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n mv -f ${SYSTEM_MANIFEST}/install-manifest.new." "manifest publication uses privileged atomic rename"
+  # Model a protected system manifest directory even on hosts without Unix permissions.
+  cat > "${WORKDIR}/bin/mv" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *install-manifest.new.*) exit 1 ;;
+esac
+/usr/bin/mv "$@"
+EOF
+  chmod +x "${WORKDIR}/bin/mv"
+  : > "${FIXTURE_SUDO_LOG}"
+  status="$(FIXTURE_MANIFEST_WRITABLE=0 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  rm -f "${WORKDIR}/bin/mv"
+  assert_eq "${status}" "1" "privileged manifest publication failure exits 1"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n cp -p ${SYSTEM_BIN}/flowlens" "binary rollback snapshot preserves ownership and mode with privileges"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n cp -p ${SYSTEM_MANIFEST}/install-manifest" "manifest rollback snapshot preserves ownership and mode with privileges"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/rollback-binary ${SYSTEM_BIN}/flowlens" "privileged rollback restores binary"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/rollback-manifest ${SYSTEM_MANIFEST}/install-manifest" "privileged rollback restores manifest"
+  assert_file "${SYSTEM_BIN}/flowlens" "privileged rollback retains installed binary"
+  assert_file "${SYSTEM_MANIFEST}/install-manifest" "privileged rollback retains installed manifest"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "default uninstall exits 0"
+  assert_not_file "${SYSTEM_BIN}/flowlens" "default uninstall removes system binary"
+  assert_not_file "${SYSTEM_MANIFEST}/install-manifest" "default uninstall removes system manifest"
   status="$(run_installer "${out}" "${WORKDIR}/install.sh" --system --version v0.3.0)"
-  rm -f "${WORKDIR}/bin/sudo"
-  assert_eq "${status}" "6" "--system without sudo -n exits 6"
+  assert_eq "${status}" "0" "explicit --system install exits 0"
+  assert_file "${SYSTEM_BIN}/flowlens" "explicit --system writes system binary"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --system --uninstall)"
+  assert_eq "${status}" "0" "explicit --system uninstall exits 0"
+  assert_not_file "${SYSTEM_BIN}/flowlens" "explicit --system uninstall removes system binary"
+}
+
+test_user_scope_and_custom_dirs() {
+  local out status
+  local TEST_HOME="${WORKDIR}/user home"
+  mkdir -p "${TEST_HOME}"
+  out="${WORKDIR}/user-install.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --user --version v0.3.0)"
+  assert_eq "${status}" "0" "--user install exits 0"
+  assert_file "${TEST_HOME}/.local/bin/flowlens" "--user writes user binary"
+  assert_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "--user writes user manifest"
+  assert_contains "$(cat "${TEST_HOME}/.bashrc")" "flowlens installer" "--user updates shell PATH"
+  assert_contains "$(cat "${out}")" "sudo '${TEST_HOME}/.local/bin/flowlens'" "user launch hint quotes absolute path with spaces"
+  assert_contains "$(cat "${out}")" "does not control sudo" "user launch hint distinguishes sudo PATH"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "default uninstall with only a user copy exits 0"
+  assert_file "${TEST_HOME}/.local/bin/flowlens" "default uninstall retains user copy"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --user --uninstall)"
+  assert_eq "${status}" "0" "--user uninstall exits 0"
+  assert_not_file "${TEST_HOME}/.local/bin/flowlens" "--user uninstall removes user binary"
+  assert_not_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "--user uninstall removes user manifest"
+  assert_not_contains "$(cat "${TEST_HOME}/.bashrc")" "flowlens installer" "--user uninstall removes managed PATH block"
+  status="$(FLOWLENS_INSTALL_DIR="${WORKDIR}/env-bin" run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  assert_eq "${status}" "0" "standalone environment directory install exits 0"
+  assert_file "${WORKDIR}/env-bin/flowlens" "environment directory overrides implicit system default"
+  assert_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "custom directory keeps user manifest"
+  status="$(FLOWLENS_INSTALL_DIR="${WORKDIR}/env-bin" run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "environment directory uninstall exits 0"
+  assert_not_file "${WORKDIR}/env-bin/flowlens" "environment directory uninstall removes custom binary"
+  status="$(FLOWLENS_INSTALL_DIR="${WORKDIR}/env-bin" run_installer "${out}" "${WORKDIR}/install.sh" --install-dir "${WORKDIR}/cli-bin" --dry-run --version v0.3.0)"
+  assert_eq "${status}" "0" "custom CLI directory with environment override exits 0"
+  assert_contains "$(cat "${out}")" "to ${WORKDIR}/cli-bin/flowlens" "CLI directory takes precedence over environment"
+  status="$(FLOWLENS_INSTALL_DIR="${WORKDIR}/env-bin" run_installer "${out}" "${WORKDIR}/install.sh" --user --dry-run --version v0.3.0)"
+  assert_eq "${status}" "0" "--user allows environment directory"
+  assert_contains "$(cat "${out}")" "to ${WORKDIR}/env-bin/flowlens" "--user preserves environment directory"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --user --install-dir "relative bin" --dry-run --version v0.3.0)"
+  assert_eq "${status}" "0" "--user allows custom relative directory"
+  assert_contains "$(cat "${out}")" "sudo '${WORKDIR}/relative bin/flowlens'" "custom relative directory launch hint uses absolute path"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --user --install-dir "${WORKDIR}/user's bin" --dry-run --version v0.3.0)"
+  assert_eq "${status}" "0" "custom directory with apostrophe exits 0"
+  assert_contains "$(cat "${out}")" "sudo '${WORKDIR}/user'\\''s bin/flowlens'" "launch hint safely quotes apostrophe"
+}
+
+test_old_user_install_detection() {
+  local out status old_binary old_manifest old_path
+  local caller_home="${WORKDIR}/caller home"
+  local TEST_HOME="${caller_home}"
+  mkdir -p "${TEST_HOME}" "${WORKDIR}/root-home"
+  out="${WORKDIR}/migration.out"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --user --version v0.3.0)"
+  assert_eq "${status}" "0" "migration fixture installs user copy"
+  old_binary="$(cat "${caller_home}/.local/bin/flowlens")"
+  old_manifest="$(cat "${caller_home}/.local/share/flowlens/install-manifest")"
+  old_path="$(cat "${caller_home}/.bashrc")"
+  cat > "${WORKDIR}/bin/getent" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" > "${WORKDIR}/getent.args"
+printf '%s\n' 'fixture-user:x:1001:1001::${caller_home}:/bin/bash'
+EOF
+  chmod +x "${WORKDIR}/bin/getent"
+  TEST_HOME="${WORKDIR}/root-home"
+  status="$(FIXTURE_UID=0 SUDO_USER=fixture-user SUDO_UID=1001 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  assert_eq "${status}" "0" "sudo caller system install exits 0"
+  assert_eq "$(cat "${WORKDIR}/getent.args")" "passwd fixture-user" "sudo caller home is resolved through account lookup"
+  assert_contains "$(cat "${out}")" "${caller_home}/.local/bin/flowlens may shadow" "warning names original user's copy despite root HOME"
+  assert_contains "$(cat "${out}")" "bash install.sh --user --uninstall" "managed copy warning gives precise cleanup command"
+  assert_contains "$(cat "${out}")" "original user, without sudo" "managed copy cleanup runs without sudo"
+  assert_contains "$(cat "${out}")" "--version and launching sudo" "managed cleanup follows version and launch verification"
+  assert_eq "$(cat "${caller_home}/.local/bin/flowlens")" "${old_binary}" "system install retains old user binary"
+  assert_eq "$(cat "${caller_home}/.local/share/flowlens/install-manifest")" "${old_manifest}" "system install retains old user manifest"
+  assert_eq "$(cat "${caller_home}/.bashrc")" "${old_path}" "system install retains old user PATH block"
+  status="$(FIXTURE_UID=0 SUDO_USER=fixture-user SUDO_UID=9999 run_installer "${out}" "${WORKDIR}/install.sh" --dry-run --version v0.3.0)"
+  assert_eq "${status}" "0" "unresolved sudo caller does not block system install"
+  assert_contains "$(cat "${out}")" "could not resolve the sudo caller's home" "sudo caller account UID must match"
+  assert_not_contains "$(cat "${out}")" "bash install.sh --user --uninstall" "unresolved caller does not receive guessed cleanup command"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "system uninstall after migration fixture exits 0"
+  assert_file "${caller_home}/.local/bin/flowlens" "system uninstall preserves old user copy"
+  TEST_HOME="${caller_home}"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --user --uninstall)"
+  assert_eq "${status}" "0" "original user can clean up managed old copy"
+  printf '#!/bin/sh\ntouch "%s"\n' "${WORKDIR}/old-binary-executed" > "${caller_home}/.local/bin/flowlens"
+  chmod +x "${caller_home}/.local/bin/flowlens"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  assert_eq "${status}" "0" "system install with unmanaged user copy exits 0"
+  assert_contains "$(cat "${out}")" "${caller_home}/.local/bin/flowlens may shadow" "ordinary user install also detects old copy"
+  assert_contains "$(cat "${out}")" "review and remove it manually" "unmanaged old copy gets manual cleanup guidance"
+  assert_not_contains "$(cat "${out}")" "bash install.sh --user --uninstall" "unmanaged copy is not described as uninstallable"
+  assert_file "${caller_home}/.local/bin/flowlens" "unmanaged old binary is retained"
+  assert_not_file "${WORKDIR}/old-binary-executed" "old user binary is never executed"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "system cleanup after unmanaged fixture exits 0"
+  rm -f "${WORKDIR}/bin/getent" "${WORKDIR}/bin/id" "${WORKDIR}/bin/sudo"
 }
 
 main() {
@@ -612,11 +793,20 @@ main() {
     test_setcap_failure_rolls_back
     test_setcap_success_records_manifest
     test_manifest_publish_failure_rolls_back
+  fi
+  if [ "${slice}" = "all" ] || [ "${slice}" = "scope" ]; then
+    if [ "${slice}" = "scope" ]; then
+      prepare_assets
+      install_fake_uname Linux x86_64
+      start_server ok
+      make_test_installer
+    fi
     test_system_sudo_n_fails_closed
+    test_system_scope_and_manifest_publication
+    test_user_scope_and_custom_dirs
+    test_old_user_install_detection
   fi
-  if [ "${slice}" = "all" ] || [ "${slice}" = "http" ] || [ "${slice}" = "fail" ] || [ "${slice}" = "setcap" ]; then
-    stop_server
-  fi
+  stop_server
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
   if [ "${FAIL}" -ne 0 ]; then
     exit 1
