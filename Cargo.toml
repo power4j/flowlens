@@ -12,6 +12,10 @@ readme = "README.md"
 [features]
 tls-eval-observe = []
 
+[[example]]
+name = "tls_runtime_eval"
+required-features = ["tls-eval-observe"]
+
 [dependencies]
 pcap = "2"
 etherparse = "0.21"

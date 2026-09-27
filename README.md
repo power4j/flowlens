@@ -238,3 +238,4 @@ Copyright (C) 2026 power4j. Contact: power4j@outlook.com.
 Releases up to and including v0.7.0 remain licensed under the Apache License 2.0 included with those releases. Individual contribution attribution remains in the Git history.
 
 For development and source-build instructions, see [`docs/development.md`](docs/development.md).
+For offline TLS domain and resource evaluations, see [`docs/tls-evaluation.md`](docs/tls-evaluation.md).

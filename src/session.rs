@@ -179,19 +179,6 @@ impl TrafficSession {
 
     #[cfg(feature = "tls-eval-observe")]
     #[allow(dead_code)]
-    pub(crate) fn begin_activate_with_for_observe<F>(
-        &mut self,
-        selector: &str,
-        start: F,
-    ) -> Result<Activation>
-    where
-        F: FnOnce(&str) -> Result<TrafficPipeline> + Send + 'static,
-    {
-        self.begin_activate_with(selector, start)
-    }
-
-    #[cfg(feature = "tls-eval-observe")]
-    #[allow(dead_code)]
     pub(crate) fn stop_checked_for_observe(&mut self) -> Result<()> {
         if self.pending.is_some() {
             return Err(anyhow!("cannot stop while interface activation is pending"));
