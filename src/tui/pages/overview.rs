@@ -358,6 +358,8 @@ mod tests {
             )]
             .into(),
             process_data_fresh: false,
+            public_sni: Arc::from([]),
+            domain_rows: Arc::from([]),
             diagnostics: None,
         };
         let mut state = AppState::for_test();

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use crate::domain_parse::DomainParser;
+use crate::domain_parse::{DomainParseResult, DomainParser};
 use crate::domain_parse_http::HttpDomainParser;
 use crate::domain_parse_tls::TlsDomainParser;
 
@@ -52,6 +52,20 @@ impl Default for CompositeDomainParser {
 }
 
 impl DomainParser for CompositeDomainParser {
+    fn supports_streams(&self) -> bool {
+        true
+    }
+
+    fn parse_result(&self, payload: &[u8]) -> DomainParseResult {
+        if payload.is_empty() {
+            return DomainParseResult::NeedMore;
+        }
+        if payload[0] == TLS_HANDSHAKE_CONTENT_TYPE {
+            self.tls.parse_result(payload)
+        } else {
+            self.http.parse_result(payload)
+        }
+    }
     fn parse_domain(&self, tcp_payload: &[u8]) -> Option<Arc<str>> {
         if tcp_payload.is_empty() {
             return None;

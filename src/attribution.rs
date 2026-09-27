@@ -157,12 +157,7 @@ impl PendingAttributor {
     ) {
         self.advance(stats, proc_table, now);
         stats.record_interface_flow(&flow, observed_at);
-        stats.record_outbound_domain(
-            flow.domain.as_ref(),
-            flow.direction,
-            flow.bytes,
-            observed_at,
-        );
+        stats.record_flow_domain(&flow, observed_at);
 
         self.record_endpoint(
             stats,
@@ -881,6 +876,7 @@ mod tests {
             }),
             peer_local_socket: None,
             domain: None,
+            domain_event: None,
         }
     }
 
@@ -1392,6 +1388,7 @@ mod tests {
                 local_socket: None,
                 peer_local_socket: None,
                 domain: None,
+                domain_event: None,
             },
             &proc_table,
             started,
@@ -1694,6 +1691,7 @@ mod tests {
                 local_socket: None,
                 peer_local_socket: None,
                 domain: None,
+                domain_event: None,
             },
             &proc_table,
             Instant::now(),
@@ -1733,6 +1731,7 @@ mod tests {
                 }),
                 peer_local_socket: None,
                 domain: None,
+                domain_event: None,
             },
             &proc_table,
             Instant::now(),
@@ -1934,6 +1933,7 @@ mod tests {
                     protocol: TransportProtocol::Tcp,
                 }),
                 domain: None,
+                domain_event: None,
             },
             &proc_table,
             Instant::now(),

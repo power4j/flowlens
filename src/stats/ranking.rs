@@ -162,8 +162,26 @@ pub(crate) struct RankingEntityWindow {
 }
 
 impl RankingEntityWindow {
+    #[cfg(feature = "tls-eval-observe")]
+    #[allow(dead_code)]
+    pub(crate) fn observe_buckets(&self) -> impl Iterator<Item = (i64, u64, u64)> + '_ {
+        self.buckets
+            .iter()
+            .map(|bucket| (bucket.epoch, bucket.traffic.recv, bucket.traffic.sent))
+    }
+
+    #[cfg(feature = "tls-eval-observe")]
+    #[allow(dead_code)]
+    pub(crate) fn observe_storage(&self) -> (usize, usize, i64) {
+        (
+            self.buckets.len(),
+            self.buckets.capacity(),
+            self.last_seen_epoch,
+        )
+    }
+
     pub(crate) fn record(&mut self, direction: Direction, epoch: i64, bytes: u64) {
-        self.last_seen_epoch = epoch;
+        self.last_seen_epoch = self.last_seen_epoch.max(epoch);
         if let Some(bucket) = self.buckets.iter_mut().find(|bucket| bucket.epoch == epoch) {
             Self::add_to_traffic(&mut bucket.traffic, direction, bytes);
         } else {

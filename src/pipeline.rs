@@ -343,6 +343,22 @@ impl TrafficPipeline {
     }
 
     #[cfg(test)]
+    pub(crate) fn from_flows_for_test(flows: Vec<Flow>) -> io::Result<Self> {
+        let mut flows: std::collections::VecDeque<_> = flows.into();
+        Self::spawn_with_next(
+            move || -> Result<Option<Flow>, &'static str> {
+                if let Some(flow) = flows.pop_front() {
+                    return Ok(Some(flow));
+                }
+                thread::sleep(Duration::from_millis(10));
+                Ok(None)
+            },
+            Arc::new(std::sync::RwLock::new(proc_table::ProcTable::default())),
+            10,
+        )
+    }
+
+    #[cfg(test)]
     fn spawn_with_next_and_wakeup<N, E, W>(
         next_flow: N,
         proc_table: SharedProcTable,
@@ -452,10 +468,42 @@ impl TrafficPipeline {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "tls-eval-observe"))]
+    #[allow(dead_code)]
     pub fn stop(&mut self) {
         self.signal_stop();
         Self::join_workers(self.workers.drain(..));
+    }
+
+    /// Call exactly once after spawn, before any try_latest call. Spawn queues the
+    /// bootstrap before starting either worker, so FIFO identifies it by origin.
+    #[cfg(feature = "tls-eval-observe")]
+    #[allow(dead_code)]
+    pub fn take_bootstrap_for_observe(&self) -> Result<Arc<TrafficSnapshot>, PipelineError> {
+        self.snapshot_rx
+            .try_recv()
+            .map_err(|_| PipelineError::WorkerStopped("missing bootstrap snapshot"))
+    }
+
+    /// Join without draining flows or publishing a snapshot, retaining terminal failures.
+    #[cfg(feature = "tls-eval-observe")]
+    #[allow(dead_code)]
+    pub fn stop_checked_for_observe(&mut self) -> Result<(), PipelineError> {
+        self.signal_stop();
+        let mut panic = None;
+        for worker in self.workers.drain(..) {
+            let name = match worker.thread().name() {
+                Some("flowlens-capture") => "capture",
+                _ => "aggregate",
+            };
+            if worker.join().is_err() && panic.is_none() {
+                panic = Some(PipelineError::WorkerStopped(name));
+            }
+        }
+        match self.failure.get().cloned().or(panic) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn signal_stop(&mut self) {
@@ -624,6 +672,84 @@ impl Drop for TrafficPipeline {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "tls-eval-observe")]
+    #[test]
+    fn checked_stop_reports_failure_recorded_after_last_snapshot_read() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(std::sync::Arc::new(crate::stats::TrafficSnapshot::default()))
+            .unwrap();
+        let failure = std::sync::Arc::new(std::sync::OnceLock::new());
+        let mut pipeline = super::TrafficPipeline::from_parts(receiver, failure.clone());
+        pipeline.take_bootstrap_for_observe().unwrap();
+        assert!(pipeline.try_latest().unwrap().is_none());
+        failure
+            .set(super::PipelineError::Capture("late failure".to_string()))
+            .unwrap();
+        assert!(
+            matches!(pipeline.stop_checked_for_observe(), Err(super::PipelineError::Capture(message)) if message == "late failure")
+        );
+    }
+
+    #[cfg(feature = "tls-eval-observe")]
+    #[test]
+    fn checked_stop_reports_worker_panic_after_last_snapshot_read() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(std::sync::Arc::new(crate::stats::TrafficSnapshot::default()))
+            .unwrap();
+        let failure = std::sync::Arc::new(std::sync::OnceLock::new());
+        let mut pipeline = super::TrafficPipeline::from_parts(receiver, failure);
+        pipeline.take_bootstrap_for_observe().unwrap();
+        assert!(pipeline.try_latest().unwrap().is_none());
+        pipeline.workers.push(
+            std::thread::Builder::new()
+                .name("flowlens-capture".to_string())
+                .spawn(|| panic!("late worker panic"))
+                .unwrap(),
+        );
+        assert!(matches!(
+            pipeline.stop_checked_for_observe(),
+            Err(super::PipelineError::WorkerStopped("capture"))
+        ));
+    }
+
+    #[test]
+    fn real_parser_domains_survive_retained_snapshot_after_stop_and_join() {
+        let mut flows =
+            crate::capture::tls_visibility_tests::lifecycle_flows(false, "ordinary.lifecycle");
+        flows.extend(crate::capture::tls_visibility_tests::lifecycle_flows(
+            true,
+            "public.lifecycle",
+        ));
+        let expected = flows.iter().map(|flow| flow.bytes).sum::<u64>();
+        let mut pipeline = super::TrafficPipeline::from_flows_for_test(flows).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let retained = loop {
+            if let Some(snapshot) = pipeline.try_latest().unwrap()
+                && snapshot.outbound_domains.len() == 1
+                && snapshot.public_sni.len() == 1
+            {
+                break snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "domain snapshot timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(retained.in_bytes + retained.out_bytes, expected);
+        let weak = std::sync::Arc::downgrade(&retained);
+        pipeline.stop();
+        assert!(pipeline.workers.is_empty());
+        drop(pipeline);
+        assert_eq!(retained.outbound_domains[0].host(), "ordinary.lifecycle");
+        assert_eq!(retained.public_sni[0].host(), "public.lifecycle");
+        assert!(weak.upgrade().is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+    }
+
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::sync::OnceLock;
@@ -848,6 +974,7 @@ mod tests {
                 }),
                 peer_local_socket: None,
                 domain: None,
+                domain_event: None,
             })
             .unwrap();
 
@@ -929,6 +1056,7 @@ mod tests {
                 }),
                 peer_local_socket: None,
                 domain: None,
+                domain_event: None,
             })
             .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1006,6 +1134,7 @@ mod tests {
                     protocol: crate::capture::TransportProtocol::Tcp,
                 }),
                 domain: None,
+                domain_event: None,
             })
             .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1197,6 +1326,7 @@ mod tests {
             local_socket: None,
             peer_local_socket: None,
             domain: None,
+            domain_event: None,
         }
     }
 }

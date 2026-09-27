@@ -177,6 +177,39 @@ impl TrafficSession {
         }
     }
 
+    #[cfg(feature = "tls-eval-observe")]
+    #[allow(dead_code)]
+    pub(crate) fn begin_activate_with_for_observe<F>(
+        &mut self,
+        selector: &str,
+        start: F,
+    ) -> Result<Activation>
+    where
+        F: FnOnce(&str) -> Result<TrafficPipeline> + Send + 'static,
+    {
+        self.begin_activate_with(selector, start)
+    }
+
+    #[cfg(feature = "tls-eval-observe")]
+    #[allow(dead_code)]
+    pub(crate) fn stop_checked_for_observe(&mut self) -> Result<()> {
+        if self.pending.is_some() {
+            return Err(anyhow!("cannot stop while interface activation is pending"));
+        }
+        let mut failure = None;
+        for capture in [&mut self.active, &mut self.fallback].into_iter().flatten() {
+            if let Err(error) = capture.pipeline.stop_checked_for_observe()
+                && failure.is_none()
+            {
+                failure = Some(error);
+            }
+        }
+        match failure {
+            Some(error) => Err(anyhow::Error::from(error)),
+            None => Ok(()),
+        }
+    }
+
     fn activate_with<F>(&mut self, selector: &str, start: F) -> Result<Activation>
     where
         F: FnOnce(&str) -> Result<TrafficPipeline>,
@@ -294,6 +327,137 @@ impl TrafficSession {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "tls-eval-observe")]
+    #[test]
+    fn checked_session_stop_rejects_pending_without_stopping_active() {
+        let mut session = session_with_active("eth0", 99);
+        let (_sender, result_rx) = std::sync::mpsc::sync_channel(1);
+        session.pending = Some(PendingActivation {
+            interface: "wlan0".to_string(),
+            result_rx,
+        });
+        assert!(session.stop_checked_for_observe().is_err());
+        assert_eq!(session.try_latest().unwrap().unwrap().in_bytes, 99);
+        assert!(session.pending.is_some());
+    }
+
+    #[cfg(feature = "tls-eval-observe")]
+    #[test]
+    fn checked_session_stop_joins_both_owned_pipelines() {
+        let mut session = session_with_active("eth0", 99);
+        session.active.as_mut().unwrap().pipeline =
+            TrafficPipeline::from_flows_for_test(Vec::new()).unwrap();
+        session.fallback = Some(ActiveCapture {
+            interface: "wlan0".to_string(),
+            pipeline: TrafficPipeline::from_flows_for_test(Vec::new()).unwrap(),
+        });
+        session.stop_checked_for_observe().unwrap();
+        for capture in [&session.active, &session.fallback].into_iter().flatten() {
+            assert!(matches!(
+                capture.pipeline.try_latest(),
+                Err(PipelineError::WorkerStopped("aggregate"))
+            ));
+        }
+    }
+
+    #[cfg(feature = "tls-eval-observe")]
+    #[test]
+    fn checked_session_stop_stops_fallback_even_when_active_has_failed() {
+        let mut session = session_with_active("eth0", 99);
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let failure = Arc::new(std::sync::OnceLock::new());
+        failure
+            .set(PipelineError::Capture("late failure".to_string()))
+            .unwrap();
+        session.active.as_mut().unwrap().pipeline = TrafficPipeline::from_parts(receiver, failure);
+        session.fallback = Some(ActiveCapture {
+            interface: "wlan0".to_string(),
+            pipeline: TrafficPipeline::from_flows_for_test(Vec::new()).unwrap(),
+        });
+        let error = session.stop_checked_for_observe().unwrap_err();
+        assert_eq!(error.to_string(), "capture failed: late failure");
+        assert!(matches!(
+            session.fallback.as_ref().unwrap().pipeline.try_latest(),
+            Err(PipelineError::WorkerStopped("aggregate"))
+        ));
+    }
+
+    #[test]
+    fn real_parser_domains_follow_interface_activation_lifecycle() {
+        use std::time::{Duration, Instant};
+        let flows =
+            crate::capture::tls_visibility_tests::lifecycle_flows(true, "retained.lifecycle");
+        let mut session = TrafficSession::from_active_for_test(
+            vec![info("eth0", true), info("wlan0", false)],
+            Arc::new(RwLock::new(ProcTable::default())),
+            10,
+            crate::stats::DEFAULT_PROC_FLOWS,
+            "eth0",
+            TrafficPipeline::from_flows_for_test(flows).unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let old = loop {
+            if let Some(snapshot) = session.try_latest().unwrap()
+                && !snapshot.public_sni.is_empty()
+            {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "old domain snapshot timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        session
+            .rank_window
+            .store(RankWindow::FIVE_SECONDS.to_u8(), Ordering::Release);
+        assert_eq!(
+            session
+                .activate_with("eth0", |_| panic!("same interface must not start"))
+                .unwrap(),
+            Activation::Unchanged
+        );
+        assert_eq!(
+            session.rank_window.load(Ordering::Acquire),
+            RankWindow::FIVE_SECONDS.to_u8()
+        );
+        assert!(
+            session
+                .activate_with("wlan0", |_| Err(anyhow!("open failed")))
+                .is_err()
+        );
+        assert_eq!(session.active_interface(), Some("eth0"));
+        assert_eq!(old.public_sni[0].host(), "retained.lifecycle");
+        assert_eq!(
+            session.rank_window.load(Ordering::Acquire),
+            RankWindow::FIVE_SECONDS.to_u8()
+        );
+        let flows = crate::capture::tls_visibility_tests::lifecycle_flows(false, "fresh.lifecycle");
+        assert_eq!(
+            session
+                .activate_with("wlan0", |_| Ok(TrafficPipeline::from_flows_for_test(
+                    flows
+                )?))
+                .unwrap(),
+            Activation::Activated
+        );
+        assert_eq!(
+            session.rank_window.load(Ordering::Acquire),
+            RankWindow::Cumulative.to_u8()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(snapshot) = session.try_latest().unwrap() {
+                assert!(snapshot.public_sni.is_empty());
+                if !snapshot.outbound_domains.is_empty() {
+                    assert_eq!(snapshot.outbound_domains[0].host(), "fresh.lifecycle");
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "new domain snapshot timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(old.public_sni[0].host(), "retained.lifecycle");
+        session.active.as_mut().unwrap().pipeline.stop();
+    }
+
     use std::sync::Arc;
 
     use super::*;

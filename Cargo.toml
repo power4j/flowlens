@@ -9,6 +9,9 @@ license = "GPL-3.0-only"
 repository = "https://github.com/power4j/flowlens"
 readme = "README.md"
 
+[features]
+tls-eval-observe = []
+
 [dependencies]
 pcap = "2"
 etherparse = "0.21"

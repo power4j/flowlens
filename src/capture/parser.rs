@@ -47,6 +47,8 @@ pub(crate) enum PacketDisposition {
 pub(crate) struct PayloadParseOutcome<'a> {
     pub(crate) disposition: PacketDisposition,
     pub(crate) parsed: Option<(Flow, Option<&'a [u8]>)>,
+    tcp: Option<etherparse::TcpHeader>,
+    fragmented: bool,
 }
 
 impl<'a> PayloadParseOutcome<'a> {
@@ -54,6 +56,8 @@ impl<'a> PayloadParseOutcome<'a> {
         Self {
             disposition,
             parsed: None,
+            tcp: None,
+            fragmented: false,
         }
     }
 
@@ -61,6 +65,8 @@ impl<'a> PayloadParseOutcome<'a> {
         Self {
             disposition: PacketDisposition::Accepted,
             parsed: Some((flow, payload)),
+            tcp: None,
+            fragmented: false,
         }
     }
 }
@@ -172,6 +178,11 @@ pub(crate) fn parse_with_payload<'a>(
     let Some(net) = headers.net else {
         return Ok(PayloadParseOutcome::discarded(PacketDisposition::NonIp));
     };
+    let fragmented = match &net {
+        NetHeaders::Ipv4(ip, _) => ip.is_fragmenting_payload(),
+        NetHeaders::Ipv6(_, extensions) => extensions.fragment.is_some(),
+        _ => false,
+    };
     let (src, dst, ip_bytes, ip_version) = match net {
         NetHeaders::Ipv4(ip, _) => (
             IpAddr::V4(ip.source.into()),
@@ -278,7 +289,11 @@ pub(crate) fn parse_with_payload<'a>(
         None
     };
 
-    Ok(PayloadParseOutcome::accepted(
+    let tcp = match &headers.transport {
+        Some(TransportHeader::Tcp(tcp)) => Some(tcp.clone()),
+        _ => None,
+    };
+    let mut outcome = PayloadParseOutcome::accepted(
         Flow {
             direction,
             peer,
@@ -287,9 +302,13 @@ pub(crate) fn parse_with_payload<'a>(
             local_socket,
             peer_local_socket,
             domain: None,
+            domain_event: None,
         },
         tcp_payload,
-    ))
+    );
+    outcome.tcp = tcp;
+    outcome.fragmented = fragmented;
+    Ok(outcome)
 }
 
 /// Calls the L7 domain-parsing seam on top of [`parse`], with the flow table
@@ -325,6 +344,7 @@ pub(crate) fn parse_with_domain_parser(
     Ok(parse_with_domain_parser_outcome(link_type, data, local_ips, parser, flow_table)?.flow)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_with_domain_parser_outcome(
     link_type: pcap::Linktype,
     data: &[u8],
@@ -332,10 +352,57 @@ pub(crate) fn parse_with_domain_parser_outcome(
     parser: &dyn DomainParser,
     flow_table: Option<&FlowTable>,
 ) -> Result<FlowParseOutcome> {
+    parse_with_domain_parser_at(
+        link_type,
+        data,
+        local_ips,
+        parser,
+        flow_table,
+        chrono::Utc::now(),
+        flow_table.map_or(std::time::Duration::ZERO, FlowTable::monotonic_now),
+    )
+}
+
+pub(crate) fn parse_with_domain_parser_at(
+    link_type: pcap::Linktype,
+    data: &[u8],
+    local_ips: &HashSet<IpAddr>,
+    parser: &dyn DomainParser,
+    flow_table: Option<&FlowTable>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    now: std::time::Duration,
+) -> Result<FlowParseOutcome> {
     let parsed = parse_with_payload(link_type, data, local_ips)?;
     let Some((mut flow, payload)) = parsed.parsed else {
         return Ok(FlowParseOutcome::discarded(parsed.disposition));
     };
+    if parsed.fragmented {
+        return Ok(FlowParseOutcome::accepted(flow));
+    }
+    if parser.supports_streams()
+        && let (Some(table), Some(key), Some(tcp)) = (flow_table, flow_key_from(&flow), parsed.tcp)
+    {
+        let event = table.observe(
+            key,
+            crate::flow_table::TcpObservation {
+                direction: flow.direction,
+                sequence: tcp.sequence_number,
+                acknowledgment: tcp.acknowledgment_number,
+                syn: tcp.syn,
+                ack: tcp.ack,
+                fin: tcp.fin,
+                rst: tcp.rst,
+                payload: payload.unwrap_or_default(),
+                bytes: flow.bytes,
+                observed_at,
+                now,
+            },
+            parser,
+        );
+        flow.domain = event.domain.clone();
+        flow.domain_event = Some(Box::new(event));
+        return Ok(FlowParseOutcome::accepted(flow));
+    }
     if flow.direction != Direction::Outbound {
         // Bidirectional accounting: inbound replies do not parse the payload
         // (outbound perspective), but the flow table is consulted to restore
@@ -345,7 +412,7 @@ pub(crate) fn parse_with_domain_parser_outcome(
             && let Some(key) = flow_key_from(&flow)
             && let Some(FlowEntry::Resolved(domain)) = table.lookup(&key)
         {
-            flow.domain = Some(domain);
+            flow.domain = Some(domain.into());
         }
         return Ok(FlowParseOutcome::accepted(flow));
     }
@@ -361,7 +428,7 @@ pub(crate) fn parse_with_domain_parser_outcome(
     if let (Some(table), Some(key)) = (flow_table, key.as_ref()) {
         match table.lookup(key) {
             Some(FlowEntry::Resolved(domain)) => {
-                flow.domain = Some(domain);
+                flow.domain = Some(domain.into());
                 return Ok(FlowParseOutcome::accepted(flow));
             }
             Some(FlowEntry::NoDomain { attempts }) if attempts < MAX_NO_DOMAIN_PARSE_ATTEMPTS => {
@@ -385,7 +452,7 @@ pub(crate) fn parse_with_domain_parser_outcome(
     }
 
     if let Some(domain) = resolved {
-        flow.domain = Some(domain);
+        flow.domain = Some(domain.into());
     }
     Ok(FlowParseOutcome::accepted(flow))
 }

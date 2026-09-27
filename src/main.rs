@@ -511,6 +511,7 @@ mod scheduling_tests {
                     local_socket: None,
                     peer_local_socket: None,
                     domain: None,
+                    domain_event: None,
                 }))
             },
             &proc_table,

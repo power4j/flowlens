@@ -417,7 +417,7 @@ pub(super) fn scroll_to_bottom(state: &mut AppState, snapshot: &TrafficSnapshot)
             }
         },
         Page::Domains => {
-            let len = snapshot.outbound_domains.len();
+            let len = snapshot.visible_domains().len();
             state.domain_scroll = len.saturating_sub(state.domain_view_height);
         }
         _ => {}

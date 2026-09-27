@@ -11,6 +11,7 @@ FlowLens is a command-line network traffic analyzer for resource-constrained Lin
 ## Highlights
 
 - **At-a-glance traffic overview.** View interface totals, top processes, remote IPs, and outbound domains on one screen.
+- **Visible TLS names.** ClientHello with ECH or legacy ESNI and visible SNI appears as `Public SNI`, separately from ordinary outbound domains. The visible name may differ from the actual target. JSON keeps ordinary names in `top_outbound_domains` and adds `top_public_sni`; each group has its own top-N limit.
 - **Explainable process attribution.** Distinguish exclusive, shared, system, and unattributed traffic with a conservation summary.
 - **Process drill-down.** Inspect the PID, executable path, last-seen time, attribution breakdown, and ranked bidirectional TCP/UDP endpoint flows.
 - **Configurable ranking windows.** Switch between cumulative totals and 5-second, 10-second, 30-second, 60-second, or 5-minute average throughput, with warm-up coverage for finite windows.

@@ -210,20 +210,28 @@ fn plain_snapshot_with_window(
         ));
     }
 
-    out.push_str(&format!("\nTop Outbound Domains ({top_n})\n"));
-    out.push_str("Host\tIn\tOut\tTotal\tLast Seen\n");
-    for domain in snapshot.outbound_domains.iter() {
-        out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
-            domain.host(),
-            format_rank_bytes(domain.rank_in_bytes, rank_window),
-            format_rank_bytes(domain.rank_out_bytes, rank_window),
-            format_rank_bytes(
-                domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
-                rank_window,
-            ),
-            domain.last_seen().to_rfc3339(),
-        ));
+    for (title, domains) in [
+        ("Top Outbound Domains", &snapshot.outbound_domains),
+        ("Top Public SNI", &snapshot.public_sni),
+    ] {
+        out.push_str(&format!("\n{title} ({top_n})\n"));
+        if title == "Top Public SNI" {
+            out.push_str("Visible TLS name; actual target may differ\n");
+        }
+        out.push_str("Host\tIn\tOut\tTotal\tLast Seen\n");
+        for domain in domains.iter() {
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                domain.host(),
+                format_rank_bytes(domain.rank_in_bytes, rank_window),
+                format_rank_bytes(domain.rank_out_bytes, rank_window),
+                format_rank_bytes(
+                    domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
+                    rank_window,
+                ),
+                domain.last_seen().to_rfc3339(),
+            ));
+        }
     }
 
     out.push_str(&format!("\nTop Inbound IPs ({top_n})\n"));
@@ -265,6 +273,7 @@ struct JsonFrame<'a> {
     ranking: crate::stats::RankingSnapshot,
     top_processes: Vec<JsonProc>,
     top_outbound_domains: Vec<JsonHost>,
+    top_public_sni: Vec<JsonHost>,
     top_inbound_ips: Vec<JsonIp>,
     top_outbound_ips: Vec<JsonIp>,
 }
@@ -481,29 +490,27 @@ fn build_json_frame_with_window<'a>(
         })
         .collect();
 
-    let top_outbound_domains = snapshot
-        .outbound_domains
-        .iter()
-        .map(|domain| JsonHost {
-            host: domain.host().to_string(),
-            last_seen: domain.last_seen().to_rfc3339(),
-            lifetime: JsonTraffic::from_traffic(
-                ProcTraffic {
-                    recv: domain.in_bytes,
-                    sent: domain.out_bytes,
-                },
-                None,
-            ),
-            selected: JsonTraffic::from_traffic(
-                ProcTraffic {
-                    recv: domain.selected_in_bytes,
-                    sent: domain.selected_out_bytes,
-                },
-                (rank_window != RankWindow::Cumulative)
-                    .then_some(domain.rank_in_bytes.saturating_add(domain.rank_out_bytes)),
-            ),
-        })
-        .collect();
+    let domain_json = |domain: &crate::stats::OutboundDomainSnapshot| JsonHost {
+        host: domain.host().to_string(),
+        last_seen: domain.last_seen().to_rfc3339(),
+        lifetime: JsonTraffic::from_traffic(
+            ProcTraffic {
+                recv: domain.in_bytes,
+                sent: domain.out_bytes,
+            },
+            None,
+        ),
+        selected: JsonTraffic::from_traffic(
+            ProcTraffic {
+                recv: domain.selected_in_bytes,
+                sent: domain.selected_out_bytes,
+            },
+            (rank_window != RankWindow::Cumulative)
+                .then_some(domain.rank_in_bytes.saturating_add(domain.rank_out_bytes)),
+        ),
+    };
+    let top_outbound_domains = snapshot.outbound_domains.iter().map(domain_json).collect();
+    let top_public_sni = snapshot.public_sni.iter().map(domain_json).collect();
 
     let attribution = JsonAttributionSummary::from(&snapshot.attribution);
 
@@ -521,6 +528,7 @@ fn build_json_frame_with_window<'a>(
         ranking: snapshot.ranking,
         top_processes,
         top_outbound_domains,
+        top_public_sni,
         top_inbound_ips,
         top_outbound_ips,
     }
@@ -756,6 +764,7 @@ mod tests {
             local_socket: None,
             peer_local_socket: None,
             domain: None,
+            domain_event: None,
         }
     }
 
@@ -767,7 +776,8 @@ mod tests {
             bytes,
             local_socket: None,
             peer_local_socket: None,
-            domain,
+            domain: domain.map(Into::into),
+            domain_event: None,
         }
     }
 
@@ -846,5 +856,68 @@ mod tests {
 
         assert!(value["top_outbound_domains"].is_array());
         assert!(value["top_outbound_domains"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn public_sni_json_groups_have_independent_limits_and_plain_labels() {
+        use crate::domain_parse::{DomainKind, DomainName};
+        let mut stats = Stats::default();
+        let at = "2026-07-15T08:00:00Z".parse().unwrap();
+        for (name, kind, bytes) in [
+            ("same.example", DomainKind::Ordinary, 100),
+            ("other.example", DomainKind::Ordinary, 50),
+            ("same.example", DomainKind::PublicSni, 10000),
+            ("cover.example", DomainKind::PublicSni, 5000),
+        ] {
+            let mut flow = flow(Direction::Outbound, bytes);
+            flow.domain = Some(DomainName::new(Arc::from(name), kind));
+            stats.record_flow_at(flow, None, at);
+        }
+        let value = serde_json::to_value(build_json_frame(
+            "eth0",
+            &chrono::Local::now(),
+            Instant::now(),
+            &stats,
+            1,
+        ))
+        .unwrap();
+        assert_eq!(value["top_outbound_domains"].as_array().unwrap().len(), 1);
+        assert_eq!(value["top_public_sni"].as_array().unwrap().len(), 1);
+        let ordinary = &value["top_outbound_domains"][0];
+        let public = &value["top_public_sni"][0];
+        assert_eq!(ordinary["host"], "same.example");
+        assert_eq!(ordinary["lifetime"]["sent_bytes"], 100);
+        assert_eq!(public["host"], "same.example");
+        assert_eq!(public["lifetime"]["sent_bytes"], 10000);
+        assert_eq!(
+            ordinary.as_object().unwrap().keys().collect::<Vec<_>>(),
+            public.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+        assert_eq!(ordinary.as_object().unwrap().len(), 4);
+        let plain = plain_snapshot("eth0", &chrono::Local::now(), Instant::now(), &stats, 1);
+        let ordinary_section = plain
+            .split("Top Outbound Domains (1)\n")
+            .nth(1)
+            .unwrap()
+            .split("Top Public SNI")
+            .next()
+            .unwrap();
+        let public_section = plain
+            .split("Top Public SNI (1)\n")
+            .nth(1)
+            .unwrap()
+            .split("Top Inbound IPs")
+            .next()
+            .unwrap();
+        assert!(ordinary_section.contains("same.example\t0 B\t100 B\t100 B"));
+        assert!(public_section.contains(&format!(
+            "same.example\t0 B\t{}\t{}",
+            human_bytes(10000),
+            human_bytes(10000)
+        )));
+        assert!(public_section.contains("Visible TLS name; actual target may differ"));
+        let snapshot = stats.snapshot_at(1, at, RankWindow::Cumulative);
+        assert_eq!(snapshot.visible_domains().len(), 1);
+        assert_eq!(snapshot.visible_domains()[0].kind(), DomainKind::PublicSni);
     }
 }

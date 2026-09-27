@@ -1,17 +1,20 @@
 use std::net::IpAddr;
-use std::sync::Arc;
 
 use crate::stats::Direction;
 
 mod counters;
 mod parser;
 mod source;
+pub(crate) mod tls_reassembly;
+#[cfg(test)]
+pub(crate) mod tls_visibility_tests;
 
 #[cfg(test)]
 use crate::flow_table::FlowTable;
 pub(crate) use counters::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "tls-eval-observe"))]
+#[allow(unused_imports)]
 pub(crate) use parser::*;
 #[cfg(test)]
 use pcap::Device;
@@ -73,7 +76,8 @@ pub struct Flow {
     pub peer_local_socket: Option<LocalSocket>,
     /// Target domain resolved from the outbound connection; `None` for
     /// inbound or unidentified flows.
-    pub domain: Option<Arc<str>>,
+    pub domain: Option<crate::domain_parse::DomainName>,
+    pub(crate) domain_event: Option<Box<crate::flow_table::DomainEvent>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -284,10 +288,16 @@ mod tests {
             bytes: 0,
             local_socket: None,
             peer_local_socket: None,
-            domain: Some(Arc::from("example.com")),
+            domain: Some(Arc::<str>::from("example.com").into()),
+            domain_event: None,
         };
 
-        assert_eq!(flow.domain.as_deref(), Some("example.com"));
+        assert_eq!(
+            flow.domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("example.com")
+        );
     }
 
     #[test]
@@ -318,7 +328,12 @@ mod tests {
                 .expect("outbound TCP flow");
 
         assert_eq!(flow.direction, Direction::Outbound);
-        assert_eq!(flow.domain.as_deref(), Some("example.com"));
+        assert_eq!(
+            flow.domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("example.com")
+        );
         assert_eq!(parser.call_count(), 1);
     }
 
@@ -404,7 +419,13 @@ mod tests {
         )
         .expect("supported data link")
         .expect("outbound TCP flow");
-        assert_eq!(first.domain.as_deref(), Some("cached.example"));
+        assert_eq!(
+            first
+                .domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("cached.example")
+        );
 
         // Second packet with the same 5-tuple: hits Resolved, skips the parser, returns the cached domain.
         let second_parser = RecordingParser::new(Some(Arc::from("would-not-be-used.com")));
@@ -418,7 +439,12 @@ mod tests {
         .expect("supported data link")
         .expect("outbound TCP flow");
 
-        assert_eq!(flow.domain.as_deref(), Some("cached.example"));
+        assert_eq!(
+            flow.domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("cached.example")
+        );
         assert_eq!(second_parser.call_count(), 0, "命中 Resolved 不应调 parser");
     }
 
@@ -458,7 +484,12 @@ mod tests {
         .expect("supported data link")
         .expect("outbound TCP flow");
 
-        assert_eq!(flow.domain.as_deref(), Some("would-be.com"));
+        assert_eq!(
+            flow.domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("would-be.com")
+        );
         assert_eq!(parser.call_count(), 1, "命中 NoDomain 且未达上限时应重试");
         assert!(matches!(
             table.lookup(&key),
@@ -512,7 +543,12 @@ mod tests {
         .expect("supported data link")
         .expect("outbound TCP flow");
 
-        assert_eq!(flow.domain.as_deref(), Some("first-packet.example"));
+        assert_eq!(
+            flow.domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("first-packet.example")
+        );
         assert_eq!(parser.call_count(), 1);
 
         // The table should now hold Resolved.
@@ -612,7 +648,13 @@ mod tests {
         )
         .expect("supported data link")
         .expect("outbound TCP flow");
-        assert_eq!(outbound_flow.domain.as_deref(), Some("example.com"));
+        assert_eq!(
+            outbound_flow
+                .domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
+            Some("example.com")
+        );
 
         let inbound_parser = RecordingParser::new(Some(Arc::from("would-not-be-used.com")));
         let inbound = inbound_tcp_ethernet_frame(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
@@ -628,7 +670,10 @@ mod tests {
 
         assert_eq!(inbound_flow.direction, Direction::Inbound);
         assert_eq!(
-            inbound_flow.domain.as_deref(),
+            inbound_flow
+                .domain
+                .as_ref()
+                .map(crate::domain_parse::DomainName::name),
             Some("example.com"),
             "Inbound 回包应查流表补 domain（双向统计）"
         );
@@ -1560,7 +1605,12 @@ mod tests {
                 )
                 .expect("supported data link")
                 .expect("outbound TCP flow");
-                assert_eq!(flow.domain.as_deref(), Some("example.com"));
+                assert_eq!(
+                    flow.domain
+                        .as_ref()
+                        .map(crate::domain_parse::DomainName::name),
+                    Some("example.com")
+                );
             }
             let elapsed = start.elapsed();
 

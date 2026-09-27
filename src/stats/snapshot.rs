@@ -161,7 +161,20 @@ pub struct TrafficSnapshot {
     /// Outbound-domain dimension; consumers: TUI overview/detail pages and
     /// the plain/JSON reports.
     pub outbound_domains: Arc<[OutboundDomainSnapshot]>,
+    pub public_sni: Arc<[OutboundDomainSnapshot]>,
+    /// Combined visible-name ranking, limited to the overall top_n for the TUI.
+    pub domain_rows: Arc<[OutboundDomainSnapshot]>,
     pub diagnostics: Option<Arc<DiagnosticsSnapshot>>,
+}
+
+impl TrafficSnapshot {
+    pub(crate) fn visible_domains(&self) -> &[OutboundDomainSnapshot] {
+        if self.domain_rows.is_empty() {
+            &self.outbound_domains
+        } else {
+            &self.domain_rows
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -457,7 +470,7 @@ impl IpSnapshot {
 /// Consumers: TUI overview/detail pages and the plain/JSON reports.
 #[derive(Clone)]
 pub struct OutboundDomainSnapshot {
-    pub(crate) host: Arc<str>,
+    pub(crate) host: crate::domain_parse::DomainName,
     pub in_bytes: u64,
     pub out_bytes: u64,
     pub selected_in_bytes: u64,
@@ -487,7 +500,7 @@ impl OutboundDomainSnapshot {
         last_seen: DateTime<Utc>,
     ) -> Self {
         Self::with_rank_and_selected(
-            host,
+            host.into(),
             in_bytes,
             out_bytes,
             rank_in_bytes,
@@ -499,7 +512,7 @@ impl OutboundDomainSnapshot {
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_rank_and_selected(
-        host: Arc<str>,
+        host: crate::domain_parse::DomainName,
         in_bytes: u64,
         out_bytes: u64,
         selected_in_bytes: u64,
@@ -520,7 +533,10 @@ impl OutboundDomainSnapshot {
         }
     }
     pub(crate) fn host(&self) -> &str {
-        &self.host
+        self.host.name()
+    }
+    pub(crate) fn kind(&self) -> crate::domain_parse::DomainKind {
+        self.host.kind()
     }
     pub(crate) fn last_seen(&self) -> DateTime<Utc> {
         self.last_seen

@@ -16,7 +16,6 @@ use super::counters::CaptureCounters;
 use super::parser::FlowParseOutcome;
 use super::parser::PacketDisposition;
 use super::parser::packet_format;
-use super::parser::parse_with_domain_parser_outcome;
 use super::{Flow, InterfaceInfo};
 use crate::domain_parse::DomainParser;
 use crate::domain_parse_composite::CompositeDomainParser;
@@ -84,6 +83,12 @@ where
     /// exhausted; later `next()` calls return `Ok(None)` without re-entering
     /// pcap (no busy-wait, no invented packets).
     pub(crate) offline_exhausted: bool,
+}
+
+impl<C: pcap::State> Drop for CaptureSource<C> {
+    fn drop(&mut self) {
+        self.flow_table.finish();
+    }
 }
 
 /// Determine the default route interface from /proc/net/route.
@@ -317,6 +322,9 @@ impl<C: pcap::Activated> CaptureSource<C> {
     /// hunt for a Flow, which preserves the `Ok(None)` cadence the pipeline
     /// relies on for attribution and stop liveness.
     pub fn next(&mut self) -> Result<Option<Flow>> {
+        if !self.is_offline {
+            self.flow_table.advance(self.flow_table.monotonic_now());
+        }
         let result = if let Some(item) = self.pending.pop_front() {
             consume_pending_item(item)
         } else if self.offline_exhausted {
@@ -347,6 +355,8 @@ impl<C: pcap::Activated> CaptureSource<C> {
                     process_packet(
                         self.link_type,
                         packet.data,
+                        packet.header,
+                        self.is_offline,
                         &self.local_ips,
                         self.domain_parser.as_ref(),
                         self.flow_table.as_ref(),
@@ -356,6 +366,10 @@ impl<C: pcap::Activated> CaptureSource<C> {
                     Ok(())
                 }
                 Err(pcap::Error::TimeoutExpired) => Ok(()),
+                Err(pcap::Error::NoMorePackets) => {
+                    self.flow_table.finish();
+                    Err(pcap::Error::NoMorePackets.into())
+                }
                 Err(e) => Err(anyhow::Error::from(e)),
             },
             CaptureReadMode::Dispatch => self.fill_pending_dispatch(),
@@ -381,6 +395,8 @@ impl<C: pcap::Activated> CaptureSource<C> {
             process_packet(
                 *link_type,
                 packet.data,
+                packet.header,
+                *is_offline,
                 local_ips,
                 domain_parser.as_ref(),
                 flow_table.as_ref(),
@@ -393,6 +409,7 @@ impl<C: pcap::Activated> CaptureSource<C> {
             // Live captures never treat a zero return as exhaustion (a quiet
             // live interface may see timeouts/empty batches).
             *offline_exhausted = true;
+            flow_table.finish();
         }
         pending.extend(batch);
         Ok(())
@@ -427,9 +444,12 @@ impl<C: pcap::Activated> CaptureSource<C> {
 /// inline path: record per-packet stats, then queue the result as Flow /
 /// Ignored / Error. Shared by the `NextPacket` baseline and the dispatch
 /// callback so both paths are guaranteed identical per-packet behavior.
+#[allow(clippy::too_many_arguments)]
 fn process_packet(
     link_type: pcap::Linktype,
     data: &[u8],
+    header: &pcap::PacketHeader,
+    is_offline: bool,
     local_ips: &HashSet<IpAddr>,
     domain_parser: &dyn DomainParser,
     flow_table: &FlowTable,
@@ -437,12 +457,24 @@ fn process_packet(
     pending: &mut VecDeque<PendingCaptureItem>,
 ) {
     let captured_bytes = data.len() as u64;
-    match parse_with_domain_parser_outcome(
+    let observed_at = chrono::DateTime::from_timestamp(
+        header.ts.tv_sec as i64,
+        (header.ts.tv_usec as u32).saturating_mul(1000),
+    )
+    .unwrap_or_default();
+    match super::parser::parse_with_domain_parser_at(
         link_type,
         data,
         local_ips,
         domain_parser,
         Some(flow_table),
+        observed_at,
+        if is_offline {
+            Duration::from_secs(observed_at.timestamp().max(0) as u64)
+                + Duration::from_nanos(u64::from(observed_at.timestamp_subsec_nanos()))
+        } else {
+            flow_table.monotonic_now()
+        },
     ) {
         Ok(outcome) => {
             counters.record_packet(captured_bytes, &outcome);
@@ -849,7 +881,7 @@ mod tests {
         let mut baseline_src = offline_source(&path, CaptureReadMode::NextPacket);
         let baseline_domains: Vec<Option<String>> = (0..frames.len())
             .map(|_| match baseline_src.next().ok().flatten() {
-                Some(flow) => flow.domain.map(|d| d.to_string()),
+                Some(flow) => flow.domain.map(|d| d.name().to_string()),
                 None => None,
             })
             .collect();
@@ -858,7 +890,7 @@ mod tests {
         let mut dispatch_domains = Vec::new();
         while !dispatch_src.offline_exhausted {
             match dispatch_src.next() {
-                Ok(Some(flow)) => dispatch_domains.push(flow.domain.map(|d| d.to_string())),
+                Ok(Some(flow)) => dispatch_domains.push(flow.domain.map(|d| d.name().to_string())),
                 Ok(None) => dispatch_domains.push(None),
                 Err(_) => dispatch_domains.push(None),
             }

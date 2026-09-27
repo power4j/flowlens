@@ -55,6 +55,14 @@ impl HttpDomainParser {
     pub fn new() -> Self {
         Self
     }
+
+    pub(crate) fn is_request_prefix(payload: &[u8]) -> bool {
+        let mut headers = [EMPTY_HEADER; MAX_HEADERS];
+        let mut request = Request::new(&mut headers);
+        request.parse(payload).is_ok()
+            && (request.method.is_some()
+                || (!payload.is_empty() && !payload.iter().any(u8::is_ascii_whitespace)))
+    }
 }
 
 impl Default for HttpDomainParser {

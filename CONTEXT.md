@@ -56,8 +56,11 @@ _Avoid_：用「跨平台支持」同时指代架构可扩展性和产品可用�
 TUI、plain、JSON 字段说明和状态提示统一使用英文；中文仅用于技术文档、研究记录和领域词汇说明。
 
 **出站域名（Outbound Domain）**：
-本机作为发起方建立的 TCP 连接中，通过 TLS SNI 或明文 HTTP Host 头识别出的目标域名。出站域名按连接双向累计流量，统计的是连接发起方为本机的通信。识别来源覆盖 TCP 上的 TLS ClientHello SNI 与明文 HTTP/1.x 请求的 Host 头；不覆盖 QUIC/HTTP3、入站发起的连接、ECH 加密的 SNI，以及解析失败的连接——这些流量不进入出站域名维度。出站域名不绑定进程，是与进程、IP 并列的独立统计维度。
+本机发起或可推断本机客户端角色的 TCP 连接中，通过不含 ECH/旧 ESNI 的 TLS SNI 或明文 HTTP Host 观察到的客户端名称，按连接双向累计流量。该名称不保证等于实际目标；与公开 SNI 分组统计，不覆盖 QUIC/HTTP3、确认入站连接或角色不明、解析失败的连接。
 _Avoid_：把它与反向 DNS 或 GeoIP 得到的主机名混用；后者来自外部数据库的 IP 归属查询，不是从流量 payload 解析，且 flowlens 不提供该能力
+
+**公开 SNI（Public SNI）**：
+本机客户端 TCP 连接的完整有效 ClientHello 含 ECH 或旧 ESNI 扩展时，在线上可见的 SNI 名称，独立于普通出站域名统计。公开 SNI 不保证等于 ECHConfig.public_name 或实际目标，也不证明真实 ECH、GREASE 或服务器接受情况。
 
 **IP 流量维度（IP Traffic Dimension）**：
 按对端 IP 汇总的流量观察维度，同时关注近期窗口流量和进程生命周期累计流量；近期窗口用于发现快速增长，生命周期累计用于识别历史重流量。IP 流量维度不等同于永久保存的完整 IP 历史，明细容量受限时应优先保留对大流量行为有分析价值的 IP。

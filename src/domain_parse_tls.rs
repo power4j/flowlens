@@ -12,12 +12,9 @@
 
 use std::sync::Arc;
 
-use tls_parser::{
-    TlsExtension, TlsExtensionType, TlsMessage, TlsMessageHandshake, parse_tls_extensions,
-    parse_tls_plaintext,
-};
+use tls_parser::{TlsExtension, parse_tls_extensions, parse_tls_handshake_client_hello};
 
-use crate::domain_parse::DomainParser;
+use crate::domain_parse::{DomainParseResult, DomainParser, DomainReason, HelloObservation};
 
 /// RFC 9849 `encrypted_client_hello` extension type code.
 ///
@@ -63,33 +60,124 @@ impl Default for TlsDomainParser {
 
 impl DomainParser for TlsDomainParser {
     fn parse_domain(&self, tcp_payload: &[u8]) -> Option<Arc<str>> {
-        let (_, record) = parse_tls_plaintext(tcp_payload).ok()?;
+        self.parse_result(tcp_payload).adopted_domain()
+    }
 
-        let client_hello = record.msg.iter().find_map(|msg| match msg {
-            TlsMessage::Handshake(TlsMessageHandshake::ClientHello(contents)) => Some(contents),
-            _ => None,
-        })?;
+    fn supports_streams(&self) -> bool {
+        true
+    }
 
-        let ext_bytes = client_hello.ext?;
-        let (_, extensions) = parse_tls_extensions(ext_bytes).ok()?;
-
-        if has_ech(&extensions) {
-            return None;
+    fn parse_result(&self, input: &[u8]) -> DomainParseResult {
+        use DomainParseResult::{NeedMore, Rejected};
+        if input.is_empty() {
+            return NeedMore;
         }
-
-        extract_sni(&extensions)
+        if input[0] != 22 {
+            return Rejected(DomainReason::NonTargetProtocol);
+        }
+        // Only handshake bodies are combined. The bounded capture buffer reserves
+        // space for this temporary copy before invoking the parser.
+        let mut handshake = Vec::new();
+        let mut offset = 0;
+        while offset < input.len() {
+            let remaining = &input[offset..];
+            if remaining.len() < 5 {
+                return NeedMore;
+            }
+            if remaining[0] != 22 || remaining[1] != 3 || remaining[2] > 4 {
+                return Rejected(DomainReason::Malformed);
+            }
+            let length = usize::from(u16::from_be_bytes([remaining[3], remaining[4]]));
+            if length == 0 {
+                return Rejected(DomainReason::Malformed);
+            }
+            if remaining.len() < 5 + length {
+                return NeedMore;
+            }
+            handshake.reserve_exact(length);
+            handshake.extend_from_slice(&remaining[5..5 + length]);
+            offset += 5 + length;
+            if handshake.len() < 4 {
+                continue;
+            }
+            if handshake[0] != 1 {
+                return Rejected(DomainReason::NonTargetProtocol);
+            }
+            let message_length = ((handshake[1] as usize) << 16)
+                | ((handshake[2] as usize) << 8)
+                | handshake[3] as usize;
+            if message_length > 64 * 1024 {
+                return Rejected(DomainReason::PerFlowBudget);
+            }
+            if handshake.len() >= 4 + message_length {
+                return parse_hello(&handshake[..4 + message_length]);
+            }
+        }
+        NeedMore
     }
 }
 
-/// Whether any ECH-related extension is present (draft `EncryptedServerName`,
-/// `Unknown(0xFFCE)` or `Unknown(0xFE0D)`).
-fn has_ech(extensions: &[TlsExtension<'_>]) -> bool {
-    extensions.iter().any(|ext| match ext {
-        TlsExtension::EncryptedServerName { .. } => true,
-        TlsExtension::Unknown(TlsExtensionType(t), _) => {
-            *t == RFC9849_ECH_EXTENSION_TYPE || *t == DRAFT_ENCRYPTED_SERVER_NAME_TYPE
+fn parse_hello(handshake: &[u8]) -> DomainParseResult {
+    let malformed = || DomainParseResult::Rejected(DomainReason::Malformed);
+    let Ok((rest, hello)) = parse_tls_handshake_client_hello(&handshake[4..]) else {
+        return malformed();
+    };
+    if !rest.is_empty() {
+        return malformed();
+    }
+    let Some(ext_bytes) = hello.ext else {
+        return DomainParseResult::Complete(HelloObservation::default());
+    };
+    // tls-parser's many0 parser can accept a valid prefix of a malformed list.
+    // Validate every extension's declared boundary and require full consumption.
+    let mut offset = 0;
+    let mut types = std::collections::HashSet::new();
+    while offset < ext_bytes.len() {
+        let Some(header) = ext_bytes.get(offset..offset + 4) else {
+            return malformed();
+        };
+        let kind = u16::from_be_bytes([header[0], header[1]]);
+        let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        if !types.insert(kind) || offset + 4 + length > ext_bytes.len() {
+            return malformed();
         }
-        _ => false,
+        if kind == 0 {
+            let body = &ext_bytes[offset + 4..offset + 4 + length];
+            if body.len() < 2
+                || usize::from(u16::from_be_bytes([body[0], body[1]])) != body.len() - 2
+            {
+                return malformed();
+            }
+            let mut cursor = 2;
+            let mut names = std::collections::HashSet::new();
+            while cursor < body.len() {
+                let Some(header) = body.get(cursor..cursor + 3) else {
+                    return malformed();
+                };
+                let name_len = usize::from(u16::from_be_bytes([header[1], header[2]]));
+                if !names.insert(header[0]) || name_len == 0 || cursor + 3 + name_len > body.len() {
+                    return malformed();
+                }
+                cursor += 3 + name_len;
+            }
+        }
+        offset += 4 + length;
+    }
+    let Ok((rest, extensions)) = parse_tls_extensions(ext_bytes) else {
+        return malformed();
+    };
+    if !rest.is_empty() {
+        return malformed();
+    }
+    let sni = extract_sni(&extensions);
+    if extensions.iter().any(|ext| matches!(ext, TlsExtension::SNI(entries)
+        if entries.iter().any(|(kind, name)| kind.0 == 0 && (name.is_empty() || std::str::from_utf8(name).is_err())))) {
+        return malformed();
+    }
+    DomainParseResult::Complete(HelloObservation {
+        observed_sni: sni,
+        ech_extension_present: types.contains(&RFC9849_ECH_EXTENSION_TYPE),
+        esni_extension_present: types.contains(&DRAFT_ENCRYPTED_SERVER_NAME_TYPE),
     })
 }
 
@@ -117,7 +205,8 @@ fn extract_sni(extensions: &[TlsExtension<'_>]) -> Option<Arc<str>> {
 /// `domain_parse_composite::tests` and `capture::tests::perf_benches` — any
 /// TLS wire-format construction goes through this module instead of being
 /// copied in three places.
-#[cfg(test)]
+#[cfg(any(test, feature = "tls-eval-observe"))]
+#[allow(dead_code)]
 pub mod test_fixtures {
     /// Build a TLS record: `content_type(1) | version(2) | length(2) | payload`.
     pub fn tls_record(content_type: u8, payload: &[u8]) -> Vec<u8> {

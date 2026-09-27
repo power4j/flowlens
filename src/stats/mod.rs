@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+#[cfg(feature = "tls-eval-observe")]
+#[allow(dead_code)]
+mod observe;
 mod ranking;
 mod snapshot;
 
@@ -85,12 +88,16 @@ pub struct Stats {
     /// recent record).
     proc_window_epoch: Option<i64>,
     proc_names: HashMap<ProcessKey, Arc<str>>,
-    by_domain: HashMap<Arc<str>, DomainTraffic>,
-    domain_last_seen: HashMap<Arc<str>, DateTime<Utc>>,
+    by_domain: HashMap<crate::domain_parse::DomainName, DomainTraffic>,
+    domain_last_seen: HashMap<crate::domain_parse::DomainName, DateTime<Utc>>,
     rank_proc: HashMap<ProcessKey, RankingEntityWindow>,
     rank_in_ip: HashMap<IpAddr, RankingEntityWindow>,
     rank_out_ip: HashMap<IpAddr, RankingEntityWindow>,
-    rank_domain: HashMap<Arc<str>, RankingEntityWindow>,
+    rank_domain: HashMap<crate::domain_parse::DomainName, RankingEntityWindow>,
+    domain_rank_epoch: Option<i64>,
+    // Each Stats consumes one capture source's FIFO; interface switches create
+    // fresh Stats. This high-water mark does not support merging producer queues.
+    last_domain_backfill_delivery: u64,
     rank_epoch: Option<i64>,
     rank_start_epoch: Option<i64>,
     rank_window_evictions: u64,
@@ -189,12 +196,16 @@ impl Stats {
     }
     fn record_rank_domain(
         &mut self,
-        host: Arc<str>,
+        host: crate::domain_parse::DomainName,
         direction: Direction,
         bytes: u64,
         observed_at: DateTime<Utc>,
     ) {
-        let epoch = self.rank_epoch(observed_at);
+        let event_epoch = observed_at.timestamp();
+        let epoch = self
+            .domain_rank_epoch
+            .map_or(event_epoch, |old| old.max(event_epoch));
+        self.domain_rank_epoch = Some(epoch);
         let is_new = !self.rank_domain.contains_key(&host);
         if is_new
             && self.rank_domain.len() >= MAX_RANKING_DOMAIN_ENTRIES
@@ -203,7 +214,9 @@ impl Stats {
             self.rank_window_evictions = self.rank_window_evictions.saturating_add(1);
         }
         let window = self.rank_domain.entry(host).or_default();
-        window.record(direction, epoch, bytes);
+        if event_epoch >= epoch - 299 {
+            window.record(direction, event_epoch, bytes);
+        }
         window.prune(epoch);
     }
     pub(crate) fn diagnostics_snapshot(&self) -> StatsDiagnostics {
@@ -343,12 +356,7 @@ impl Stats {
         observed_at: DateTime<Utc>,
     ) {
         self.record_interface_flow(&flow, observed_at);
-        self.record_outbound_domain(
-            flow.domain.as_ref(),
-            flow.direction,
-            flow.bytes,
-            observed_at,
-        );
+        self.record_flow_domain(&flow, observed_at);
         if let Some(peer_local) = flow.peer_local_socket {
             self.record_process(
                 process.clone(),
@@ -573,7 +581,7 @@ impl Stats {
     /// record_*_domain actually runs; snapshot() reads but never updates.
     pub(crate) fn record_outbound_domain(
         &mut self,
-        domain: Option<&Arc<str>>,
+        domain: Option<&crate::domain_parse::DomainName>,
         direction: Direction,
         bytes: u64,
         observed_at: DateTime<Utc>,
@@ -587,7 +595,51 @@ impl Stats {
             Direction::Outbound => entry.sent += bytes,
         }
         self.record_rank_domain(host.clone(), direction, bytes, observed_at);
-        self.domain_last_seen.insert(host.clone(), observed_at);
+        self.domain_last_seen
+            .entry(host.clone())
+            .and_modify(|at| *at = (*at).max(observed_at))
+            .or_insert(observed_at);
+    }
+
+    pub(crate) fn record_flow_domain(&mut self, flow: &Flow, fallback: DateTime<Utc>) {
+        let at = flow
+            .domain_event
+            .as_ref()
+            .map_or(fallback, |event| event.observed_at);
+        self.record_outbound_domain(flow.domain.as_ref(), flow.direction, flow.bytes, at);
+        let Some(event) = flow.domain_event.as_ref() else {
+            return;
+        };
+        let Some(backfill) = event.backfill.as_ref() else {
+            return;
+        };
+        // Delivery IDs follow resolution order, independently of connection
+        // generation order. FIFO consumption makes this duplicate guard bounded.
+        if backfill.generation != event.generation
+            || backfill.delivery_id <= self.last_domain_backfill_delivery
+        {
+            return;
+        }
+        let Some(host) = flow.domain.as_ref() else {
+            return;
+        };
+        self.last_domain_backfill_delivery = backfill.delivery_id;
+        let entry = self.by_domain.entry(host.clone()).or_default();
+        entry.recv += backfill.recv;
+        entry.sent += backfill.sent;
+        for bucket in &backfill.buckets {
+            if let Some(at) = DateTime::from_timestamp(bucket.epoch, 0) {
+                self.record_rank_domain(host.clone(), Direction::Inbound, bucket.recv, at);
+                self.record_rank_domain(host.clone(), Direction::Outbound, bucket.sent, at);
+            }
+        }
+        self.domain_last_seen
+            .entry(host.clone())
+            .and_modify(|at| *at = (*at).max(backfill.last_seen))
+            .or_insert(backfill.last_seen);
+        backfill
+            .delivered
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     fn add_process_or_unattributed(
         &mut self,
@@ -847,8 +899,13 @@ impl Stats {
             })
             .collect::<Vec<_>>()
             .into();
-        let outbound_domains = self
-            .ranked_domains(top_n, rank_epoch, rank_window)
+        let domain_rows = self
+            .ranked_domains(
+                top_n,
+                self.domain_rank_epoch
+                    .map_or(now.timestamp(), |epoch| epoch.max(now.timestamp())),
+                rank_window,
+            )
             .into_iter()
             .map(|(host, rank)| {
                 let lifetime = self.by_domain[&host];
@@ -866,6 +923,24 @@ impl Stats {
                     last_seen,
                 )
             })
+            .collect::<Vec<_>>();
+        let outbound_domains = domain_rows
+            .iter()
+            .filter(|row| row.kind() == crate::domain_parse::DomainKind::Ordinary)
+            .take(top_n)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let public_sni = domain_rows
+            .iter()
+            .filter(|row| row.kind() == crate::domain_parse::DomainKind::PublicSni)
+            .take(top_n)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        let domain_rows = domain_rows
+            .into_iter()
+            .take(top_n)
             .collect::<Vec<_>>()
             .into();
         TrafficSnapshot {
@@ -887,6 +962,8 @@ impl Stats {
             inbound_ips,
             outbound_ips,
             outbound_domains,
+            public_sni,
+            domain_rows,
             diagnostics: None,
         }
     }
@@ -965,7 +1042,7 @@ impl Stats {
         n: usize,
         epoch: i64,
         window: RankWindow,
-    ) -> Vec<(Arc<str>, ProcTraffic)> {
+    ) -> Vec<(crate::domain_parse::DomainName, ProcTraffic)> {
         let mut entries = self
             .by_domain
             .keys()
@@ -990,13 +1067,54 @@ impl Stats {
                 .cmp(&left.total())
                 .then_with(|| left_host.cmp(right_host))
         });
-        entries.truncate(n);
+        let mut ordinary = 0;
+        let mut public = 0;
+        entries.retain(|(host, _)| {
+            let count = match host.kind() {
+                crate::domain_parse::DomainKind::Ordinary => &mut ordinary,
+                crate::domain_parse::DomainKind::PublicSni => &mut public,
+            };
+            if *count >= n {
+                return false;
+            }
+            *count += 1;
+            true
+        });
         entries
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn domain_identity_ties_sort_by_name_then_kind() {
+        use crate::domain_parse::{DomainKind, DomainName};
+        let mut stats = super::Stats::default();
+        let at = "2026-07-15T08:00:00Z".parse().unwrap();
+        for (name, kind) in [
+            ("same.example", DomainKind::PublicSni),
+            ("z.example", DomainKind::Ordinary),
+            ("same.example", DomainKind::Ordinary),
+        ] {
+            stats.record_outbound_domain(
+                Some(&DomainName::new(std::sync::Arc::from(name), kind)),
+                super::Direction::Outbound,
+                100,
+                at,
+            );
+        }
+        let snapshot = stats.snapshot_at(10, at, super::RankWindow::Cumulative);
+        let rows = snapshot.visible_domains();
+        assert_eq!(
+            (rows[0].host(), rows[0].kind()),
+            ("same.example", DomainKind::Ordinary)
+        );
+        assert_eq!(
+            (rows[1].host(), rows[1].kind()),
+            ("same.example", DomainKind::PublicSni)
+        );
+        assert_eq!(rows[2].host(), "z.example");
+    }
     use super::*;
 
     use crate::capture::{Flow, LocalSocket, TransportProtocol};
@@ -1022,6 +1140,7 @@ mod tests {
             local_socket: None,
             peer_local_socket: None,
             domain: None,
+            domain_event: None,
         }
     }
 
@@ -1038,7 +1157,8 @@ mod tests {
             bytes,
             local_socket: None,
             peer_local_socket: None,
-            domain,
+            domain: domain.map(Into::into),
+            domain_event: None,
         }
     }
 
@@ -1068,6 +1188,7 @@ mod tests {
                     protocol: TransportProtocol::Tcp,
                 }),
                 domain: None,
+                domain_event: None,
             },
             Some(ObservedProcess {
                 pid: 7,
@@ -1113,6 +1234,7 @@ mod tests {
             }),
             peer_local_socket: None,
             domain: None,
+            domain_event: None,
         }
     }
 
@@ -1924,7 +2046,7 @@ mod tests {
         }
         for index in 0..=MAX_RANKING_DOMAIN_ENTRIES {
             stats.record_rank_domain(
-                Arc::from(format!("{index}.example")),
+                Arc::<str>::from(format!("{index}.example")).into(),
                 Direction::Inbound,
                 1,
                 observed_at,

@@ -2,9 +2,8 @@
 
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Cell, Row, Table};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 
-use crate::report::truncate;
 use crate::stats::{RankWindow, TrafficSnapshot};
 use crate::theme::{Role, Theme};
 
@@ -24,17 +23,17 @@ pub(in crate::tui) fn draw_domain_preview(
     now: chrono::DateTime<chrono::Utc>,
     theme: &Theme,
 ) {
-    let footer = preview_position(snapshot.outbound_domains.len(), area.height);
+    let footer = preview_position(snapshot.visible_domains().len(), area.height);
     let block = panel_block(
         "dom",
         "Top Domains",
-        Some(snapshot.outbound_domains.len()),
+        Some(snapshot.visible_domains().len()),
         theme.color(Role::Brand),
         theme.color(Role::Border),
         Some(footer),
         theme,
     );
-    let table = domain_table(snapshot, mode, block, now, theme);
+    let table = domain_table(snapshot, mode, area.width, block, now, theme);
     f.render_widget(table, area);
 }
 
@@ -47,23 +46,37 @@ pub(in crate::tui) fn draw_domains(
     now: chrono::DateTime<chrono::Utc>,
     theme: &Theme,
 ) {
+    let note = Rect {
+        y: area.y + area.height.saturating_sub(1),
+        height: 1,
+        ..area
+    };
+    let area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    f.render_widget(
+        Paragraph::new("Visible TLS name; actual target may differ")
+            .style(Style::default().fg(theme.color(Role::Secondary))),
+        note,
+    );
     let view_h = area.height.saturating_sub(3) as usize;
     state.domain_view_height = view_h.max(1);
     state.domain_scroll = state
         .domain_scroll
-        .min(snapshot.outbound_domains.len().saturating_sub(1));
+        .min(snapshot.visible_domains().len().saturating_sub(1));
 
-    let footer = selected_position(state.domain_scroll, snapshot.outbound_domains.len());
+    let footer = selected_position(state.domain_scroll, snapshot.visible_domains().len());
     let block = panel_block(
         "dom",
         "Domains",
-        Some(snapshot.outbound_domains.len()),
+        Some(snapshot.visible_domains().len()),
         theme.color(Role::Brand),
         theme.color(Role::Border),
         Some(footer),
         theme,
     );
-    let table = domain_table(snapshot, mode, block, now, theme)
+    let table = domain_table(snapshot, mode, area.width, block, now, theme)
         .row_highlight_style(
             Style::default()
                 .patch(theme.selection_style())
@@ -73,42 +86,65 @@ pub(in crate::tui) fn draw_domains(
     f.render_stateful_widget(
         table,
         area,
-        &mut ratatui_state(snapshot.outbound_domains.len(), state.domain_scroll),
+        &mut ratatui_state(snapshot.visible_domains().len(), state.domain_scroll),
     );
 }
 
 pub(in crate::tui) fn domain_table(
     snapshot: &TrafficSnapshot,
     mode: LayoutMode,
+    width: u16,
     block: Block<'static>,
     now: chrono::DateTime<chrono::Utc>,
     theme: &Theme,
 ) -> Table<'static> {
-    let compact = mode == LayoutMode::Compact;
-    let rows = domain_rows(snapshot, compact, now, theme);
+    let compact = mode == LayoutMode::Compact || width < 100;
+    let narrow = width < 70;
+    let host_width = width.saturating_sub(if narrow {
+        28
+    } else if compact {
+        41
+    } else {
+        65
+    }) as usize;
+    let rows = domain_rows(snapshot, compact, narrow, host_width, now, theme);
     let header_style = Style::default().fg(theme.color(Role::Header));
-    let table = if compact {
+    let table = if narrow {
         Table::new(
             rows,
             [
-                Constraint::Min(18),
+                Constraint::Min(10),
+                Constraint::Length(10),
+                Constraint::Length(12),
+            ],
+        )
+        .header(Row::new(vec!["Host", "Type", "Total"]).style(header_style))
+    } else if compact {
+        Table::new(
+            rows,
+            [
+                Constraint::Min(10),
+                Constraint::Length(10),
                 Constraint::Length(12),
                 Constraint::Length(12),
             ],
         )
-        .header(Row::new(vec!["Host", "Total", "Last seen"]).style(header_style))
+        .header(Row::new(vec!["Host", "Type", "Total", "Last seen"]).style(header_style))
     } else {
         Table::new(
             rows,
             [
                 Constraint::Min(20),
+                Constraint::Length(10),
                 Constraint::Length(11),
                 Constraint::Length(11),
                 Constraint::Length(12),
                 Constraint::Length(10),
             ],
         )
-        .header(Row::new(vec!["Host", "In", "Out", "Total", "Last seen"]).style(header_style))
+        .header(
+            Row::new(vec!["Host", "Type", "In", "Out", "Total", "Last seen"]).style(header_style),
+        )
     };
     table.column_spacing(1).block(block)
 }
@@ -116,20 +152,30 @@ pub(in crate::tui) fn domain_table(
 pub(in crate::tui) fn domain_rows(
     snapshot: &TrafficSnapshot,
     compact: bool,
+    narrow: bool,
+    host_width: usize,
     now: chrono::DateTime<chrono::Utc>,
     theme: &Theme,
 ) -> Vec<Row<'static>> {
-    if snapshot.outbound_domains.is_empty() {
+    if snapshot.visible_domains().is_empty() {
         let empty_state = if snapshot.ranking.window == RankWindow::Cumulative {
             "No outbound domains observed"
         } else {
             "No domains in window"
         };
-        let cells = if compact {
+        let cells = if narrow {
             vec![Cell::from(empty_state), Cell::from(""), Cell::from("")]
+        } else if compact {
+            vec![
+                Cell::from(empty_state),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ]
         } else {
             vec![
                 Cell::from(empty_state),
+                Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
@@ -140,25 +186,34 @@ pub(in crate::tui) fn domain_rows(
     }
 
     snapshot
-        .outbound_domains
+        .visible_domains()
         .iter()
         .map(|domain| {
-            let host = Cell::from(truncate(domain.host(), 40));
+            let host = Cell::from(truncate_host(domain.host(), host_width));
+            let kind = Cell::from(match domain.kind() {
+                crate::domain_parse::DomainKind::Ordinary => "",
+                crate::domain_parse::DomainKind::PublicSni => "Public SNI",
+            });
             let last_seen = Cell::from(relative_last_seen(domain.last_seen(), now))
                 .style(Style::default().fg(theme.color(Role::Time)));
             if compact {
-                Row::new(vec![
+                let mut cells = vec![
                     host,
+                    kind,
                     Cell::from(format_rank_value(
                         snapshot,
                         domain.rank_in_bytes.saturating_add(domain.rank_out_bytes),
                     ))
                     .style(Style::default().fg(theme.color(Role::Total))),
-                    last_seen,
-                ])
+                ];
+                if !narrow {
+                    cells.push(last_seen);
+                }
+                Row::new(cells)
             } else {
                 Row::new(vec![
                     host,
+                    kind,
                     Cell::from(format_rank_value(snapshot, domain.rank_in_bytes))
                         .style(Style::default().fg(theme.color(Role::Inbound))),
                     Cell::from(format_rank_value(snapshot, domain.rank_out_bytes))
@@ -175,10 +230,96 @@ pub(in crate::tui) fn domain_rows(
         .collect()
 }
 
+fn truncate_host(name: &str, width: usize) -> String {
+    if ratatui::text::Span::raw(name).width() <= width {
+        return name.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut head = String::new();
+    for ch in name.chars() {
+        let mut next = head.clone();
+        next.push(ch);
+        if ratatui::text::Span::raw(next.as_str()).width() > width - 1 {
+            break;
+        }
+        head = next;
+    }
+    head.push('…');
+    head
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tui::*;
+
+    #[test]
+    fn public_sni_is_distinct_in_mono_at_wide_standard_narrow_and_minimum() {
+        use crate::domain_parse::{DomainKind, DomainName};
+        let mut stats = crate::stats::Stats::default();
+        let at = "2026-07-15T08:00:00Z".parse().unwrap();
+        for kind in [DomainKind::Ordinary, DomainKind::PublicSni] {
+            stats.record_outbound_domain(
+                Some(&DomainName::new(Arc::from("same.example"), kind)),
+                crate::stats::Direction::Outbound,
+                100,
+                at,
+            );
+        }
+        let snapshot = stats.snapshot_at(10, at, RankWindow::Cumulative);
+        for (width, height) in [(120, 30), (80, 24), (60, 24), (60, 16)] {
+            let mut state = AppState::for_test();
+            state.page = Page::Domains;
+            state.theme = crate::theme::ThemeSession::load(Some("mono")).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_at(
+                        frame,
+                        &mut state,
+                        &snapshot,
+                        "eth0",
+                        "host",
+                        Instant::now(),
+                        at,
+                    )
+                })
+                .unwrap();
+            let lines = rendered_lines(&terminal);
+            let rendered = lines.join("\n");
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| line.contains("same.example"))
+                    .count(),
+                2,
+                "{width}x{height}: {rendered}"
+            );
+            assert!(
+                rendered.contains("Public SNI"),
+                "{width}x{height}: {rendered}"
+            );
+            assert!(rendered.contains("Type"));
+            assert!(rendered.contains("Visible TLS name; actual target may differ"));
+            if width == 60 {
+                assert!(!rendered.contains("Last seen"));
+            }
+            if let Some(directory) = std::env::var_os("FLOWLENS_PUBLIC_SNI_RENDER_DIR") {
+                std::fs::write(
+                    std::path::Path::new(&directory).join(format!("domains-{width}x{height}.txt")),
+                    rendered,
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(truncate_host("中文名称.example", 9), "中文名称…");
+        assert_eq!(
+            ratatui::text::Span::raw(truncate_host("中文名称.example", 8)).width(),
+            7
+        );
+    }
 
     #[test]
     fn overview_domain_preview_lists_top_domains_and_empty_state() {
