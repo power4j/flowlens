@@ -457,6 +457,8 @@ fn process_packet(
     pending: &mut VecDeque<PendingCaptureItem>,
 ) {
     let captured_bytes = data.len() as u64;
+    // Windows timeval.tv_sec uses 32-bit c_long; 64-bit Unix already uses i64.
+    #[allow(clippy::unnecessary_cast)]
     let observed_at = chrono::DateTime::from_timestamp(
         header.ts.tv_sec as i64,
         (header.ts.tv_usec as u32).saturating_mul(1000),
