@@ -276,7 +276,10 @@ impl CaptureSource<pcap::Active> {
             .buffer_size(2_000_000)
             .promisc(false)
             .open()?;
-        if is_loopback {
+        // Darwin taps loopback packets on the outgoing BPF path; incoming-only
+        // capture would suppress all lo0 traffic. Keep the existing deduplication
+        // direction on other platforms.
+        if is_loopback && !cfg!(target_os = "macos") {
             let _ = cap.direction(pcap::Direction::In);
         }
         let link_type = cap.get_datalink();
