@@ -53,8 +53,8 @@ FlowLens includes four themes for true-color, ANSI 16-color, and monochrome term
 
 | Platform | Availability and runtime requirements |
 | --- | --- |
-| Linux `x86_64` | glibc `2.28` or newer, libpcap, and root or `CAP_NET_RAW` |
-| Linux `aarch64` | glibc `2.28` or newer, libpcap, and root or `CAP_NET_RAW` |
+| Linux `x86_64` | glibc `2.28` or newer and root or `CAP_NET_RAW`; older dynamic archives also need matching libpcap |
+| Linux `aarch64` | glibc `2.28` or newer and root or `CAP_NET_RAW`; older dynamic archives also need matching libpcap |
 | Windows `x86_64` | Windows with [Npcap Runtime](https://npcap.com/) installed |
 | Windows `aarch64` | Windows on ARM with [Npcap Runtime](https://npcap.com/) installed |
 | macOS `x86_64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
@@ -110,7 +110,7 @@ command -v flowlens
 
 System installation leaves an old `~/.local/bin/flowlens` in place and warns that it may take precedence in your shell. The cleanup command above applies only to installer-managed copies; review and remove unmanaged copies manually after verifying the system installation.
 
-The installer requires Bash 3.2+, `curl`, `tar`, `ldd`, and `sha256sum` or `shasum`. After verifying the download and completing install preflight, default system installation prepares missing libpcap runtime packages on Debian/Ubuntu (`apt-get`, selecting `libpcap0.8t64` when available or legacy `libpcap0.8`) and RPM families (`dnf` or `yum`, installing `libpcap`). It does not install development packages. Package operations are noninteractive, require root or working `sudo -n`, and do not consume piped script input. The installer supports Linux only and rejects macOS. Windows and experimental macOS builds use the archives below.
+The installer requires Bash 3.2+, `curl`, `tar`, `ldd`, and `sha256sum` or `shasum`. New Linux distribution builds embed libpcap; already-published dynamic archives still need the matching runtime. After verifying the download and completing install preflight, default system installation prepares missing libpcap runtime packages only when the binary requires them on Debian/Ubuntu (`apt-get`, selecting `libpcap0.8t64` when available or legacy `libpcap0.8`) and RPM families (`dnf` or `yum`, installing `libpcap`). It does not install development packages. Package operations are noninteractive, require root or working `sudo -n`, and do not consume piped script input. The installer supports Linux only and rejects macOS. Windows and experimental macOS builds use the archives below.
 
 Download the archive for the target operating system and CPU architecture from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
 
@@ -135,11 +135,17 @@ sudo bash install.sh --setcap
 
 `--user` and custom-directory installs never change system packages, even when run as root. Missing dependencies stop installation with manual setup guidance. `--dry-run` and `--uninstall` never change packages; dry-run does not grant capabilities. Unsupported distributions or package managers require manual dependency setup. Package setup failures stop binary publication; packages already installed are not rolled back.
 
-Readiness is checked against the verified binary's loader requirements, not merely the installed package name. Some RPM systems provide `libpcap.so.1` but the release artifact may require `libpcap.so.0.8`; installation stops if that requirement remains unresolved. Do not create compatibility symlinks between different SONAMEs.
+Linux distribution builds use a pinned, statically linked libpcap and do not require a system libpcap package. glibc remains dynamic with the `2.28` baseline. Local source builds and older releases may still link libpcap dynamically. Readiness is checked against the verified binary's loader requirements, not merely the installed package name. Some RPM systems provide `libpcap.so.1` but the release artifact may require `libpcap.so.0.8`; installation stops if that requirement remains unresolved. Do not create compatibility symlinks between different SONAMEs.
 
 #### Manual Linux archives
 
-For a manually extracted archive, install the matching libpcap runtime if it is not already available:
+For a manually extracted archive, inspect it first:
+
+```bash
+ldd ./flowlens
+```
+
+Only older/dynamic archives showing a missing libpcap dependency need a matching system runtime:
 
 ```bash
 # Debian/Ubuntu: refresh metadata and inspect available runtime packages
@@ -179,7 +185,7 @@ Download `flowlens-vX.Y.Z-macos-x86_64.tar.gz` for an Intel Mac or `flowlens-vX.
 
 The macOS binary is unsigned and unnotarized, so macOS may block or warn about it. Review the downloaded archive and follow the security policy for the target Mac; FlowLens does not currently provide a signed build.
 
-Both architectures are built on native GitHub-hosted macOS runners and checked with `file`, `otool`, `flowlens --help`, and `flowlens --version`. A complete macOS runtime validation environment is not available, so real packet capture, permissions, interface behavior, process attribution, long-running stability, performance, and the minimum supported macOS version have not been fully tested.
+Both architectures are built on native GitHub-hosted macOS 15 runners with explicit deployment targets matching Rust 1.96.0 defaults (`10.12` for Intel, `11.0` for Apple Silicon). They link the system libpcap, not Homebrew. CI audits architecture, the deployment target, and system-only dynamic library paths. Test-build and Release workflows also exercise root loopback capture. This is a build baseline, not a claim of compatibility with older macOS versions. Non-root capture permissions, other interfaces, process attribution, long-running stability, and performance remain incompletely validated.
 
 ## Usage
 
@@ -263,7 +269,7 @@ The current development tree and all FlowLens releases after v0.7.0 are licensed
 
 Copyright (C) 2026 power4j. Contact: power4j@outlook.com.
 
-Releases up to and including v0.7.0 remain licensed under the Apache License 2.0 included with those releases. Individual contribution attribution remains in the Git history.
+Releases up to and including v0.7.0 remain licensed under the Apache License 2.0 included with those releases. Individual contribution attribution remains in the Git history. Linux archives built by the static-libpcap workflow append the bundled libpcap license and copyright notices to the archive's `LICENSE`.
 
 For development and source-build instructions, see [`docs/development.md`](docs/development.md).
 For offline TLS domain and resource evaluations, see [`docs/tls-evaluation.md`](docs/tls-evaluation.md).

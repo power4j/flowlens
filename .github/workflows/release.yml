@@ -103,17 +103,18 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          cache: false
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-release-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+            target/${{ matrix.target_dir }}
+          key: ${{ runner.os }}-release-${{ matrix.arch }}-static-pcap-v1-rust-${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-release-${{ matrix.arch }}-rust-${{ env.RUST_VERSION }}-
+            ${{ runner.os }}-release-${{ matrix.arch }}-static-pcap-v1-rust-${{ env.RUST_VERSION }}-
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libpcap-dev
+        run: sudo apt-get update && sudo apt-get install --yes flex bison pkg-config
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -125,21 +126,48 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo set-version "$RELEASE_VERSION"
+      - name: Compute native libpcap cache key
+        id: libpcap-cache-key
+        run: echo "key=$(bash scripts/build-linux-release.sh '${{ matrix.target }}' --cache-key)" >> "$GITHUB_OUTPUT"
+      - name: Cache native libpcap installation
+        uses: actions/cache@v6
+        with:
+          path: target/native/${{ matrix.target_dir }}/install
+          key: ${{ steps.libpcap-cache-key.outputs.key }}
       - name: Build Linux distribution binary
-        run: cargo zigbuild --release --locked --target "${{ matrix.target }}"
+        run: bash scripts/build-linux-release.sh "${{ matrix.target }}"
       - name: Verify Linux binary baseline
+        run: bash scripts/verify-linux-binary.sh "target/${{ matrix.target_dir }}/release/flowlens" "${{ matrix.arch }}"
+      - name: Test installer and binary audit fixtures
         run: |
-          binary=target/${{ matrix.target_dir }}/release/flowlens
-          test -x "$binary"
-          readelf -d "$binary" | grep -q 'libpcap.so'
-          max_glibc="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)"
-          test "$(printf '%s\n' "$max_glibc" "2.28" | sort -V | tail -1)" = "2.28"
+          bash tests/install/test-install.sh
+          bash tests/build/test-linux-binary.sh
+          bash tests/build/test-macos-binary.sh
+          bash tests/build/test-linux-smoke.sh
+          bash tests/build/test-libpcap-cache.sh
+          python3 tests/build/test-capture-smoke.py
+      - name: Capture without system libpcap across distributions
+        run: |
+          set -euo pipefail
+          for image in debian:bookworm-slim ubuntu:24.04 quay.io/fedora/fedora:43 quay.io/rockylinux/rockylinux:8; do
+            docker run --rm --cap-add NET_RAW -v "$PWD:/work:ro" "$image" bash -c '
+              set -euo pipefail
+              if command -v apt-get >/dev/null; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 util-linux libcap2-bin
+              else
+                dnf install -y python3 util-linux libcap
+              fi
+              cat /etc/os-release
+              bash /work/scripts/smoke-linux-release.sh /work/target/${{ matrix.target_dir }}/release/flowlens
+            '
+          done
       - name: Package Linux binary
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           mkdir -p dist
-          cp LICENSE target/${{ matrix.target_dir }}/release/LICENSE
+          test -s target/${{ matrix.target_dir }}/release/LICENSE
           tar -C target/${{ matrix.target_dir }}/release \
             -czf "dist/flowlens-v${RELEASE_VERSION}-linux-${{ matrix.arch }}.tar.gz" flowlens LICENSE
       - uses: actions/upload-artifact@v7
@@ -300,16 +328,21 @@ jobs:
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+      LIBPCAP_LIBDIR: /usr/lib
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: aarch64
+            deployment_target: "11.0"
             file_arch: arm64
             runner: macos-15
             target: aarch64-apple-darwin
             target_dir: aarch64-apple-darwin
           - arch: x86_64
+            deployment_target: "10.12"
             file_arch: x86_64
             runner: macos-15-intel
             target: x86_64-apple-darwin
@@ -337,7 +370,7 @@ jobs:
           set -euo pipefail
           sw_vers
           xcrun --show-sdk-path
-          pkg-config --modversion libpcap || true
+          /usr/sbin/tcpdump --version
       - name: Install cargo-edit
         run: cargo install cargo-edit --version "$CARGO_EDIT_VERSION" --locked
       - name: Apply release version
@@ -346,18 +379,14 @@ jobs:
         run: cargo set-version "$RELEASE_VERSION"
       - name: Build macOS distribution binary
         run: cargo build --release --locked --target "${{ matrix.target }}"
-      - name: Verify macOS binary
+      - name: Verify macOS binary and loopback capture
         shell: bash
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           binary="target/${{ matrix.target_dir }}/release/flowlens"
-          test -x "$binary"
-          file "$binary" | grep -q '${{ matrix.file_arch }}'
-          otool -L "$binary" | grep -q 'libpcap'
-          "$binary" --help >/dev/null
-          test "$("$binary" --version)" = "flowlens ${RELEASE_VERSION}"
+          bash scripts/verify-macos-binary.sh "$binary" "${{ matrix.file_arch }}" "$MACOSX_DEPLOYMENT_TARGET"
+          test "$("$binary" --version)" = "flowlens ${{ needs.prepare.outputs.version }}"
+          sudo -n python3 scripts/smoke-capture.py "$PWD/$binary" lo0
       - name: Package macOS binary
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}

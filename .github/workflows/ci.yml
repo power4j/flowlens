@@ -36,6 +36,9 @@ jobs:
 
   validate-macos:
     name: validate-macos-${{ matrix.arch }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+      LIBPCAP_LIBDIR: /usr/lib
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -43,9 +46,11 @@ jobs:
       matrix:
         include:
           - arch: arm64
+            deployment_target: "11.0"
             runner: macos-15
             target: aarch64-apple-darwin
           - arch: x86_64
+            deployment_target: "10.12"
             runner: macos-15-intel
             target: x86_64-apple-darwin
     steps:
@@ -70,7 +75,7 @@ jobs:
           set -euo pipefail
           sw_vers
           xcrun --show-sdk-path
-          pkg-config --modversion libpcap || true
+          /usr/sbin/tcpdump --version
 
       - name: Check source
         run: cargo check --locked --target ${{ matrix.target }}
@@ -86,7 +91,7 @@ jobs:
           set -euo pipefail
           file "target/${{ matrix.target }}/release/flowlens"
           file "target/${{ matrix.target }}/release/refcap"
-          otool -L "target/${{ matrix.target }}/release/flowlens"
+          bash scripts/verify-macos-binary.sh "target/${{ matrix.target }}/release/flowlens" "${{ matrix.arch }}" "$MACOSX_DEPLOYMENT_TARGET"
       - name: Smoke test binaries
         shell: bash
         run: |

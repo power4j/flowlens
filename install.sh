@@ -532,10 +532,11 @@ runtime_present() {
   # The loader checks architecture and the artifact's exact SONAME. In particular,
   # RPM's libpcap.so.1 does not satisfy an artifact linked to libpcap.so.0.8.
   PCAP_SONAME="$(awk '$1 ~ /^libpcap\.so\./ { print $1; exit }' "${TMP_DIR}/loader-output")"
-  if [ -z "${PCAP_SONAME}" ] || grep -v 'libpcap\.so\.' "${TMP_DIR}/loader-output" | grep -q 'not found'; then
+  if grep -v 'libpcap\.so\.' "${TMP_DIR}/loader-output" | grep -q 'not found'; then
     cat "${TMP_DIR}/loader-output" >&2
     return 2
   fi
+  [ -n "${PCAP_SONAME}" ] || return 0
   library="$(awk '$1 ~ /^libpcap\.so\./ && $2 == "=>" { print $3; exit }' "${TMP_DIR}/loader-output")"
   case "${library}" in
     /*) [ -f "${library}" ] && [ -r "${library}" ] && return 0 ;;
@@ -1147,7 +1148,11 @@ print_post_install_notes() {
   local path_updated="$1"
   local quoted_binary
   quoted_binary="$(quote_path "${BINARY_PATH}")"
-  log "Linux binaries require glibc 2.28 or newer and the libpcap runtime."
+  if [ -n "${PCAP_SONAME}" ]; then
+    log "This Linux binary requires glibc 2.28 or newer and the ${PCAP_SONAME} runtime."
+  else
+    log "This Linux binary requires glibc 2.28 or newer; libpcap is statically linked, so no system libpcap is required."
+  fi
   if [ "${WANT_SETCAP}" -eq 1 ]; then
     if [ "${WANT_DRY_RUN}" -eq 1 ]; then
       log "After installation with --setcap, CAP_NET_RAW would allow capture without sudo:"

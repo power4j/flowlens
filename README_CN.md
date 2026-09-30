@@ -52,8 +52,8 @@ FlowLens 提供四种主题，适配真彩色、ANSI 16 色和单色终端。`Au
 
 | 平台 | 可用性与运行前置条件 |
 | --- | --- |
-| Linux `x86_64` | glibc `2.28` 或更新版本、libpcap，以及 root 权限或 `CAP_NET_RAW` |
-| Linux `aarch64` | glibc `2.28` 或更新版本、libpcap，以及 root 权限或 `CAP_NET_RAW` |
+| Linux `x86_64` | glibc `2.28` 或更新版本，以及 root 权限或 `CAP_NET_RAW`；旧动态链接压缩包还需要匹配的 libpcap |
+| Linux `aarch64` | glibc `2.28` 或更新版本，以及 root 权限或 `CAP_NET_RAW`；旧动态链接压缩包还需要匹配的 libpcap |
 | Windows `x86_64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows 系统 |
 | Windows `aarch64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows on ARM 系统 |
 | macOS `x86_64` | 实验性、未签名、未经公证的压缩包；尚未验证最低 macOS 版本和完整运行行为 |
@@ -109,7 +109,7 @@ command -v flowlens
 
 系统安装会保留原有的 `~/.local/bin/flowlens`，并提示它可能在 shell 中优先于系统版本被找到。上述清理命令仅适用于安装器管理的旧版本；手动安装的旧版本应在验证系统版本后自行检查并清理。
 
-安装器需要 Bash 3.2+、`curl`、`tar`、`ldd`，以及 `sha256sum` 或 `shasum`。下载校验和安装预检通过后，默认系统安装会自动准备缺失的 libpcap 运行库：Debian/Ubuntu 使用 `apt-get`，优先选择可用的 `libpcap0.8t64`，旧版本使用 `libpcap0.8`；RPM 系发行版使用 `dnf` 或 `yum` 安装 `libpcap`。不会安装开发包。包管理操作为非交互式，需要 root 或可用的 `sudo -n`，且不会读取管道中的脚本输入。安装器仅支持 Linux，并会拒绝在 macOS 上安装。Windows 和实验性 macOS 构建使用下面的压缩包。
+安装器需要 Bash 3.2+、`curl`、`tar`、`ldd`，以及 `sha256sum` 或 `shasum`。新的 Linux 发布构建内嵌 libpcap；已经发布的旧动态链接压缩包仍需要匹配的运行库。下载校验和安装预检通过后，默认系统安装仅在二进制确实需要时自动准备缺失的 libpcap 运行库：Debian/Ubuntu 使用 `apt-get`，优先选择可用的 `libpcap0.8t64`，旧版本使用 `libpcap0.8`；RPM 系发行版使用 `dnf` 或 `yum` 安装 `libpcap`。不会安装开发包。包管理操作为非交互式，需要 root 或可用的 `sudo -n`，且不会读取管道中的脚本输入。安装器仅支持 Linux，并会拒绝在 macOS 上安装。Windows 和实验性 macOS 构建使用下面的压缩包。
 
 从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应操作系统和 CPU 架构的压缩包，解压其中唯一的可执行文件即可。
 
@@ -134,11 +134,17 @@ sudo bash install.sh --setcap
 
 `--user` 和自定义目录安装不会修改系统软件包，即使以 root 运行也不会。依赖缺失时会停止安装并给出手动准备命令。`--dry-run` 和 `--uninstall` 不会修改软件包，试运行也不会授予能力。不支持的发行版或包管理器需要手动准备依赖。包管理失败会阻止发布二进制文件，但已安装的软件包不会回滚。
 
-安装器根据已校验二进制文件的加载器要求确认依赖，而不是仅检查包名。部分 RPM 系统提供 `libpcap.so.1`，而发布包可能需要 `libpcap.so.0.8`；如果仍无法满足实际要求，安装会停止。不要在不同 SONAME 之间创建兼容性符号链接。
+Linux 发布构建静态链接固定版本的 libpcap，无需系统 libpcap 软件包；glibc 仍为动态链接，基线保持 `2.28`。本地源码构建和旧发布版本仍可能动态链接 libpcap。安装器根据已校验二进制文件的加载器要求确认依赖，而不是仅检查包名。部分 RPM 系统提供 `libpcap.so.1`，而发布包可能需要 `libpcap.so.0.8`；如果仍无法满足实际要求，安装会停止。不要在不同 SONAME 之间创建兼容性符号链接。
 
 #### 手动安装 Linux 压缩包
 
-手动解压压缩包时，如果系统尚未安装匹配的 libpcap 运行库，请先安装：
+手动解压压缩包后，先检查依赖：
+
+```bash
+ldd ./flowlens
+```
+
+只有显示缺少 libpcap 依赖的旧版或动态链接压缩包，才需要安装匹配的系统运行库：
 
 ```bash
 # Debian/Ubuntu：刷新元数据并检查可用的运行库包
@@ -178,7 +184,7 @@ Intel Mac 从 [GitHub Releases](https://github.com/power4j/flowlens/releases/lat
 
 macOS 二进制文件未签名且未经公证，因此 macOS 可能阻止运行或显示警告。运行前应审查下载的压缩包，并遵守目标 Mac 的安全策略。FlowLens 当前不提供已签名构建。
 
-两个架构均在 GitHub 托管的原生 macOS runner 上构建，并通过 `file`、`otool`、`flowlens --help` 和 `flowlens --version` 基础检查。由于缺少完整的 macOS 运行验证环境，真实抓包、权限、网卡行为、进程归属、长时间稳定性、性能和最低支持的 macOS 版本尚未完成充分测试。
+两个架构均在 GitHub 托管的原生 macOS 15 runner 上构建，并明确沿用 Rust 1.96.0 默认部署目标（Intel 为 `10.12`，Apple Silicon 为 `11.0`），链接系统 libpcap 而非 Homebrew。CI 审计架构、部署目标及仅限系统库的动态依赖路径；测试构建和 Release 工作流还验证 root 回环抓包。这是构建基线，不代表已验证旧版 macOS 兼容性。普通用户抓包权限、其他网卡、进程归属、长时间稳定性和性能仍未完成充分测试。
 
 ## 使用
 
@@ -262,6 +268,6 @@ Linux、Windows 和 macOS 的进程归属及抓包行为可能存在差异。mac
 
 Copyright (C) 2026 power4j。联系方式：power4j@outlook.com。
 
-v0.7.0 及更早版本仍按各自发布时所附的 Apache License 2.0 授权。各贡献者的署名保留在 Git 历史中。
+v0.7.0 及更早版本仍按各自发布时所附的 Apache License 2.0 授权。各贡献者的署名保留在 Git 历史中。静态 libpcap 工作流生成的 Linux 压缩包会在 `LICENSE` 中追加内嵌 libpcap 的许可证及版权声明。
 
 开发和源码构建说明见 [`docs/development.md`](docs/development.md)。

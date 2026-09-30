@@ -219,6 +219,15 @@ prepare_runtime_mocks() {
 #!/bin/sh
 [ "${FIXTURE_REQUIRE_C_LOCALE:-0}" -eq 0 ] || [ "${LC_ALL:-}" = C ] || { echo 'localized loader output'; exit 1; }
 [ "${FIXTURE_LOADER_FAIL:-0}" -eq 0 ] || { echo 'wrong ELF architecture'; exit 1; }
+if [ "${FIXTURE_STATIC_PCAP:-0}" -eq 1 ]; then
+  if [ "${FIXTURE_MISSING_DEPENDENCY:-}" != libc.so.6 ]; then
+    echo 'libc.so.6 => /lib/libc.so.6 (0x5678)'
+  fi
+  if [ -n "${FIXTURE_MISSING_DEPENDENCY:-}" ]; then
+    printf '%s => not found\n' "${FIXTURE_MISSING_DEPENDENCY}"
+  fi
+  exit 0
+fi
 if [ -f "${FIXTURE_RUNTIME_ROOT}/runtime-present" ] && [ "${FIXTURE_UNRESOLVED:-0}" -eq 0 ]; then
   printf 'libpcap.so.0.8 => %s/libpcap.so.0.8 (0x1234)\n' "${FIXTURE_RUNTIME_ROOT}"
 else
@@ -256,7 +265,8 @@ EOF
 prepare_assets() {
   mkdir -p "${WORKDIR}/www/v0.3.0" "${WORKDIR}/pack"
   cp "${FIXTURES}/api/latest-pretty.json" "${WORKDIR}/www/latest.json"
-  printf '%s\n' '#!/bin/sh' 'echo flowlens-fixture' > "${WORKDIR}/pack/flowlens"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'touch "${FIXTURE_RUNTIME_ROOT}/binary-executed"' 'echo flowlens-fixture' > "${WORKDIR}/pack/flowlens"
   chmod 0755 "${WORKDIR}/pack/flowlens"
   tar -C "${WORKDIR}/pack" -czf "${WORKDIR}/www/v0.3.0/flowlens-v0.3.0-linux-x86_64.tar.gz" flowlens
   local digest
@@ -815,6 +825,7 @@ test_runtime_dependencies() {
   install_fake_privileges
   status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
   assert_eq "${status}" "0" "present runtime needs no setup"
+  assert_contains "$(cat "${out}")" "requires glibc 2.28 or newer and the libpcap.so.0.8 runtime" "dynamic pcap notes name the required SONAME"
   assert_eq "$(cat "${WORKDIR}/packages.log")" "" "present runtime does not touch packages"
   assert_command_line "${out}" "sudo flowlens" "default capture command is standalone"
   assert_not_contains "$(cat "${out}")" "sudo setcap" "default install does not require manual capability grant"
@@ -952,6 +963,88 @@ test_runtime_dependencies() {
   rm -f "${WORKDIR}/bin/id" "${WORKDIR}/bin/sudo" "${WORKDIR}/bin/setcap"
 }
 
+test_static_pcap_dependencies() {
+  local out="${WORKDIR}/static-runtime.out" status scope dependency manager old_binary old_manifest
+  prepare_runtime_mocks
+  install_fake_privileges
+  rm -f "${WORKDIR}/runtime-present" "${WORKDIR}/bin/setcap" "${WORKDIR}/setcap.args"
+  status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  assert_eq "${status}" "0" "static pcap with dynamic glibc installs without system pcap"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap default system install never changes packages"
+  assert_not_file "${WORKDIR}/bin/setcap" "static pcap default install does not bootstrap capability tool"
+  assert_not_file "${WORKDIR}/binary-executed" "runtime verification never executes downloaded binary"
+  assert_contains "$(cat "${out}")" "no system libpcap is required" "static pcap notes explain no system runtime is required"
+  assert_command_line "${out}" "sudo flowlens" "static pcap default capture command is standalone"
+  assert_command_line "${out}" "sudo '${SYSTEM_BIN}/flowlens'" "static pcap absolute capture command is standalone"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=false" "static pcap default install grants no capability"
+  old_binary="$(cat "${SYSTEM_BIN}/flowlens")"
+  old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
+
+  for dependency in libm.so.6 libc.so.6; do
+    status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 FIXTURE_MISSING_DEPENDENCY="${dependency}" run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+    assert_eq "${status}" "6" "static pcap rejects missing ${dependency}"
+    assert_contains "$(cat "${out}")" "${dependency} => not found" "missing ${dependency} is diagnosed"
+    assert_eq "$(cat "${WORKDIR}/packages.log")" "" "missing ${dependency} never changes packages"
+    assert_eq "$(cat "${SYSTEM_BIN}/flowlens")" "${old_binary}" "missing ${dependency} preserves binary"
+    assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "missing ${dependency} preserves manifest"
+    assert_not_contains "$(cat "${out}")" "installed FlowLens" "missing ${dependency} never claims success"
+  done
+  status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 FIXTURE_LOADER_FAIL=1 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+  assert_eq "${status}" "6" "static pcap rejects loader failure"
+  assert_command_line "${out}" "getconf GNU_LIBC_VERSION" "static pcap loader failure retains glibc diagnostic"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap loader failure never changes packages"
+  assert_eq "$(cat "${SYSTEM_BIN}/flowlens")" "${old_binary}" "static pcap loader failure preserves binary"
+  assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "static pcap loader failure preserves manifest"
+  assert_not_contains "$(cat "${out}")" "installed FlowLens" "static pcap loader failure never claims success"
+
+  for scope in user custom; do
+    if [ "${scope}" = user ]; then
+      status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --user --no-modify-path --version v0.3.0)"
+    else
+      status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --install-dir "${WORKDIR}/static-custom" --no-modify-path --version v0.3.0)"
+    fi
+    assert_eq "${status}" "0" "static pcap ${scope} install needs no system pcap"
+    assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap ${scope} install never changes packages"
+    assert_contains "$(cat "${out}")" "no system libpcap is required" "static pcap ${scope} notes explain no system runtime is required"
+  done
+
+  status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --dry-run --setcap --version v0.3.0)"
+  assert_eq "${status}" "0" "static pcap dry-run with missing capability tool succeeds"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap dry-run never changes packages"
+  assert_command_line "${out}" "sudo apt-get install -y libcap2-bin" "static pcap dry-run plans only capability tool package"
+  assert_not_file "${WORKDIR}/bin/setcap" "static pcap dry-run never installs capability tool"
+  assert_not_file "${WORKDIR}/setcap.args" "static pcap dry-run never grants capability"
+  assert_eq "$(cat "${SYSTEM_BIN}/flowlens")" "${old_binary}" "static pcap dry-run preserves binary"
+  assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "static pcap dry-run preserves manifest"
+  assert_not_contains "$(cat "${out}")" "was granted" "static pcap dry-run never claims capability granted"
+
+  for manager in apt-get dnf; do
+    prepare_runtime_mocks
+    rm -f "${WORKDIR}/runtime-present" "${WORKDIR}/bin/setcap"
+    [ "${manager}" != dnf ] || printf 'ID=fedora\n' > "${WORKDIR}/os-release"
+    status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 FIXTURE_PACKAGE_NO_RUNTIME=1 run_installer "${out}" "${WORKDIR}/install.sh" --setcap --version v0.3.0)"
+    assert_eq "${status}" "0" "static pcap ${manager} --setcap bootstraps capability tool only"
+    if [ "${manager}" = apt-get ]; then
+      assert_contains "$(cat "${WORKDIR}/packages.log")" "apt-get install -y libcap2-bin frontend=noninteractive" "static pcap apt installs only libcap2-bin"
+    else
+      assert_contains "$(cat "${WORKDIR}/packages.log")" "dnf install -y libcap" "static pcap RPM installs only libcap"
+    fi
+    assert_not_contains "$(cat "${WORKDIR}/packages.log")" "libpcap" "static pcap ${manager} --setcap never installs pcap"
+    assert_not_file "${WORKDIR}/runtime-present" "static pcap ${manager} --setcap succeeds with system pcap still absent"
+    assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "static pcap ${manager} --setcap records capability grant"
+    assert_contains "$(cat "${out}")" "CAP_NET_RAW was granted" "static pcap ${manager} capability grant reported"
+    assert_command_line "${out}" "'${SYSTEM_BIN}/flowlens'" "static pcap ${manager} capability capture command is standalone"
+    assert_not_contains "$(cat "${out}")" "  sudo flowlens" "static pcap ${manager} capability notes do not recommend sudo"
+  done
+  : > "${WORKDIR}/packages.log"
+  status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 FIXTURE_LOADER_FAIL=1 run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "static pcap uninstall does not inspect loader"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap uninstall never changes packages"
+  assert_not_file "${WORKDIR}/binary-executed" "static pcap installation never executes downloaded binary"
+  prepare_runtime_mocks
+  rm -f "${WORKDIR}/bin/id" "${WORKDIR}/bin/sudo" "${WORKDIR}/bin/setcap"
+}
+
 main() {
   printf 'FlowLens installer tests\n'
   TEST_HOME="${WORKDIR}/home"
@@ -1027,6 +1120,7 @@ main() {
       make_test_installer
     fi
     test_runtime_dependencies
+    test_static_pcap_dependencies
   fi
   stop_server
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
