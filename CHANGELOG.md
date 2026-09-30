@@ -6,9 +6,17 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+- Public SNI reporting for visible TLS ClientHello names accompanied by ECH or legacy ESNI. Plain-text reports include a separate Public SNI section; JSON adds `top_public_sni` alongside ordinary `top_outbound_domains`, with independent top-N limits. The visible name may differ from the actual target.
+- Offline TLS runtime and PCAP stress-evaluation tools for checking domain detection, traffic accounting, and bounded resource usage without network access or privileged capture. These are development evaluations, not release benchmarks.
+
 ### Changed
 
+- The Linux installer now defaults to a system installation in `/usr/local/bin`, with its manifest under `/usr/local/share/flowlens`. Use `--user` for the previous per-user behavior; custom installation directories remain supported. System operations require write access or sudo and do not silently fall back to a user installation.
+- The Domains page uses compact `Std`/`Pub` type labels and explains Public SNI's visibility limitation. The overview omits the type column to leave more room for host names.
+
 ### Fixed
+
+- TLS domain detection now uses bounded TCP reassembly to recover ClientHello messages split across packets or TLS records, including reordered and retransmitted segments, and backfills traffic observed before name resolution.
 
 ### Removed
 
