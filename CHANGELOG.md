@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.7.2] - 2026-09-30
+
+### Added
+
 - Public SNI reporting for visible TLS ClientHello names accompanied by ECH or legacy ESNI. Plain-text reports include a separate Public SNI section; JSON adds `top_public_sni` alongside ordinary `top_outbound_domains`, with independent top-N limits. The visible name may differ from the actual target.
 - Offline TLS runtime and PCAP stress-evaluation tools for checking domain detection, traffic accounting, and bounded resource usage without network access or privileged capture. These are development evaluations, not release benchmarks.
 
