@@ -487,17 +487,212 @@ prepare_privileges() {
      [ -d "${MANIFEST_DIR}" ] && [ -w "${MANIFEST_DIR}" ]; then
     return
   fi
-  hint="run sudo bash install.sh, or use --user for a per-user install"
+  hint="Retry as root, or select a per-user install:
+  sudo bash install.sh
+  bash install.sh --user"
   if [ "${WANT_UNINSTALL}" -eq 1 ]; then
-    hint="run sudo bash install.sh --uninstall, or run bash install.sh --user --uninstall as the original user without sudo"
+    hint="Retry system uninstall as root, or uninstall as the original user without sudo:
+  sudo bash install.sh --uninstall
+  bash install.sh --user --uninstall"
   fi
   if ! command -v sudo >/dev/null 2>&1; then
-    die 6 "system operation needs write access to ${INSTALL_DIR} and ${MANIFEST_DIR}; ${hint}"
+    die 6 "system operation needs write access to ${INSTALL_DIR} and ${MANIFEST_DIR}
+${hint}"
   fi
   if ! sudo -n true >/dev/null 2>&1; then
-    die 6 "system operation needs write access to ${INSTALL_DIR} and ${MANIFEST_DIR}; sudo -n failed; ${hint}"
+    die 6 "system operation needs write access to ${INSTALL_DIR} and ${MANIFEST_DIR}; sudo -n failed
+${hint}"
   fi
   USE_SUDO=1
+}
+
+# Resolve system tools outside PATH when needed; never source OS metadata.
+find_system_tool() {
+  local name="$1" dir
+  command -v "${name}" 2>/dev/null && return 0
+  for dir in /usr/sbin /sbin; do
+    if [ -x "${dir}/${name}" ]; then
+      printf '%s\n' "${dir}/${name}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+runtime_present() {
+  local loader library
+  loader="$(command -v ldd)" || {
+    log "ldd is required to check the verified binary's runtime dependencies." >&2
+    return 2
+  }
+  if ! LC_ALL=C "${loader}" "${TMP_DIR}/extract/flowlens" > "${TMP_DIR}/loader-output" 2>&1; then
+    cat "${TMP_DIR}/loader-output" >&2
+    return 2
+  fi
+  # The loader checks architecture and the artifact's exact SONAME. In particular,
+  # RPM's libpcap.so.1 does not satisfy an artifact linked to libpcap.so.0.8.
+  PCAP_SONAME="$(awk '$1 ~ /^libpcap\.so\./ { print $1; exit }' "${TMP_DIR}/loader-output")"
+  if [ -z "${PCAP_SONAME}" ] || grep -v 'libpcap\.so\.' "${TMP_DIR}/loader-output" | grep -q 'not found'; then
+    cat "${TMP_DIR}/loader-output" >&2
+    return 2
+  fi
+  library="$(awk '$1 ~ /^libpcap\.so\./ && $2 == "=>" { print $3; exit }' "${TMP_DIR}/loader-output")"
+  case "${library}" in
+    /*) [ -f "${library}" ] && [ -r "${library}" ] && return 0 ;;
+  esac
+  return 1
+}
+
+detect_package_manager() {
+  local family
+  PACKAGE_MANAGER=""
+  PCAP_PACKAGE="libpcap"
+  SETCAP_PACKAGE="libcap"
+  family="$(awk -F= '$1 == "ID" || $1 == "ID_LIKE" {
+    value = substr($0, index($0, "=") + 1)
+    gsub(/["\047]/, "", value)
+    printf " %s", value
+  }' /etc/os-release 2>/dev/null || true)"
+  case " ${family} " in
+    *' debian '*|*' ubuntu '*)
+      PCAP_PACKAGE="libpcap0.8"
+      SETCAP_PACKAGE="libcap2-bin"
+      if command -v apt-get >/dev/null 2>&1 && command -v apt-cache >/dev/null 2>&1; then
+        PACKAGE_MANAGER="apt-get"
+        select_apt_pcap_package
+      fi
+      ;;
+    *' fedora '*|*' rhel '*|*' centos '*)
+      if command -v dnf >/dev/null 2>&1; then
+        PACKAGE_MANAGER="dnf"
+      elif command -v yum >/dev/null 2>&1; then
+        PACKAGE_MANAGER="yum"
+      fi
+      ;;
+  esac
+}
+
+select_apt_pcap_package() {
+  PCAP_PACKAGE="libpcap0.8"
+  if LC_ALL=C apt-cache policy libpcap0.8t64 </dev/null 2>/dev/null | awk '
+    $1 == "Candidate:" && $2 != "(none)" { found = 1 }
+    END { exit !found }
+  '; then
+    PCAP_PACKAGE="libpcap0.8t64"
+  fi
+}
+
+print_dependency_commands() {
+  local packages="$1" rpm_packages="libpcap"
+  [ "${WANT_SETCAP}" -ne 1 ] || rpm_packages="${rpm_packages} libcap"
+  if [ -n "${PACKAGE_MANAGER}" ]; then
+    if [ "${PACKAGE_MANAGER}" = "apt-get" ]; then
+      log "  sudo apt-get update"
+    fi
+    log "  sudo ${PACKAGE_MANAGER} install -y ${packages}"
+  else
+    log "Install the matching-architecture libpcap runtime (not a -dev package) using your distribution's package manager."
+    if [ "${WANT_SETCAP}" -eq 1 ]; then
+      log "Also install setcap (Debian/Ubuntu: libcap2-bin; RPM: libcap)."
+    fi
+    log "On Debian/Ubuntu, refresh metadata and choose libpcap0.8t64 if available, otherwise libpcap0.8:"
+    log "  sudo apt-get update"
+    log "  apt-cache policy libpcap0.8t64 libpcap0.8"
+    log "If libpcap0.8t64 has a candidate:"
+    log "  sudo apt-get install -y libpcap0.8t64"
+    log "Otherwise:"
+    log "  sudo apt-get install -y libpcap0.8"
+    if [ "${WANT_SETCAP}" -eq 1 ]; then
+      log "  sudo apt-get install -y libcap2-bin"
+    fi
+    log "On an RPM distribution:"
+    log "  sudo dnf install -y ${rpm_packages}"
+  fi
+  log "Then retry the installer with the same options. If libpcap is installed but not detected, check the loader cache:"
+  log "  /sbin/ldconfig -p"
+}
+
+dependency_error() {
+  local message="$1" packages="$2"
+  log "${message}" >&2
+  print_dependency_commands "${packages}" >&2
+  die 6 "Runtime preparation incomplete; no binary was published."
+}
+
+prepare_dependencies() {
+  local need_pcap=0 need_setcap=0 packages
+  if runtime_present; then
+    need_pcap=0
+  elif [ "$?" -eq 1 ]; then
+    need_pcap=1
+  else
+    log "Check glibc 2.28+, architecture and ldd availability:" >&2
+    log "  getconf GNU_LIBC_VERSION" >&2
+    log "  uname -m" >&2
+    log "  ldd --version" >&2
+    die 6 "Cannot verify the artifact's runtime dependencies; no binary was published."
+  fi
+  SETCAP_TOOL=""
+  if [ "${WANT_SETCAP}" -eq 1 ]; then
+    SETCAP_TOOL="$(find_system_tool setcap)" || need_setcap=1
+  fi
+  if [ "${need_pcap}" -eq 0 ] && [ "${need_setcap}" -eq 0 ]; then
+    return
+  fi
+  detect_package_manager
+  packages=""
+  [ "${need_pcap}" -eq 0 ] || packages="${PCAP_PACKAGE}"
+  if [ "${need_setcap}" -eq 1 ]; then
+    packages="${packages:+${packages} }${SETCAP_PACKAGE}"
+  fi
+  if [ "${WANT_SYSTEM}" -ne 1 ] || [ -z "${PACKAGE_MANAGER}" ]; then
+    if [ "${WANT_DRY_RUN}" -eq 1 ]; then
+      log "dry-run: missing dependencies (${packages}); automatic package setup is unavailable for this scope or distribution."
+      print_dependency_commands "${packages}"
+      return
+    fi
+    dependency_error "Missing dependencies (${packages}); automatic package setup is limited to Debian/Ubuntu and RPM system installs with apt-get, dnf or yum." "${packages}"
+  fi
+  if [ "${WANT_DRY_RUN}" -eq 1 ]; then
+    log "dry-run: would prepare missing runtime dependencies (${packages}); no packages or capabilities were changed."
+    print_dependency_commands "${packages}"
+    return
+  fi
+  # Writable installation directories do not imply package-management privileges.
+  if [ "$(id -u)" -ne 0 ] && [ "${USE_SUDO}" -eq 0 ]; then
+    if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true </dev/null >/dev/null 2>&1; then
+      log "Dependency setup needs root; sudo -n is unavailable or failed. Retry as root:" >&2
+      log "  sudo bash install.sh" >&2
+      dependency_error "Missing dependencies: ${packages}" "${packages}"
+    fi
+    USE_SUDO=1
+  fi
+  if [ "${PACKAGE_MANAGER}" = "apt-get" ]; then
+    if ! priv env DEBIAN_FRONTEND=noninteractive apt-get update </dev/null; then
+      dependency_error "Failed to refresh apt package metadata." "${packages}"
+    fi
+    if [ "${need_pcap}" -eq 1 ]; then
+      select_apt_pcap_package
+      packages="${PCAP_PACKAGE}"
+      [ "${need_setcap}" -eq 0 ] || packages="${packages} ${SETCAP_PACKAGE}"
+    fi
+    # Word splitting here is intentional: only fixed package names are used.
+    # shellcheck disable=SC2086
+    if ! priv env DEBIAN_FRONTEND=noninteractive apt-get install -y ${packages} </dev/null; then
+      dependency_error "Failed to install runtime packages." "${packages}"
+    fi
+  else
+    # shellcheck disable=SC2086
+    if ! priv "${PACKAGE_MANAGER}" install -y ${packages} </dev/null; then
+      dependency_error "Failed to install runtime packages." "${packages}"
+    fi
+  fi
+  if ! runtime_present; then
+    dependency_error "Required ${PCAP_SONAME} is still unavailable for ${ARCH} after package setup; do not create compatibility symlinks." "${packages}"
+  fi
+  if [ "${WANT_SETCAP}" -eq 1 ]; then
+    SETCAP_TOOL="$(find_system_tool setcap)" || dependency_error "setcap is still unavailable after package setup." "${SETCAP_PACKAGE}"
+  fi
 }
 
 rollback_install() {
@@ -669,13 +864,17 @@ warn_user_install() {
      [ -f "${old_manifest}" ] && [ ! -L "${old_manifest}" ] && \
      validate_manifest_file "${old_manifest}" && [ "${MF_BINARY_PATH}" = "${old_binary}" ] && \
      [ "$(sha256_file "${old_binary}")" = "${MF_DIGEST}" ]; then
-    log "After verifying sudo $(quote_path "${BINARY_PATH}") --version and launching sudo $(quote_path "${BINARY_PATH}"), remove the installer-managed user copy with the downloaded new script:"
+    log "Verify the system version and launch it before removing the installer-managed user copy:"
+    log "  sudo $(quote_path "${BINARY_PATH}") --version"
+    log "  sudo $(quote_path "${BINARY_PATH}")"
+    log "Then clean up with the downloaded new script:"
     log "  bash install.sh --user --uninstall"
     log "Run that cleanup as the original user, without sudo."
   else
     log "The old file has no matching installer manifest; review and remove it manually as the original user when ready."
   fi
-  log "After cleanup, reopen the shell and run command -v flowlens to confirm command resolution."
+  log "After cleanup, reopen the shell and confirm command resolution:"
+  log "  command -v flowlens"
 }
 
 choose_path_file() {
@@ -893,17 +1092,35 @@ EOF
   NEW_DIGEST="$(sha256_file "${TMP_DIR}/extract/flowlens")"
 }
 
+install_path_error() {
+  local path="$1"
+  log "Installation path is not writable: ${path}. Check the parent directory:" >&2
+  log "  ls -ld $(quote_path "$(dirname "${path}")")" >&2
+  if [ "${WANT_SYSTEM}" -eq 1 ]; then
+    log "Retry as root, or choose a per-user installation:" >&2
+    log "  sudo bash install.sh" >&2
+    log "  bash install.sh --user" >&2
+  fi
+  die 6 "No binary was published; resolve directory permissions and retry with the same options."
+}
+
 preflight_install() {
   local existing_digest
   if [ ! -d "${INSTALL_DIR}" ]; then
     if [ "${WANT_DRY_RUN}" -eq 1 ]; then
       log "dry-run: would create ${INSTALL_DIR}"
     else
-      priv mkdir -p "${INSTALL_DIR}" || die 6 "install path is not writable: ${INSTALL_DIR}"
+      priv mkdir -p "${INSTALL_DIR}" || install_path_error "${INSTALL_DIR}"
     fi
   fi
   if [ "${WANT_DRY_RUN}" -eq 0 ] && [ "${USE_SUDO:-0}" -eq 0 ] && [ ! -w "${INSTALL_DIR}" ]; then
-    die 6 "install path is not writable: ${INSTALL_DIR}"
+    install_path_error "${INSTALL_DIR}"
+  fi
+  if [ "${WANT_DRY_RUN}" -eq 0 ]; then
+    priv mkdir -p "${MANIFEST_DIR}" || install_path_error "${MANIFEST_DIR}"
+    if [ "${USE_SUDO:-0}" -eq 0 ] && [ ! -w "${MANIFEST_DIR}" ]; then
+      install_path_error "${MANIFEST_DIR}"
+    fi
   fi
   if [ -e "${BINARY_PATH}" ]; then
     if [ -L "${BINARY_PATH}" ]; then
@@ -930,25 +1147,32 @@ print_post_install_notes() {
   local path_updated="$1"
   local quoted_binary
   quoted_binary="$(quote_path "${BINARY_PATH}")"
-  if [ "${PLATFORM}" = "linux" ]; then
-    log "Linux binaries require glibc 2.28 or newer."
-    log "libpcap is required at runtime; this installer does not install it."
-    if [ "${WANT_SETCAP}" -eq 1 ]; then
-      log "Capture requires root or CAP_NET_RAW."
+  log "Linux binaries require glibc 2.28 or newer and the libpcap runtime."
+  if [ "${WANT_SETCAP}" -eq 1 ]; then
+    if [ "${WANT_DRY_RUN}" -eq 1 ]; then
+      log "After installation with --setcap, CAP_NET_RAW would allow capture without sudo:"
     else
-      log "Capture requires root or CAP_NET_RAW. Re-run with --setcap, or: sudo setcap cap_net_raw+ep ${quoted_binary}"
+      log "CAP_NET_RAW was granted (--setcap); start capture without sudo:"
+    fi
+    log "  ${quoted_binary}"
+  else
+    log "Capture requires root by default; CAP_NET_RAW is only granted with explicit --setcap."
+    log "Start capture:"
+    if [ "${WANT_SYSTEM}" -eq 1 ]; then
+      log "  sudo flowlens"
+      log "If sudo cannot find it, or another copy is selected:"
+    fi
+    log "  sudo ${quoted_binary}"
+    if [ "${WANT_SYSTEM}" -eq 0 ]; then
+      log "Your shell PATH does not control sudo's command search path."
     fi
   fi
-  if [ "${WANT_SYSTEM}" -eq 1 ]; then
-    log "Start capture with sudo flowlens. If sudo cannot find it, or another copy is selected, run: sudo ${quoted_binary}"
-  else
-    log "Start capture with: sudo ${quoted_binary}"
-    log "Your shell PATH does not control sudo's command search path."
-  fi
   if [ "${WANT_SYSTEM}" -eq 0 ] && [ "${WANT_NO_MODIFY_PATH}" -eq 1 ]; then
-    log "PATH was not modified. Add ${INSTALL_DIR} to PATH to run flowlens."
+    log "PATH was not modified. To add the installation directory for this shell:"
+    log "  export PATH=$(quote_path "${INSTALL_DIR}"):\$PATH"
   elif [ "${path_updated}" = "1" ]; then
-    log "Restart the shell, or source ${PATH_FILE}, to use the flowlens command."
+    log "Restart the shell, or load the updated PATH file:"
+    log "  source $(quote_path "${PATH_FILE}")"
   fi
 }
 
@@ -968,7 +1192,8 @@ commit_install() {
   if [ "${WANT_DRY_RUN}" -eq 1 ]; then
     log "dry-run: would install ${VERSION} to ${BINARY_PATH}"
     if [ "${WANT_SETCAP}" -eq 1 ]; then
-      log "dry-run: would run setcap cap_net_raw+ep ${BINARY_PATH}"
+      log "dry-run: would grant CAP_NET_RAW:"
+      log "  setcap cap_net_raw+ep $(quote_path "${BINARY_PATH}")"
     fi
     if [ -n "${path_file_out}" ]; then
       log "dry-run: would update PATH in ${path_file_out}"
@@ -976,7 +1201,7 @@ commit_install() {
     print_post_install_notes "${path_updated}"
     return
   fi
-  priv mkdir -p "${MANIFEST_DIR}" || die 6 "manifest directory is not writable: ${MANIFEST_DIR}"
+  priv mkdir -p "${MANIFEST_DIR}" || install_path_error "${MANIFEST_DIR}"
   TMP_BIN="${INSTALL_DIR}/flowlens.new.$$"
   TMP_MANIFEST="${MANIFEST_DIR}/install-manifest.new.$$"
   tmp_bin="${TMP_BIN}"
@@ -1007,7 +1232,7 @@ commit_install() {
   fi
   TMP_BIN=""
   if [ "${WANT_SETCAP}" -eq 1 ]; then
-    if ! priv setcap cap_net_raw+ep "${BINARY_PATH}"; then
+    if ! priv "${SETCAP_TOOL}" cap_net_raw+ep "${BINARY_PATH}"; then
       rollback_install
       die 1 "failed to setcap ${BINARY_PATH}"
     fi
@@ -1033,9 +1258,6 @@ do_install() {
   if [ "${WANT_SETCAP}" -eq 1 ] && [ "${PLATFORM}" != "linux" ]; then
     die 2 "--setcap is only supported on Linux"
   fi
-  if [ "${WANT_SETCAP}" -eq 1 ] && ! command -v setcap >/dev/null 2>&1; then
-    die 2 "--setcap requires the setcap command"
-  fi
   [ "${PLATFORM}" != "macos" ] || die 3 "macOS Release archives are experimental; download and inspect them manually"
   resolve_dirs
   prepare_privileges
@@ -1044,6 +1266,7 @@ do_install() {
   download_assets
   extract_asset
   preflight_install
+  prepare_dependencies
   commit_install
 }
 

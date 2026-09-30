@@ -109,34 +109,62 @@ command -v flowlens
 
 系统安装会保留原有的 `~/.local/bin/flowlens`，并提示它可能在 shell 中优先于系统版本被找到。上述清理命令仅适用于安装器管理的旧版本；手动安装的旧版本应在验证系统版本后自行检查并清理。
 
-安装器需要 Bash 3.2+、`curl`、`tar`，以及 `sha256sum` 或 `shasum`。它不会自动安装 `libpcap`。安装器仅支持 Linux，并会拒绝在 macOS 上安装。Windows 和实验性 macOS 构建使用下面的压缩包。
+安装器需要 Bash 3.2+、`curl`、`tar`、`ldd`，以及 `sha256sum` 或 `shasum`。下载校验和安装预检通过后，默认系统安装会自动准备缺失的 libpcap 运行库：Debian/Ubuntu 使用 `apt-get`，优先选择可用的 `libpcap0.8t64`，旧版本使用 `libpcap0.8`；RPM 系发行版使用 `dnf` 或 `yum` 安装 `libpcap`。不会安装开发包。包管理操作为非交互式，需要 root 或可用的 `sudo -n`，且不会读取管道中的脚本输入。安装器仅支持 Linux，并会拒绝在 macOS 上安装。Windows 和实验性 macOS 构建使用下面的压缩包。
 
 从 [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) 下载对应操作系统和 CPU 架构的压缩包，解压其中唯一的可执行文件即可。
 
 ### Linux
 
-如果系统尚未安装 libpcap 运行库，请先安装：
+#### 安装器运行库与抓包权限
 
-```bash
-# Debian 或 Ubuntu
-sudo apt install libpcap0.8
-
-# RHEL 兼容发行版
-sudo dnf install libpcap
-```
-
-系统安装后，以 root 身份运行 FlowLens，或者为可执行文件授予 `CAP_NET_RAW`：
+默认安装不会授予能力，安装后使用以下命令启动：
 
 ```bash
 sudo flowlens
 # 如果 sudo 找不到命令，或找到了其他版本：
 sudo /usr/local/bin/flowlens
-# 或
-sudo setcap cap_net_raw+ep /usr/local/bin/flowlens
+```
+
+如果希望无需 sudo 抓包，必须在每次安装或升级时显式传入 `--setcap`。系统安装也会准备缺失的 `setcap` 工具（Debian/Ubuntu 的 `libcap2-bin`，RPM 系的 `libcap`）：
+
+```bash
+sudo bash install.sh --setcap
 /usr/local/bin/flowlens
 ```
 
-手动解压压缩包时，在解压目录执行 `sudo ./flowlens`。
+`--user` 和自定义目录安装不会修改系统软件包，即使以 root 运行也不会。依赖缺失时会停止安装并给出手动准备命令。`--dry-run` 和 `--uninstall` 不会修改软件包，试运行也不会授予能力。不支持的发行版或包管理器需要手动准备依赖。包管理失败会阻止发布二进制文件，但已安装的软件包不会回滚。
+
+安装器根据已校验二进制文件的加载器要求确认依赖，而不是仅检查包名。部分 RPM 系统提供 `libpcap.so.1`，而发布包可能需要 `libpcap.so.0.8`；如果仍无法满足实际要求，安装会停止。不要在不同 SONAME 之间创建兼容性符号链接。
+
+#### 手动安装 Linux 压缩包
+
+手动解压压缩包时，如果系统尚未安装匹配的 libpcap 运行库，请先安装：
+
+```bash
+# Debian/Ubuntu：刷新元数据并检查可用的运行库包
+sudo apt-get update
+apt-cache policy libpcap0.8t64 libpcap0.8
+# 现代 Debian/Ubuntu，libpcap0.8t64 存在候选版本时：
+sudo apt-get install -y libpcap0.8t64
+# 较旧的 Debian/Ubuntu，改用：
+sudo apt-get install -y libpcap0.8
+# RPM 系发行版（必要时将 dnf 替换为 yum）：
+sudo dnf install -y libpcap
+```
+
+在解压目录检查依赖，然后以 root 身份启动抓包：
+
+```bash
+ldd ./flowlens
+sudo ./flowlens
+```
+
+也可以手动安装 `setcap` 工具（Debian/Ubuntu 的 `libcap2-bin`，RPM 系的 `libcap`），再主动授予能力：
+
+```bash
+sudo setcap cap_net_raw+ep ./flowlens
+./flowlens
+```
 
 ### Windows
 

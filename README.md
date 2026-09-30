@@ -110,34 +110,62 @@ command -v flowlens
 
 System installation leaves an old `~/.local/bin/flowlens` in place and warns that it may take precedence in your shell. The cleanup command above applies only to installer-managed copies; review and remove unmanaged copies manually after verifying the system installation.
 
-The installer requires Bash 3.2+, `curl`, `tar`, and `sha256sum` or `shasum`. It does not install `libpcap`. The installer supports Linux only and rejects macOS. Windows and experimental macOS builds use the archives below.
+The installer requires Bash 3.2+, `curl`, `tar`, `ldd`, and `sha256sum` or `shasum`. After verifying the download and completing install preflight, default system installation prepares missing libpcap runtime packages on Debian/Ubuntu (`apt-get`, selecting `libpcap0.8t64` when available or legacy `libpcap0.8`) and RPM families (`dnf` or `yum`, installing `libpcap`). It does not install development packages. Package operations are noninteractive, require root or working `sudo -n`, and do not consume piped script input. The installer supports Linux only and rejects macOS. Windows and experimental macOS builds use the archives below.
 
 Download the archive for the target operating system and CPU architecture from the [GitHub Releases](https://github.com/power4j/flowlens/releases/latest) page and extract the single executable inside it.
 
 ### Linux
 
-Install the libpcap runtime if it is not already available:
+#### Installer runtime and capture permissions
 
-```bash
-# Debian or Ubuntu
-sudo apt install libpcap0.8
-
-# RHEL-compatible distributions
-sudo dnf install libpcap
-```
-
-For a system installation, run FlowLens as root, or grant the executable `CAP_NET_RAW`:
+The default installer does not grant capabilities; start capture with:
 
 ```bash
 sudo flowlens
 # If sudo cannot find it, or another copy is selected:
 sudo /usr/local/bin/flowlens
-# or
-sudo setcap cap_net_raw+ep /usr/local/bin/flowlens
+```
+
+To opt into capture without sudo, pass `--setcap` explicitly on each install or upgrade. System installation also prepares the missing `setcap` tool (`libcap2-bin` on Debian/Ubuntu, `libcap` on RPM families):
+
+```bash
+sudo bash install.sh --setcap
 /usr/local/bin/flowlens
 ```
 
-For a manually extracted archive, use `sudo ./flowlens` from the extraction directory.
+`--user` and custom-directory installs never change system packages, even when run as root. Missing dependencies stop installation with manual setup guidance. `--dry-run` and `--uninstall` never change packages; dry-run does not grant capabilities. Unsupported distributions or package managers require manual dependency setup. Package setup failures stop binary publication; packages already installed are not rolled back.
+
+Readiness is checked against the verified binary's loader requirements, not merely the installed package name. Some RPM systems provide `libpcap.so.1` but the release artifact may require `libpcap.so.0.8`; installation stops if that requirement remains unresolved. Do not create compatibility symlinks between different SONAMEs.
+
+#### Manual Linux archives
+
+For a manually extracted archive, install the matching libpcap runtime if it is not already available:
+
+```bash
+# Debian/Ubuntu: refresh metadata and inspect available runtime packages
+sudo apt-get update
+apt-cache policy libpcap0.8t64 libpcap0.8
+# Modern Debian/Ubuntu, when libpcap0.8t64 has a candidate:
+sudo apt-get install -y libpcap0.8t64
+# Older Debian/Ubuntu, instead:
+sudo apt-get install -y libpcap0.8
+# RPM families (use yum in place of dnf if needed):
+sudo dnf install -y libpcap
+```
+
+From the extraction directory, check dependencies and run capture as root:
+
+```bash
+ldd ./flowlens
+sudo ./flowlens
+```
+
+Alternatively, install the `setcap` tool manually (`libcap2-bin` on Debian/Ubuntu or `libcap` on RPM families), then opt into the capability:
+
+```bash
+sudo setcap cap_net_raw+ep ./flowlens
+./flowlens
+```
 
 ### Windows
 
