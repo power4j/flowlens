@@ -6,9 +6,18 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+- Optional static-libpcap Linux trial builds in the Build Test workflow, with an exact-key native dependency cache that validates cached contents before reuse. Ordinary source builds continue to use the system libpcap.
+- Linux release binary audits and capture smoke checks without system libpcap on Debian 12, Ubuntu 24.04, Fedora 43, and Rocky Linux 8, including root, permission-denied, and CAP_NET_RAW-only scenarios on both architectures.
+
 ### Changed
 
+- Linux release builds now bundle checksum-pinned libpcap 1.10.7 while retaining dynamic glibc with the 2.28 baseline. Archives include the bundled library's license and copyright notices.
+- The system installer automatically prepares missing runtime packages on Debian/Ubuntu and RPM-family distributions after download verification and install preflight. Explicit `--setcap` also prepares the capability tool; default installs do not grant capabilities. User/custom installs, dry runs, and uninstalls do not change system packages.
+- macOS builds use system-only library linkage and explicit deployment targets, with binary audits and root loopback capture checks on native macOS 15 runners. macOS archives remain experimental, unsigned, and unnotarized; older systems and full runtime behavior remain unverified.
+
 ### Fixed
+
+- Restored macOS loopback capture by avoiding the incoming-only direction filter on `lo0`, while retaining the existing direction behavior on other platforms.
 
 ### Removed
 

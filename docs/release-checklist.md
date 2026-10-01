@@ -12,7 +12,8 @@ This checklist records the manual checks around the GitHub Release workflow. The
 - [ ] The expected version is strictly greater than the current Cargo version.
 - [ ] Linux `x86_64` and `aarch64` manual smoke checks completed on supported hosts: start-up, interface discovery, capture, and representative output.
 - [ ] Windows `x86_64` and `aarch64` manual smoke checks completed on supported hosts: Npcap detection, interface discovery, capture, and representative output.
-- [ ] macOS `x86_64` and `aarch64` native CI builds and basic CLI checks are green.
+- [ ] Linux `x86_64` and `aarch64` distribution audits confirm the glibc `2.28` baseline, static libpcap linkage, and no runtime search path; no-system-libpcap capture smoke checks are green.
+- [ ] macOS `x86_64` and `aarch64` native CI builds, system-only linkage/deployment-target audits, basic CLI checks, and root loopback capture checks are green.
 - [ ] The Release Notes identify macOS archives as unsigned, unnotarized, experimental, and not fully runtime-tested.
 - [ ] Any known platform limitation or incomplete boundary test is ready to state in the Release Notes.
 
@@ -25,13 +26,13 @@ Real traffic and performance checks are manual. They are not required CI jobs an
 - [ ] Linux assets are named `flowlens-vX.Y.Z-linux-x86_64.tar.gz` and `flowlens-vX.Y.Z-linux-aarch64.tar.gz`.
 - [ ] Windows assets are named `flowlens-vX.Y.Z-windows-x86_64.zip` and `flowlens-vX.Y.Z-windows-aarch64.zip`.
 - [ ] Experimental macOS assets are named `flowlens-vX.Y.Z-macos-x86_64.tar.gz` and `flowlens-vX.Y.Z-macos-aarch64.tar.gz`.
-- [ ] Each archive contains its corresponding `flowlens` or `flowlens.exe` binary and the canonical `LICENSE` file, with no other files.
+- [ ] Each archive contains only its corresponding `flowlens` or `flowlens.exe` binary and `LICENSE`. Linux `LICENSE` retains the canonical project license and appends the bundled libpcap license/copyright notices; Windows/macOS use the canonical project license.
 - [ ] The tagged source archives are available from the Release page and contain the same canonical `LICENSE` file.
 - [ ] `SHA256SUMS` is present and covers all release archives.
 - [ ] The generated Release Notes have been reviewed and edited.
 - [ ] The `pre-release` option is selected when the release is not considered stable.
 - [ ] The Npcap Runtime prerequisite is stated for Windows releases.
-- [ ] The Linux glibc `2.28` and libpcap prerequisites are stated for Linux releases.
+- [ ] Linux Release Notes state the dynamic glibc `2.28` baseline, bundled libpcap version, and root or `CAP_NET_RAW` capture requirement. New static-libpcap archives do not require a system libpcap package; older dynamic archives and ordinary source builds may still require it.
 - [ ] The macOS signing, notarization, minimum-version, capture-permission, and runtime-validation limits are stated.
 - [ ] The Draft Release is published manually after the text and assets are verified.
 
