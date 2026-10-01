@@ -20,14 +20,14 @@ This checklist records the manual checks around the GitHub Release workflow. The
 
 Real traffic and performance checks are manual. They are not required CI jobs and are not silently replaced by a passing unit-test job.
 
-## Current Unreleased exception: Windows ARM64
+## v0.7.3 exception: Windows ARM64
 
 The maintainer approved a real-hardware capture-validation exception on **2026-10-01** for the next release containing the current Unreleased installer/static-libpcap changes. No Windows ARM64 machine is available. Retain the ARM64 archive and its existing build policy; this is an accepted validation gap, not a passed runtime test or a standing waiver for later releases.
 
 - Build Test run `36811074001`, at source commit `a338366ff6250d9c69862a0e2e2146eb1b1f88cd`, passed the Windows x64/ARM64 builds and dependency audits. Both packages passed independent checksums, PE architecture, archive-shape and license checks.
 - Windows x64 physical-interface capture parity passed on that source commit. This does not establish ARM64 runtime behavior.
 - ARM64 Npcap runtime detection, interface discovery, capture and representative output remain **unverified on real hardware**. Do not check these off as passed or substitute emulation for hardware evidence.
-- Record the resulting release version here when it is selected. Revisit the exception if Windows implementation changes; do not reuse it automatically for another release.
+- This exception applies only to **v0.7.3**. Revisit it if Windows implementation changes; do not reuse it automatically for another release.
 
 The Release Notes must include this limitation prominently:
 
