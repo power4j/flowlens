@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-$scriptPath = Join-Path $PSScriptRoot 'verify-capture.ps1'
+$repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+$scriptPath = Join-Path $repo 'scripts/verify-capture.ps1'
 $fakeFlowLens = [System.IO.Path]::GetTempFileName()
 $fakeRefcap = [System.IO.Path]::GetTempFileName()
 $missingIperf = Join-Path ([System.IO.Path]::GetTempPath()) 'flowlens-missing-iperf3.exe'
