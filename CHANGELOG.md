@@ -6,6 +6,20 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+### Removed
+
+### Deprecated
+
+### Security
+
+## [0.7.3] - 2026-10-01
+
+### Added
+
 - Optional static-libpcap Linux trial builds in the Build Test workflow, with an exact-key native dependency cache that validates cached contents before reuse. Ordinary source builds continue to use the system libpcap.
 - Linux release binary audits and capture smoke checks without system libpcap on Debian 12, Ubuntu 24.04, Fedora 43, and Rocky Linux 8, including root, permission-denied, and CAP_NET_RAW-only scenarios on both architectures.
 
