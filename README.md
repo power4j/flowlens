@@ -64,10 +64,11 @@ FlowLens supports Linux `x86_64`/`aarch64`, Windows `x86_64`/`aarch64`, and macO
 
 ## Install
 
-Linux `x86_64` and `aarch64` can use the installer script. The default command installs the latest stable Release into `/usr/local/bin`, with an installer manifest under `/usr/local/share/flowlens`:
+Linux `x86_64` and `aarch64` can use the installer script. The default command installs the latest stable Release into `/usr/local/bin`, with an installer manifest under `/usr/local/share/flowlens`. Linux system installation grants only `CAP_NET_RAW`, so ordinary users can start capture without sudo:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | sudo bash
+flowlens
 ```
 
 Pin a reviewed script and an exact version:
@@ -100,8 +101,8 @@ To migrate an existing user installation, download the new script and verify the
 ```bash
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
 sudo bash install.sh
-sudo /usr/local/bin/flowlens --version
-sudo /usr/local/bin/flowlens
+/usr/local/bin/flowlens --version
+/usr/local/bin/flowlens
 # After successful startup, exit FlowLens, then run as the original user without sudo:
 bash install.sh --user --uninstall
 # Reopen your shell, then confirm that this resolves to /usr/local/bin/flowlens:
@@ -118,20 +119,31 @@ Download the archive for the target operating system and CPU architecture from t
 
 #### Installer runtime and capture permissions
 
-The default installer does not grant capabilities; start capture with:
+Default Linux system installs and explicit `--system` installs grant only `cap_net_raw+ep`, never `CAP_NET_ADMIN`. After download verification and install preflight, system installation prepares the missing `setcap` tool (`libcap2-bin` on Debian/Ubuntu, `libcap` on RPM families). Start capture as an ordinary user:
 
 ```bash
+flowlens
+# If another copy is selected:
+/usr/local/bin/flowlens
+```
+
+To upgrade or reinstall, rerun the same default command. Each replacement binary receives `CAP_NET_RAW` again; no extra `--setcap` flag is needed:
+
+```bash
+sudo bash install.sh
+flowlens
+```
+
+To retain sudo-only capture, pass `--no-setcap` on each install or upgrade:
+
+```bash
+sudo bash install.sh --no-setcap
 sudo flowlens
 # If sudo cannot find it, or another copy is selected:
 sudo /usr/local/bin/flowlens
 ```
 
-To opt into capture without sudo, pass `--setcap` explicitly on each install or upgrade. System installation also prepares the missing `setcap` tool (`libcap2-bin` on Debian/Ubuntu, `libcap` on RPM families):
-
-```bash
-sudo bash install.sh --setcap
-/usr/local/bin/flowlens
-```
+`FLOWLENS_SETCAP=true` explicitly enables the capability and `FLOWLENS_SETCAP=false` disables it. Command-line `--setcap` or `--no-setcap` takes precedence over the environment; combining both flags is an error. User/custom installs grant no capability by default. Explicit `--setcap` remains available for those scopes when the tool and privileges have been prepared manually.
 
 `--user` and custom-directory installs never change system packages, even when run as root. Missing dependencies stop installation with manual setup guidance. `--dry-run` and `--uninstall` never change packages; dry-run does not grant capabilities. Unsupported distributions or package managers require manual dependency setup. Package setup failures stop binary publication; packages already installed are not rolled back.
 
@@ -189,7 +201,7 @@ Both architectures are built on native GitHub-hosted macOS 15 runners with expli
 
 ## Usage
 
-These examples use a manually extracted `./flowlens` binary. For a Linux script installation, replace `./flowlens` with `sudo flowlens`, or the absolute user-install command shown above.
+These examples use a manually extracted `./flowlens` binary. For a default Linux system script installation, replace `./flowlens` with `flowlens`; use `sudo flowlens` after `--no-setcap`, or the absolute user-install command shown above.
 
 Start the foreground TUI without selecting an interface:
 

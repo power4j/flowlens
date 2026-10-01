@@ -25,9 +25,14 @@ Options:
   --force                Allow overwrite or downgrade of installer-owned files
   --dry-run              Report actions without committing an install
   --no-modify-path       Do not modify shell PATH files
-  --setcap               Set CAP_NET_RAW on Linux after install
+  --setcap               Grant only CAP_NET_RAW on Linux (system default)
+  --no-setcap            Do not grant capabilities; capture with sudo
   --uninstall            Remove an installer-owned install (system by default)
   --help                 Show this help and exit
+
+Linux system installs and upgrades grant CAP_NET_RAW by default.
+User/custom installs require --setcap to opt in. FLOWLENS_SETCAP=true/false
+can override the scope default; explicit CLI options take precedence.
 EOF
 }
 
@@ -455,6 +460,9 @@ cleanup() {
   if [ -n "${TMP_BIN:-}" ] && [ -f "${TMP_BIN}" ]; then
     priv rm -f "${TMP_BIN}"
   fi
+  if [ -n "${TMP_ROLLBACK_BIN:-}" ] && [ -f "${TMP_ROLLBACK_BIN}" ]; then
+    priv rm -f "${TMP_ROLLBACK_BIN}"
+  fi
   if [ -n "${TMP_MANIFEST:-}" ] && [ -f "${TMP_MANIFEST}" ]; then
     priv rm -f "${TMP_MANIFEST}"
   fi
@@ -483,7 +491,9 @@ prepare_privileges() {
   if [ "$(id -u)" -eq 0 ]; then
     return
   fi
-  if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ] && \
+  # Writable directories do not grant permission to set file capabilities.
+  if [ "${WANT_SETCAP}" -ne 1 ] && \
+     [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ] && \
      [ -d "${MANIFEST_DIR}" ] && [ -w "${MANIFEST_DIR}" ]; then
     return
   fi
@@ -697,11 +707,17 @@ prepare_dependencies() {
 }
 
 rollback_install() {
-  if [ -f "${TMP_DIR}/rollback-binary" ]; then
-    priv mv -f "${TMP_DIR}/rollback-binary" "${BINARY_PATH}" || true
+  if [ -n "${TMP_ROLLBACK_BIN:-}" ] && [ -f "${TMP_ROLLBACK_BIN}" ]; then
+    if priv mv -f "${TMP_ROLLBACK_BIN}" "${BINARY_PATH}"; then
+      TMP_ROLLBACK_BIN=""
+    fi
+  else
+    priv rm -f "${BINARY_PATH}" || true
   fi
   if [ -f "${TMP_DIR}/rollback-manifest" ]; then
     priv mv -f "${TMP_DIR}/rollback-manifest" "${MANIFEST_PATH}" || true
+  else
+    priv rm -f "${MANIFEST_PATH}" || true
   fi
   if [ -f "${TMP_DIR}/rollback-path" ] && [ -n "${PATH_FILE:-}" ]; then
     priv mv -f "${TMP_DIR}/rollback-path" "${PATH_FILE}" || true
@@ -732,7 +748,7 @@ parse_args() {
   WANT_FORCE=0
   WANT_DRY_RUN=0
   WANT_NO_MODIFY_PATH=0
-  WANT_SETCAP=0
+  WANT_SETCAP=-1 # Unspecified until environment and install scope are resolved.
   ARG_VERSION=""
   ARG_INSTALL_DIR=""
   while [ "$#" -gt 0 ]; do
@@ -744,7 +760,12 @@ parse_args() {
       --force) WANT_FORCE=1; shift ;;
       --dry-run) WANT_DRY_RUN=1; shift ;;
       --no-modify-path) WANT_NO_MODIFY_PATH=1; shift ;;
-      --setcap) WANT_SETCAP=1; shift ;;
+      --setcap)
+        [ "${WANT_SETCAP}" -ne 0 ] || die 2 "--setcap cannot be combined with --no-setcap"
+        WANT_SETCAP=1; shift ;;
+      --no-setcap)
+        [ "${WANT_SETCAP}" -ne 1 ] || die 2 "--setcap cannot be combined with --no-setcap"
+        WANT_SETCAP=0; shift ;;
       --version)
         [ "$#" -ge 2 ] || die 2 "--version requires a value"
         ARG_VERSION="$2"
@@ -777,9 +798,11 @@ apply_env() {
       WANT_FORCE=1
     fi
   fi
-  if [ "${WANT_SETCAP}" -eq 0 ] && [ -n "${FLOWLENS_SETCAP:-}" ]; then
+  if [ "${WANT_SETCAP}" -eq -1 ] && [ -n "${FLOWLENS_SETCAP:-}" ]; then
     if is_true "${FLOWLENS_SETCAP}"; then
       WANT_SETCAP=1
+    else
+      WANT_SETCAP=0
     fi
   fi
 }
@@ -792,8 +815,8 @@ validate_args() {
     if [ -n "${ARG_VERSION}" ] || [ -n "${FLOWLENS_VERSION:-}" ]; then
       die 2 "--uninstall cannot be combined with --version or FLOWLENS_VERSION"
     fi
-    if [ "${WANT_SETCAP}" -eq 1 ] || [ -n "${FLOWLENS_SETCAP:-}" ]; then
-      die 2 "--uninstall cannot be combined with --setcap or FLOWLENS_SETCAP"
+    if [ "${WANT_SETCAP}" -ne -1 ] || [ -n "${FLOWLENS_SETCAP:-}" ]; then
+      die 2 "--uninstall cannot be combined with --setcap, --no-setcap or FLOWLENS_SETCAP"
     fi
     if [ "${WANT_NO_MODIFY_PATH}" -eq 1 ] || [ -n "${FLOWLENS_NO_MODIFY_PATH:-}" ]; then
       die 2 "--uninstall cannot be combined with --no-modify-path or FLOWLENS_NO_MODIFY_PATH"
@@ -1155,13 +1178,17 @@ print_post_install_notes() {
   fi
   if [ "${WANT_SETCAP}" -eq 1 ]; then
     if [ "${WANT_DRY_RUN}" -eq 1 ]; then
-      log "After installation with --setcap, CAP_NET_RAW would allow capture without sudo:"
+      log "dry-run: CAP_NET_RAW would allow capture without sudo after a successful install; this run changes no capabilities:"
     else
-      log "CAP_NET_RAW was granted (--setcap); start capture without sudo:"
+      log "CAP_NET_RAW was granted; start capture without sudo:"
+    fi
+    if [ "${WANT_SYSTEM}" -eq 1 ]; then
+      log "  flowlens"
+      log "If another copy is selected, use the installed binary directly:"
     fi
     log "  ${quoted_binary}"
   else
-    log "Capture requires root by default; CAP_NET_RAW is only granted with explicit --setcap."
+    log "CAP_NET_RAW was not granted; capture requires sudo (enable with --setcap)."
     log "Start capture:"
     if [ "${WANT_SYSTEM}" -eq 1 ]; then
       log "  sudo flowlens"
@@ -1182,7 +1209,7 @@ print_post_install_notes() {
 }
 
 commit_install() {
-  local tmp_bin tmp_manifest tmp_path setcap_val path_file_out path_updated
+  local tmp_bin tmp_manifest tmp_path tmp_rollback_bin setcap_val path_file_out path_updated
   setcap_val="false"
   path_file_out=""
   path_updated="0"
@@ -1213,6 +1240,12 @@ commit_install() {
   tmp_manifest="${TMP_MANIFEST}"
   priv cp "${TMP_DIR}/extract/flowlens" "${tmp_bin}"
   priv chmod 0755 "${tmp_bin}"
+  # Grant before publication or snapshots so failure leaves the old inode intact.
+  if [ "${WANT_SETCAP}" -eq 1 ]; then
+    if ! priv "${SETCAP_TOOL}" cap_net_raw+ep "${tmp_bin}"; then
+      die 1 "failed to setcap ${tmp_bin}"
+    fi
+  fi
   write_manifest_file "${TMP_DIR}/install-manifest" "${VERSION}" "${NEW_DIGEST}" "${path_file_out}" "${setcap_val}"
   priv cp "${TMP_DIR}/install-manifest" "${tmp_manifest}"
   priv chmod 0644 "${tmp_manifest}"
@@ -1224,7 +1257,13 @@ commit_install() {
     tmp_path=""
   fi
   if [ -f "${BINARY_PATH}" ]; then
-    priv cp -p "${BINARY_PATH}" "${TMP_DIR}/rollback-binary" || die 1 "failed to snapshot existing binary"
+    # Keep the old inode and capabilities; rollback stays on the same filesystem.
+    tmp_rollback_bin="${INSTALL_DIR}/flowlens.rollback.$$"
+    if [ -e "${tmp_rollback_bin}" ] || [ -L "${tmp_rollback_bin}" ]; then
+      die 1 "failed to snapshot existing binary: snapshot path already exists"
+    fi
+    priv ln "${BINARY_PATH}" "${tmp_rollback_bin}" || die 1 "failed to snapshot existing binary"
+    TMP_ROLLBACK_BIN="${tmp_rollback_bin}"
   fi
   if [ -f "${MANIFEST_PATH}" ]; then
     priv cp -p "${MANIFEST_PATH}" "${TMP_DIR}/rollback-manifest" || die 1 "failed to snapshot existing manifest"
@@ -1236,12 +1275,6 @@ commit_install() {
     die 1 "failed to publish binary"
   fi
   TMP_BIN=""
-  if [ "${WANT_SETCAP}" -eq 1 ]; then
-    if ! priv "${SETCAP_TOOL}" cap_net_raw+ep "${BINARY_PATH}"; then
-      rollback_install
-      die 1 "failed to setcap ${BINARY_PATH}"
-    fi
-  fi
   if ! priv mv -f "${tmp_manifest}" "${MANIFEST_PATH}"; then
     rollback_install
     die 1 "failed to publish manifest"
@@ -1265,6 +1298,9 @@ do_install() {
   fi
   [ "${PLATFORM}" != "macos" ] || die 3 "macOS Release archives are experimental; download and inspect them manually"
   resolve_dirs
+  if [ "${WANT_SETCAP}" -eq -1 ]; then
+    WANT_SETCAP="${WANT_SYSTEM}"
+  fi
   prepare_privileges
   warn_user_install
   fetch_version
@@ -1318,6 +1354,7 @@ main() {
   apply_env
   validate_args
   TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/flowlens-install.XXXXXX")"
+  TMP_ROLLBACK_BIN=""
   trap cleanup EXIT
   if [ "${WANT_UNINSTALL}" -eq 1 ]; then
     resolve_dirs

@@ -255,6 +255,7 @@ case "$*" in
     ;;
 esac
 EOF
+  install_fake_setcap 0
   local manager
   for manager in apt-get dnf yum; do
     cp "${WORKDIR}/bin/package-manager" "${WORKDIR}/bin/${manager}"
@@ -344,6 +345,7 @@ test_help_exits_zero() {
   status="$(run_installer "${out}" "${INSTALL_SH}" --help)"
   assert_eq "${status}" "0" "--help exits 0"
   assert_contains "$(cat "${out}")" "Usage" "--help prints usage"
+  assert_contains "$(cat "${out}")" "--no-setcap" "--help documents capability opt-out"
 }
 
 test_invalid_version_exits_2() {
@@ -547,6 +549,128 @@ test_archive_path_traversal_exits_5() {
   assert_eq "${status}" "5" "archive path traversal exits 5"
 }
 
+test_setcap_option_conflicts() {
+  local out="${WORKDIR}/setcap-conflict.out" status
+  status="$(run_installer "${out}" "${INSTALL_SH}" --setcap --no-setcap)"
+  assert_eq "${status}" "2" "--setcap --no-setcap fails before network"
+  assert_contains "$(cat "${out}")" "--setcap cannot be combined with --no-setcap" "conflicting policies are diagnosed explicitly"
+  status="$(run_installer "${out}" "${INSTALL_SH}" --no-setcap --setcap)"
+  assert_eq "${status}" "2" "--no-setcap --setcap fails before network"
+  assert_contains "$(cat "${out}")" "--setcap cannot be combined with --no-setcap" "reverse conflicting policies are diagnosed explicitly"
+  status="$(run_installer "${out}" "${INSTALL_SH}" --uninstall --no-setcap)"
+  assert_eq "${status}" "2" "uninstall rejects explicit capability policy"
+}
+
+test_default_system_setcap() {
+  local out="${WORKDIR}/default-setcap.out" status old_binary old_manifest old_inode mode expected
+  prepare_runtime_mocks
+  install_fake_privileges
+  install_fake_setcap 1
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh")"
+  assert_eq "${status}" "1" "default system capability failure exits 1"
+  assert_not_file "${SYSTEM_BIN}/flowlens" "failed first capability grant publishes no binary"
+  assert_not_file "${SYSTEM_MANIFEST}/install-manifest" "failed first capability grant publishes no manifest"
+  assert_contains "$(cat "${WORKDIR}/setcap.args")" "cap_net_raw+ep ${SYSTEM_BIN}/flowlens.new." "default grant requests only NET_RAW on same-directory staging binary"
+  assert_not_contains "$(cat "${WORKDIR}/setcap.args")" "net_admin" "default grant never includes NET_ADMIN"
+  assert_eq "$(find "${SYSTEM_BIN}" -name 'flowlens.new.*' -print)" "" "failed capability grant cleans up staging binary"
+  assert_not_contains "$(cat "${out}")" "installed FlowLens" "capability failure never claims install success"
+  assert_not_contains "$(cat "${out}")" "was granted" "capability failure never claims ordinary-user capture"
+
+  rm -f "${WORKDIR}/bin/setcap" "${WORKDIR}/setcap.args"
+  status="$(FIXTURE_UID=0 FIXTURE_PACKAGE_NO_SETCAP=1 run_installer "${out}" "${WORKDIR}/install.sh")"
+  assert_eq "${status}" "6" "default system missing tool after setup fails closed"
+  assert_not_file "${SYSTEM_BIN}/flowlens" "missing tool prevents first binary publication"
+  assert_not_file "${SYSTEM_MANIFEST}/install-manifest" "missing tool prevents first manifest publication"
+  install_fake_setcap 0
+  cat > "${WORKDIR}/bin/mv" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *install-manifest.new.*) exit 1 ;;
+esac
+"${FIXTURE_MV}" "$@"
+EOF
+  chmod +x "${WORKDIR}/bin/mv"
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh")"
+  rm -f "${WORKDIR}/bin/mv" "${WORKDIR}/bin/setcap"
+  assert_eq "${status}" "1" "first default manifest publication failure exits 1"
+  assert_not_file "${SYSTEM_BIN}/flowlens" "first manifest failure rolls back published binary"
+  assert_not_file "${SYSTEM_MANIFEST}/install-manifest" "first manifest failure leaves no manifest"
+  assert_not_contains "$(cat "${out}")" "installed FlowLens" "first manifest failure never claims success"
+  assert_not_contains "$(cat "${out}")" "was granted" "first manifest failure never claims ordinary-user capture"
+  : > "${WORKDIR}/packages.log"
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh")"
+  assert_eq "${status}" "0" "default system bootstraps missing capability tool"
+  assert_contains "$(cat "${WORKDIR}/packages.log")" "apt-get install -y libcap2-bin frontend=noninteractive" "default setup installs only missing capability package"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "default grant is recorded in manifest"
+  assert_command_line "${out}" "flowlens" "successful default install recommends ordinary-user command"
+  assert_not_contains "$(cat "${out}")" "  sudo flowlens" "default capture hint does not require sudo"
+  rm -f "${WORKDIR}/setcap.args"
+  : > "${WORKDIR}/packages.log"
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh")"
+  assert_eq "${status}" "0" "same default command reinstalls successfully"
+  assert_file "${WORKDIR}/setcap.args" "default reinstall reapplies capability to new binary"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "reinstall with existing tool never installs packages"
+  rm -f "${WORKDIR}/setcap.args"
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --system)"
+  assert_eq "${status}" "0" "explicit system install uses same default policy"
+  assert_file "${WORKDIR}/setcap.args" "explicit system install grants capability"
+
+  for mode in env-true env-false cli-enable cli-disable invalid-cli-enable invalid-cli-disable; do
+    expected=true
+    rm -f "${WORKDIR}/setcap.args"
+    case "${mode}" in
+      env-true) status="$(FIXTURE_UID=0 FLOWLENS_SETCAP=true run_installer "${out}" "${WORKDIR}/install.sh")" ;;
+      env-false) expected=false; status="$(FIXTURE_UID=0 FLOWLENS_SETCAP=false run_installer "${out}" "${WORKDIR}/install.sh")" ;;
+      cli-enable) status="$(FIXTURE_UID=0 FLOWLENS_SETCAP=false run_installer "${out}" "${WORKDIR}/install.sh" --setcap)" ;;
+      cli-disable) expected=false; status="$(FIXTURE_UID=0 FLOWLENS_SETCAP=true run_installer "${out}" "${WORKDIR}/install.sh" --no-setcap)" ;;
+      invalid-cli-enable) status="$(FIXTURE_UID=0 FLOWLENS_SETCAP=invalid run_installer "${out}" "${WORKDIR}/install.sh" --setcap)" ;;
+      invalid-cli-disable) expected=false; status="$(FIXTURE_UID=0 FLOWLENS_SETCAP=invalid run_installer "${out}" "${WORKDIR}/install.sh" --no-setcap)" ;;
+    esac
+    assert_eq "${status}" "0" "${mode} capability policy succeeds"
+    assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=${expected}" "${mode} records effective policy"
+    if [ "${expected}" = true ]; then
+      assert_file "${WORKDIR}/setcap.args" "${mode} grants capability"
+    else
+      assert_not_file "${WORKDIR}/setcap.args" "${mode} never grants capability"
+      assert_command_line "${out}" "sudo flowlens" "${mode} recommends sudo capture"
+    fi
+  done
+  rm -f "${WORKDIR}/bin/setcap" "${WORKDIR}/setcap.args"
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --no-setcap)"
+  assert_eq "${status}" "0" "system opt-out works without capability tool"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "opt-out never installs capability tool"
+  assert_not_file "${WORKDIR}/setcap.args" "opt-out never grants capability"
+  old_binary="$(cat "${SYSTEM_BIN}/flowlens")"
+  old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
+  old_inode="$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${SYSTEM_BIN}/flowlens")"
+  mkdir -p "${WORKDIR}/pack-upgrade" "${WORKDIR}/www/v0.3.8"
+  printf '%s\n' '#!/bin/sh' 'echo upgraded-fixture' > "${WORKDIR}/pack-upgrade/flowlens"
+  tar -C "${WORKDIR}/pack-upgrade" -czf "${WORKDIR}/www/v0.3.8/flowlens-v0.3.8-linux-x86_64.tar.gz" flowlens
+  write_sums_for "${WORKDIR}/www/v0.3.8/flowlens-v0.3.8-linux-x86_64.tar.gz" v0.3.8
+  printf '%s\n' '{"tag_name":"v0.3.8","prerelease":false,"draft":false}' > "${WORKDIR}/www/latest.json"
+  install_fake_setcap 1
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh")"
+  assert_eq "${status}" "1" "default upgrade capability failure exits 1"
+  assert_eq "$(cat "${SYSTEM_BIN}/flowlens")" "${old_binary}" "failed default upgrade keeps previous binary"
+  assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "failed default upgrade keeps previous manifest"
+  assert_eq "$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${SYSTEM_BIN}/flowlens")" "${old_inode}" "failed capability grant leaves old inode untouched"
+  assert_not_contains "$(cat "${out}")" "installed FlowLens" "failed default upgrade never claims success"
+  assert_not_contains "$(cat "${out}")" "was granted" "failed default upgrade never claims ordinary-user capture"
+  install_fake_setcap 0
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh")"
+  assert_eq "${status}" "0" "same default command upgrades successfully after capability failure"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "version=v0.3.8" "default upgrade records new release"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "default upgrade grants capability despite old opt-out manifest"
+  cp "${FIXTURES}/api/latest-pretty.json" "${WORKDIR}/www/latest.json"
+  rm -f "${WORKDIR}/bin/setcap" "${WORKDIR}/setcap.args"
+  status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
+  assert_eq "${status}" "0" "default uninstall is not rejected by automatic capability policy"
+  assert_eq "$(cat "${WORKDIR}/packages.log")" "" "default uninstall never installs packages"
+  assert_not_file "${WORKDIR}/setcap.args" "default uninstall never grants capability"
+  prepare_runtime_mocks
+  rm -f "${WORKDIR}/bin/id" "${WORKDIR}/bin/sudo"
+}
+
 test_setcap_non_linux_exits_2() {
   local out status
   install_fake_uname Darwin x86_64
@@ -592,13 +716,45 @@ test_setcap_success_records_manifest() {
   assert_file "${WORKDIR}/setcap.args" "setcap was invoked"
   assert_contains "$(cat "${out}")" "CAP_NET_RAW" "--setcap install mentions CAP_NET_RAW"
   assert_not_contains "$(cat "${out}")" "Re-run with --setcap" "--setcap install does not ask to re-run --setcap"
+  assert_eq "$(find "${WORKDIR}/opt/bin" -name 'flowlens.rollback.*' -print)" "" "successful reinstall cleans up binary snapshot"
   rm -f "${WORKDIR}/bin/setcap"
 }
 
+test_binary_snapshot_failure_keeps_install() {
+  local out="${WORKDIR}/snapshot-fail.out" status old_binary old_manifest old_inode snapshot
+  old_binary="$(cat "${WORKDIR}/opt/bin/flowlens")"
+  old_manifest="$(cat "${TEST_HOME}/.local/share/flowlens/install-manifest")"
+  old_inode="$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${WORKDIR}/opt/bin/flowlens")"
+  cat > "${WORKDIR}/bin/ln" <<'EOF'
+#!/bin/sh
+# Model a snapshot-name collision: this file is not owned by the installer.
+dest="$1"
+for dest do :; done
+printf '%s\n' 'snapshot collision' > "${dest}"
+printf '%s\n' "${dest}" > "${FIXTURE_RUNTIME_ROOT}/snapshot-path"
+exit 1
+EOF
+  chmod +x "${WORKDIR}/bin/ln"
+  status="$(run_installer "${out}" "${WORKDIR}/install.sh" --force --version v0.3.0 --install-dir "${WORKDIR}/opt/bin")"
+  rm -f "${WORKDIR}/bin/ln"
+  assert_eq "${status}" "1" "binary snapshot failure exits 1"
+  assert_contains "$(cat "${out}")" "failed to snapshot existing binary" "snapshot failure is diagnosed"
+  assert_eq "$(cat "${WORKDIR}/opt/bin/flowlens")" "${old_binary}" "snapshot failure keeps previous binary content"
+  assert_eq "$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${WORKDIR}/opt/bin/flowlens")" "${old_inode}" "snapshot failure leaves old inode untouched"
+  assert_eq "$(cat "${TEST_HOME}/.local/share/flowlens/install-manifest")" "${old_manifest}" "snapshot failure keeps previous manifest"
+  assert_eq "$(find "${WORKDIR}/opt/bin" -name 'flowlens.new.*' -print)" "" "snapshot failure cleans up staging binary"
+  assert_eq "$(find "${TEST_HOME}/.local/share/flowlens" -name 'install-manifest.new.*' -print)" "" "snapshot failure cleans up staging manifest"
+  snapshot="$(cat "${WORKDIR}/snapshot-path")"
+  assert_eq "$(cat "${snapshot}")" "snapshot collision" "snapshot failure never removes an unowned collision file"
+  assert_not_contains "$(cat "${out}")" "installed FlowLens" "snapshot failure never claims install success"
+  rm -f "${snapshot}" "${WORKDIR}/snapshot-path"
+}
+
 test_manifest_publish_failure_rolls_back() {
-  local out status old
+  local out status old old_inode
   assert_file "${WORKDIR}/opt/bin/flowlens" "rollback test has an installed binary"
   old="$(cat "${WORKDIR}/opt/bin/flowlens")"
+  old_inode="$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${WORKDIR}/opt/bin/flowlens")"
   chmod a-x "${WORKDIR}/opt/bin/flowlens" 2>/dev/null || true
   cat > "${WORKDIR}/bin/mv" <<'EOF'
 #!/bin/sh
@@ -618,6 +774,8 @@ EOF
   assert_eq "${status}" "1" "manifest publish failure exits 1"
   assert_contains "$(cat "${out}")" "failed to publish manifest" "failure reaches manifest publication"
   assert_eq "$(cat "${WORKDIR}/opt/bin/flowlens")" "${old}" "manifest publish failure restores binary"
+  assert_eq "$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${WORKDIR}/opt/bin/flowlens")" "${old_inode}" "manifest publish failure restores original binary inode"
+  assert_eq "$(find "${WORKDIR}/opt/bin" -name 'flowlens.rollback.*' -print)" "" "manifest rollback leaves no binary snapshot"
 }
 
 install_fake_privileges() {
@@ -667,7 +825,7 @@ test_system_sudo_n_fails_closed() {
 }
 
 test_system_scope_and_manifest_publication() {
-  local out status old_binary old_manifest
+  local out status old_binary old_manifest old_inode
   local TEST_HOME="${WORKDIR}/system-home"
   mkdir -p "${TEST_HOME}"
   : > "${FIXTURE_SUDO_LOG}"
@@ -679,14 +837,16 @@ test_system_scope_and_manifest_publication() {
   assert_not_file "${TEST_HOME}/.local/bin/flowlens" "default install does not write user binary"
   assert_not_file "${TEST_HOME}/.local/share/flowlens/install-manifest" "default install does not write user manifest"
   assert_not_file "${TEST_HOME}/.bashrc" "system install does not modify shell PATH"
-  assert_contains "$(cat "${out}")" "sudo flowlens" "system launch hint gives command"
-  assert_contains "$(cat "${out}")" "sudo '${SYSTEM_BIN}/flowlens'" "system launch hint gives absolute fallback"
+  assert_command_line "${out}" "flowlens" "system launch hint gives unprivileged command"
+  assert_command_line "${out}" "'${SYSTEM_BIN}/flowlens'" "system launch hint gives absolute fallback"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "default system manifest records capability"
   assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "binary_path=${SYSTEM_BIN}/flowlens" "system manifest records system binary"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/install-manifest ${SYSTEM_MANIFEST}/install-manifest.new." "manifest is staged then copied with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n chmod 0644 ${SYSTEM_MANIFEST}/install-manifest.new." "manifest permissions are set with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n mv -f ${SYSTEM_MANIFEST}/install-manifest.new." "manifest publication uses privileged atomic rename"
   old_binary="$(cat "${SYSTEM_BIN}/flowlens")"
   old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
+  old_inode="$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${SYSTEM_BIN}/flowlens")"
   mkdir -p "${WORKDIR}/pack-update" "${WORKDIR}/www/v0.3.5"
   printf '%s\n' '#!/bin/sh' 'echo flowlens-updated-fixture' > "${WORKDIR}/pack-update/flowlens"
   tar -C "${WORKDIR}/pack-update" -czf "${WORKDIR}/www/v0.3.5/flowlens-v0.3.5-linux-x86_64.tar.gz" flowlens
@@ -705,13 +865,17 @@ EOF
   rm -f "${WORKDIR}/bin/mv"
   assert_eq "${status}" "1" "privileged manifest publication failure exits 1"
   assert_contains "$(cat "${out}")" "failed to publish manifest" "privileged failure reaches manifest publication"
-  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n cp -p ${SYSTEM_BIN}/flowlens" "binary rollback snapshot preserves ownership and mode with privileges"
+  assert_not_contains "$(cat "${out}")" "was granted" "failed manifest publication never claims ordinary-user capture"
+  assert_not_contains "$(cat "${out}")" "installed FlowLens" "failed manifest publication never claims success"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n ln ${SYSTEM_BIN}/flowlens ${SYSTEM_BIN}/flowlens.rollback." "binary rollback snapshot links old inode in install directory with privileges"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n cp -p ${SYSTEM_MANIFEST}/install-manifest" "manifest rollback snapshot preserves ownership and mode with privileges"
-  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/rollback-binary ${SYSTEM_BIN}/flowlens" "privileged rollback restores binary"
+  assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "-n mv -f ${SYSTEM_BIN}/flowlens.rollback." "privileged rollback renames same-filesystem binary snapshot"
   assert_contains "$(cat "${FIXTURE_SUDO_LOG}")" "/rollback-manifest ${SYSTEM_MANIFEST}/install-manifest" "privileged rollback restores manifest"
   assert_file "${SYSTEM_BIN}/flowlens" "privileged rollback retains installed binary"
   assert_file "${SYSTEM_MANIFEST}/install-manifest" "privileged rollback retains installed manifest"
   assert_eq "$(cat "${SYSTEM_BIN}/flowlens")" "${old_binary}" "privileged rollback restores original binary content after upgrade"
+  assert_eq "$("${PYTHON}" -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "${SYSTEM_BIN}/flowlens")" "${old_inode}" "privileged rollback restores original binary inode"
+  assert_eq "$(find "${SYSTEM_BIN}" -name 'flowlens.rollback.*' -print)" "" "privileged rollback leaves no binary snapshot"
   assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "privileged rollback restores original manifest content after upgrade"
   status="$(run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
   assert_eq "${status}" "0" "default uninstall exits 0"
@@ -827,9 +991,9 @@ test_runtime_dependencies() {
   assert_eq "${status}" "0" "present runtime needs no setup"
   assert_contains "$(cat "${out}")" "requires glibc 2.28 or newer and the libpcap.so.0.8 runtime" "dynamic pcap notes name the required SONAME"
   assert_eq "$(cat "${WORKDIR}/packages.log")" "" "present runtime does not touch packages"
-  assert_command_line "${out}" "sudo flowlens" "default capture command is standalone"
+  assert_command_line "${out}" "flowlens" "default capture command is standalone"
   assert_not_contains "$(cat "${out}")" "sudo setcap" "default install does not require manual capability grant"
-  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=false" "default install grants no capability"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "default install grants capability"
   old_binary="$(cat "${SYSTEM_BIN}/flowlens")"
   old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
 
@@ -870,7 +1034,7 @@ test_runtime_dependencies() {
     else
       assert_contains "$(cat "${WORKDIR}/packages.log")" "${manager} install -y libpcap" "RPM runtime package"
     fi
-    assert_not_contains "$(cat "${WORKDIR}/packages.log")" "libcap" "default setup does not bootstrap setcap"
+    assert_not_contains "$(cat "${WORKDIR}/packages.log")" "libcap" "present setcap tool needs no package setup"
     assert_not_contains "$(cat "${WORKDIR}/packages.log")" "consumed stdin" "package setup cannot consume script stdin"
   done
   prepare_runtime_mocks
@@ -890,7 +1054,7 @@ test_runtime_dependencies() {
   assert_not_contains "$(cat "${out}")" "  sudo flowlens" "capability install does not recommend sudo capture"
   status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
   assert_eq "${status}" "0" "upgrade without --setcap uses default policy"
-  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=false" "upgrade does not persist capability request"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "upgrade reapplies default capability policy"
   old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
 
   prepare_runtime_mocks
@@ -953,7 +1117,7 @@ test_runtime_dependencies() {
   rm -f "${WORKDIR}/bin/apt-cache"
   status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
   assert_eq "${status}" "6" "missing manager tooling fails closed"
-  assert_command_line "${out}" "sudo dnf install -y libpcap" "unknown manager RPM example uses RPM package"
+  assert_command_line "${out}" "sudo dnf install -y libpcap libcap" "unknown manager RPM example includes default capability tool"
   assert_command_line "${out}" "sudo apt-get install -y libpcap0.8t64" "unknown manager gives modern apt install command"
   assert_eq "$(cat "${WORKDIR}/packages.log")" "" "missing manager never changes packages"
   status="$(FIXTURE_UID=0 run_installer "${out}" "${WORKDIR}/install.sh" --uninstall)"
@@ -967,16 +1131,16 @@ test_static_pcap_dependencies() {
   local out="${WORKDIR}/static-runtime.out" status scope dependency manager old_binary old_manifest
   prepare_runtime_mocks
   install_fake_privileges
-  rm -f "${WORKDIR}/runtime-present" "${WORKDIR}/bin/setcap" "${WORKDIR}/setcap.args"
+  rm -f "${WORKDIR}/runtime-present" "${WORKDIR}/setcap.args"
   status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
   assert_eq "${status}" "0" "static pcap with dynamic glibc installs without system pcap"
   assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap default system install never changes packages"
-  assert_not_file "${WORKDIR}/bin/setcap" "static pcap default install does not bootstrap capability tool"
+  assert_contains "$(cat "${WORKDIR}/setcap.args")" "cap_net_raw+ep ${SYSTEM_BIN}/flowlens.new." "static pcap default install grants only NET_RAW on staging binary"
   assert_not_file "${WORKDIR}/binary-executed" "runtime verification never executes downloaded binary"
   assert_contains "$(cat "${out}")" "no system libpcap is required" "static pcap notes explain no system runtime is required"
-  assert_command_line "${out}" "sudo flowlens" "static pcap default capture command is standalone"
-  assert_command_line "${out}" "sudo '${SYSTEM_BIN}/flowlens'" "static pcap absolute capture command is standalone"
-  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=false" "static pcap default install grants no capability"
+  assert_command_line "${out}" "flowlens" "static pcap default capture command is standalone"
+  assert_command_line "${out}" "'${SYSTEM_BIN}/flowlens'" "static pcap absolute capture command is standalone"
+  assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "static pcap default install grants capability"
   old_binary="$(cat "${SYSTEM_BIN}/flowlens")"
   old_manifest="$(cat "${SYSTEM_MANIFEST}/install-manifest")"
 
@@ -997,6 +1161,7 @@ test_static_pcap_dependencies() {
   assert_eq "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "${old_manifest}" "static pcap loader failure preserves manifest"
   assert_not_contains "$(cat "${out}")" "installed FlowLens" "static pcap loader failure never claims success"
 
+  rm -f "${WORKDIR}/bin/setcap" "${WORKDIR}/setcap.args"
   for scope in user custom; do
     if [ "${scope}" = user ]; then
       status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --user --no-modify-path --version v0.3.0)"
@@ -1005,11 +1170,13 @@ test_static_pcap_dependencies() {
     fi
     assert_eq "${status}" "0" "static pcap ${scope} install needs no system pcap"
     assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap ${scope} install never changes packages"
+    assert_not_file "${WORKDIR}/setcap.args" "static pcap ${scope} default never grants capability"
+    assert_contains "$(cat "${TEST_HOME}/.local/share/flowlens/install-manifest")" "setcap=false" "static pcap ${scope} manifest records no capability"
     assert_contains "$(cat "${out}")" "no system libpcap is required" "static pcap ${scope} notes explain no system runtime is required"
   done
 
-  status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --dry-run --setcap --version v0.3.0)"
-  assert_eq "${status}" "0" "static pcap dry-run with missing capability tool succeeds"
+  status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 run_installer "${out}" "${WORKDIR}/install.sh" --dry-run --version v0.3.0)"
+  assert_eq "${status}" "0" "static pcap default dry-run with missing capability tool succeeds"
   assert_eq "$(cat "${WORKDIR}/packages.log")" "" "static pcap dry-run never changes packages"
   assert_command_line "${out}" "sudo apt-get install -y libcap2-bin" "static pcap dry-run plans only capability tool package"
   assert_not_file "${WORKDIR}/bin/setcap" "static pcap dry-run never installs capability tool"
@@ -1022,16 +1189,16 @@ test_static_pcap_dependencies() {
     prepare_runtime_mocks
     rm -f "${WORKDIR}/runtime-present" "${WORKDIR}/bin/setcap"
     [ "${manager}" != dnf ] || printf 'ID=fedora\n' > "${WORKDIR}/os-release"
-    status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 FIXTURE_PACKAGE_NO_RUNTIME=1 run_installer "${out}" "${WORKDIR}/install.sh" --setcap --version v0.3.0)"
-    assert_eq "${status}" "0" "static pcap ${manager} --setcap bootstraps capability tool only"
+    status="$(FIXTURE_UID=0 FIXTURE_STATIC_PCAP=1 FIXTURE_PACKAGE_NO_RUNTIME=1 run_installer "${out}" "${WORKDIR}/install.sh" --version v0.3.0)"
+    assert_eq "${status}" "0" "static pcap ${manager} default bootstraps capability tool only"
     if [ "${manager}" = apt-get ]; then
       assert_contains "$(cat "${WORKDIR}/packages.log")" "apt-get install -y libcap2-bin frontend=noninteractive" "static pcap apt installs only libcap2-bin"
     else
       assert_contains "$(cat "${WORKDIR}/packages.log")" "dnf install -y libcap" "static pcap RPM installs only libcap"
     fi
-    assert_not_contains "$(cat "${WORKDIR}/packages.log")" "libpcap" "static pcap ${manager} --setcap never installs pcap"
-    assert_not_file "${WORKDIR}/runtime-present" "static pcap ${manager} --setcap succeeds with system pcap still absent"
-    assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "static pcap ${manager} --setcap records capability grant"
+    assert_not_contains "$(cat "${WORKDIR}/packages.log")" "libpcap" "static pcap ${manager} default never installs pcap"
+    assert_not_file "${WORKDIR}/runtime-present" "static pcap ${manager} default succeeds with system pcap still absent"
+    assert_contains "$(cat "${SYSTEM_MANIFEST}/install-manifest")" "setcap=true" "static pcap ${manager} default records capability grant"
     assert_contains "$(cat "${out}")" "CAP_NET_RAW was granted" "static pcap ${manager} capability grant reported"
     assert_command_line "${out}" "'${SYSTEM_BIN}/flowlens'" "static pcap ${manager} capability capture command is standalone"
     assert_not_contains "$(cat "${out}")" "  sudo flowlens" "static pcap ${manager} capability notes do not recommend sudo"
@@ -1061,6 +1228,7 @@ main() {
     test_old_version_exits_2
     test_conflicting_dir_flags_exit_2
     test_uninstall_rejects_version
+    test_setcap_option_conflicts
     test_unsupported_os_exits_3_before_network
     test_macos_exits_3_before_network
   fi
@@ -1096,8 +1264,10 @@ main() {
       start_server ok
       make_test_installer
     fi
+    test_default_system_setcap
     test_setcap_failure_rolls_back
     test_setcap_success_records_manifest
+    test_binary_snapshot_failure_keeps_install
     test_manifest_publish_failure_rolls_back
   fi
   if [ "${slice}" = "all" ] || [ "${slice}" = "scope" ]; then

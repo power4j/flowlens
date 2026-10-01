@@ -63,10 +63,11 @@ FlowLens 支持 Linux `x86_64`/`aarch64`、Windows `x86_64`/`aarch64` 和 macOS 
 
 ## 安装
 
-Linux `x86_64` 和 `aarch64` 可以使用安装脚本。默认命令安装最新稳定版到 `/usr/local/bin`，安装清单位于 `/usr/local/share/flowlens`：
+Linux `x86_64` 和 `aarch64` 可以使用安装脚本。默认命令安装最新稳定版到 `/usr/local/bin`，安装清单位于 `/usr/local/share/flowlens`。Linux 系统安装仅授予 `CAP_NET_RAW`，普通用户可以直接启动抓包，无需 sudo：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh | sudo bash
+flowlens
 ```
 
 也可以先下载脚本审查，再安装指定版本：
@@ -99,8 +100,8 @@ sudo "$HOME/.local/bin/flowlens"
 ```bash
 curl -fsSL https://raw.githubusercontent.com/power4j/flowlens/main/install.sh -o install.sh
 sudo bash install.sh
-sudo /usr/local/bin/flowlens --version
-sudo /usr/local/bin/flowlens
+/usr/local/bin/flowlens --version
+/usr/local/bin/flowlens
 # 确认成功启动后退出 FlowLens，再由原用户执行，不要加 sudo：
 bash install.sh --user --uninstall
 # 重新打开 shell，确认以下命令解析到 /usr/local/bin/flowlens：
@@ -117,20 +118,31 @@ command -v flowlens
 
 #### 安装器运行库与抓包权限
 
-默认安装不会授予能力，安装后使用以下命令启动：
+默认 Linux 系统安装和显式 `--system` 安装仅授予 `cap_net_raw+ep`，不会授予 `CAP_NET_ADMIN`。下载校验和安装预检通过后，系统安装会准备缺失的 `setcap` 工具（Debian/Ubuntu 的 `libcap2-bin`，RPM 系的 `libcap`）。安装成功后，以普通用户启动抓包：
 
 ```bash
+flowlens
+# 如果找到了其他版本：
+/usr/local/bin/flowlens
+```
+
+升级或重装时，重新执行同一默认命令即可。每次替换后的二进制都会重新获得 `CAP_NET_RAW`，无需额外传入 `--setcap`：
+
+```bash
+sudo bash install.sh
+flowlens
+```
+
+若要保留仅通过 sudo 抓包的方式，请在每次安装或升级时传入 `--no-setcap`：
+
+```bash
+sudo bash install.sh --no-setcap
 sudo flowlens
 # 如果 sudo 找不到命令，或找到了其他版本：
 sudo /usr/local/bin/flowlens
 ```
 
-如果希望无需 sudo 抓包，必须在每次安装或升级时显式传入 `--setcap`。系统安装也会准备缺失的 `setcap` 工具（Debian/Ubuntu 的 `libcap2-bin`，RPM 系的 `libcap`）：
-
-```bash
-sudo bash install.sh --setcap
-/usr/local/bin/flowlens
-```
+`FLOWLENS_SETCAP=true` 显式开启能力授权，`FLOWLENS_SETCAP=false` 关闭授权。命令行 `--setcap` 或 `--no-setcap` 优先于环境变量；两个参数同时传入会报错。用户或自定义目录安装默认不授予能力；手动准备好工具和权限后，仍可显式使用 `--setcap`。
 
 `--user` 和自定义目录安装不会修改系统软件包，即使以 root 运行也不会。依赖缺失时会停止安装并给出手动准备命令。`--dry-run` 和 `--uninstall` 不会修改软件包，试运行也不会授予能力。不支持的发行版或包管理器需要手动准备依赖。包管理失败会阻止发布二进制文件，但已安装的软件包不会回滚。
 
@@ -188,7 +200,7 @@ macOS 二进制文件未签名且未经公证，因此 macOS 可能阻止运行�
 
 ## 使用
 
-以下示例使用手动解压的 `./flowlens`。Linux 脚本安装后，请将 `./flowlens` 替换为 `sudo flowlens`，用户安装则使用上文所示的绝对路径命令。
+以下示例使用手动解压的 `./flowlens`。Linux 默认系统脚本安装后，请将 `./flowlens` 替换为 `flowlens`；使用 `--no-setcap` 安装后则用 `sudo flowlens`，用户安装使用上文所示的绝对路径命令。
 
 不指定网卡，直接启动前台 TUI：
 

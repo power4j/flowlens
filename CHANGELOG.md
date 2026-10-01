@@ -10,6 +10,8 @@ All notable changes to FlowLens are recorded in this file.
 
 ### Fixed
 
+- Linux system installation now prepares a missing setcap tool and grants only CAP_NET_RAW by default, reapplying it on upgrades and reinstalls. The new --no-setcap option and FLOWLENS_SETCAP=false retain sudo-only capture; explicit CLI policy overrides the environment. User/custom defaults, dry runs, and uninstalls do not grant capabilities or automatically install capability tools. Failed capability grants or manifest publication do not print successful ordinary-user capture guidance.
+
 ### Removed
 
 ### Deprecated
