@@ -55,7 +55,7 @@ FlowLens 提供四种主题，适配真彩色、ANSI 16 色和单色终端。`Au
 | Linux `x86_64` | glibc `2.28` 或更新版本，以及 root 权限或 `CAP_NET_RAW`；旧动态链接压缩包还需要匹配的 libpcap |
 | Linux `aarch64` | glibc `2.28` 或更新版本，以及 root 权限或 `CAP_NET_RAW`；旧动态链接压缩包还需要匹配的 libpcap |
 | Windows `x86_64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows 系统 |
-| Windows `aarch64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows on ARM 系统 |
+| Windows `aarch64` | 已安装 [Npcap Runtime](https://npcap.com/) 的 Windows on ARM 系统；交叉构建与二进制审计通过，ARM64 实机抓包尚未验证 |
 | macOS `x86_64` | 实验性、未签名、未经公证的压缩包；尚未验证最低 macOS 版本和完整运行行为 |
 | macOS `aarch64` | 实验性、未签名、未经公证的压缩包；尚未验证最低 macOS 版本和完整运行行为 |
 

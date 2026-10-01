@@ -56,7 +56,7 @@ FlowLens includes four themes for true-color, ANSI 16-color, and monochrome term
 | Linux `x86_64` | glibc `2.28` or newer and root or `CAP_NET_RAW`; older dynamic archives also need matching libpcap |
 | Linux `aarch64` | glibc `2.28` or newer and root or `CAP_NET_RAW`; older dynamic archives also need matching libpcap |
 | Windows `x86_64` | Windows with [Npcap Runtime](https://npcap.com/) installed |
-| Windows `aarch64` | Windows on ARM with [Npcap Runtime](https://npcap.com/) installed |
+| Windows `aarch64` | Windows on ARM with [Npcap Runtime](https://npcap.com/) installed; cross-built and binary-audited, but ARM64 real-hardware capture is unverified |
 | macOS `x86_64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
 | macOS `aarch64` | Experimental, unsigned, and unnotarized archive; minimum macOS version and full runtime behavior are not validated |
 

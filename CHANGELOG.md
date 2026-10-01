@@ -14,6 +14,7 @@ All notable changes to FlowLens are recorded in this file.
 - Linux release builds now bundle checksum-pinned libpcap 1.10.7 while retaining dynamic glibc with the 2.28 baseline. Archives include the bundled library's license and copyright notices.
 - The system installer automatically prepares missing runtime packages on Debian/Ubuntu and RPM-family distributions after download verification and install preflight. Explicit `--setcap` also prepares the capability tool; default installs do not grant capabilities. User/custom installs, dry runs, and uninstalls do not change system packages.
 - macOS builds use system-only library linkage and explicit deployment targets, with binary audits and root loopback capture checks on native macOS 15 runners. macOS archives remain experimental, unsigned, and unnotarized; older systems and full runtime behavior remain unverified.
+- Windows ARM64 archives remain available with cross-build and binary/dependency audit coverage; ARM64 real-hardware capture is unverified and must be identified as a release limitation.
 
 ### Fixed
 
